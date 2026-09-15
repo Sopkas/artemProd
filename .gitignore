@@ -1,0 +1,47 @@
+# Local project context and synced reference materials
+/AGENTS.md
+/sources/
+/.agents/
+/.codex/
+
+# Credentials and local settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python environments, caches and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Runtime data and reports
+/data/
+/storage/
+/uploads/
+/reports/
+/logs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Editor and operating system files
+.DS_Store
+.idea/
+.vscode/
+~$*
