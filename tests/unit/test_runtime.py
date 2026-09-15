@@ -1,0 +1,73 @@
+import logging
+import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+
+from claims_assistant.runtime import app
+from claims_assistant.runtime.settings import ConfigurationError, Settings
+
+TOKEN = "123456789:synthetic_token_for_offline_tests_only"
+
+
+def test_safe_formatter_redacts_token_and_exception_content():
+    try:
+        raise RuntimeError("private customer comment")
+    except RuntimeError:
+        record = logging.LogRecord("test", logging.ERROR, "", 0, "URL/%s", (TOKEN,), sys.exc_info())
+    output = app.SafeFormatter(TOKEN).format(record)
+    assert TOKEN not in output
+    assert "private customer comment" not in output
+    assert "RuntimeError" in output
+
+
+def test_framework_error_body_is_not_logged():
+    record = logging.LogRecord(
+        "aiogram.dispatcher", logging.ERROR, "", 0, "response: %s", ("private text",), None
+    )
+    output = app.SafeFormatter(TOKEN).format(record)
+    assert "telegram_framework_event" in output
+    assert "private text" not in output
+    assert record.msg == "response: %s"
+
+
+@pytest.mark.parametrize("failure", [None, "polling", "startup", "webhook"])
+async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
+    bot = SimpleNamespace(
+        get_me=AsyncMock(),
+        get_webhook_info=AsyncMock(
+            return_value=SimpleNamespace(url="https://example.org" if failure == "webhook" else "")
+        ),
+        set_my_commands=AsyncMock(),
+        session=SimpleNamespace(close=AsyncMock()),
+    )
+    dispatcher = SimpleNamespace(start_polling=AsyncMock())
+    if failure == "polling":
+        dispatcher.start_polling.side_effect = RuntimeError("test failure")
+    if failure == "startup":
+        bot.set_my_commands.side_effect = RuntimeError("test failure")
+    monkeypatch.setattr(app, "Bot", Mock(return_value=bot))
+    monkeypatch.setattr(app, "create_dispatcher", Mock(return_value=dispatcher))
+    if failure:
+        with pytest.raises(ConfigurationError if failure == "webhook" else RuntimeError):
+            await app.run(Settings(TOKEN, frozenset({42})))
+    else:
+        await app.run(Settings(TOKEN, frozenset({42})))
+        commands = bot.set_my_commands.call_args.args[0]
+        assert [command.command for command in commands] == ["start", "help", "about"]
+        assert bot.set_my_commands.call_args.kwargs["scope"].type == "all_private_chats"
+        dispatcher.start_polling.assert_awaited_once_with(
+            bot, allowed_updates=["message"], close_bot_session=False
+        )
+    bot.session.close.assert_awaited_once()
+
+
+def test_missing_configuration_exits_before_network(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    bot_constructor = Mock()
+    monkeypatch.setattr(app, "Bot", bot_constructor)
+    assert app.main() == 2
+    assert "TELEGRAM_BOT_TOKEN" in capsys.readouterr().err
+    bot_constructor.assert_not_called()

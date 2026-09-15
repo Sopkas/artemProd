@@ -1,0 +1,1 @@
+"""Claims assistant Telegram application."""
