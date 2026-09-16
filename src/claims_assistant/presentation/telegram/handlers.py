@@ -75,7 +75,8 @@ def create_dispatcher(allowed_ids: frozenset[int]) -> Dispatcher:
         await message.answer(texts.NOTHING_TO_CANCEL, reply_markup=main_menu())
 
     @router.message()
-    async def fallback(message: Message) -> None:
+    async def fallback(message: Message, state: FSMContext) -> None:
+        await state.clear()
         await message.answer(texts.FALLBACK, reply_markup=main_menu())
 
     @dispatcher.errors()

@@ -100,3 +100,27 @@ async def test_unlisted_user_cannot_use_the_dialog(bot, update_factory, text):
     reply = await feed(create_dispatcher(frozenset({42})), bot, update_factory, text, user_id=99)
     assert reply.text == texts.access_denied(99)
     assert reply.reply_markup is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"contact": {"phone_number": "000", "first_name": "Test"}},
+        {"document": {"file_id": "test", "file_unique_id": "test"}, "caption": "/inn"},
+    ],
+)
+async def test_non_text_returns_menu_and_clears_dialog(bot, update_factory, payload):
+    dispatcher = create_dispatcher(frozenset({42}))
+    await feed(dispatcher, bot, update_factory, "/inn")
+    await dispatcher.feed_update(bot, update_factory(None, **payload))
+    assert buttons(bot.session.calls[-1]) == ["Проверить ИНН", "О сервисе", "Помощь"]
+    reply = await feed(dispatcher, bot, update_factory, VALID_INN)
+    assert reply.text == texts.FALLBACK
+
+
+async def test_group_cannot_enter_private_dialog(bot, update_factory):
+    dispatcher = create_dispatcher(frozenset({42}))
+    await dispatcher.feed_update(bot, update_factory("/inn", chat_type="group"))
+    assert not bot.session.calls
+    reply = await feed(dispatcher, bot, update_factory, VALID_INN)
+    assert reply.text == texts.FALLBACK
