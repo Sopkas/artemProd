@@ -74,8 +74,9 @@
       "role": "B",
       "sprint": 1,
       "hours": 6,
-      "status": "Бэклог",
-      "task_id": "fd73fec8-542e-4a13-8b31-6970bf989c2b"
+      "status": "На проверке",
+      "task_id": "fd73fec8-542e-4a13-8b31-6970bf989c2b",
+      "pull_request": "https://github.com/Sopkas/artemProd/pull/1"
     },
     {
       "roadmap_id": "S1-05",
