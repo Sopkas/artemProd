@@ -12,6 +12,20 @@ class Section(StrEnum):
     FINANCES = "finances"
 
 
+class FactKind(StrEnum):
+    COMPANY_NAME = "company_name"
+    COMPANY_STATUS = "company_status"
+    REVENUE = "revenue"
+    NET_PROFIT = "net_profit"
+    BANKRUPTCY_EVENT = "bankruptcy_event"
+
+
+class CompanyStatus(StrEnum):
+    ACTIVE = "active"
+    LIQUIDATING = "liquidating"
+    LIQUIDATED = "liquidated"
+
+
 class DataMode(StrEnum):
     DEMO = "demo"
     LIVE = "live"
@@ -29,6 +43,7 @@ class FetchStatus(StrEnum):
 class Coverage(StrEnum):
     COMPLETE = "complete"
     PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +68,8 @@ class Evidence:
 class Fact:
     id: str
     inn: str
-    kind: str
-    value: str | int | Decimal | bool | date | None
+    kind: FactKind
+    value: str | int | Decimal | bool | date | CompanyStatus | None
     evidence_ids: tuple[str, ...]
     observed_on: date | None = None
     period: Period | None = None
@@ -62,7 +77,21 @@ class Fact:
     missing_reason: str | None = None
 
     def __post_init__(self) -> None:
-        if self.value is not None and type(self.value) not in (str, int, Decimal, bool, date):
+        if not isinstance(self.kind, FactKind):
+            raise TypeError("Fact kind must be a FactKind")
+        if self.kind == FactKind.COMPANY_STATUS and self.value is not None:
+            if not isinstance(self.value, CompanyStatus):
+                raise TypeError("Company status must be a CompanyStatus")
+        elif isinstance(self.value, CompanyStatus):
+            raise TypeError("CompanyStatus is only valid for a company status fact")
+        if self.value is not None and type(self.value) not in (
+            str,
+            int,
+            Decimal,
+            bool,
+            date,
+            CompanyStatus,
+        ):
             raise TypeError("Fact value must use an exact supported type; floats are not allowed")
         if isinstance(self.value, Decimal) and not self.value.is_finite():
             raise ValueError("Decimal fact value must be finite")
@@ -107,17 +136,17 @@ class ExternalSnapshot:
                 if value.utcoffset() is None:
                     raise ValueError("Technical timestamps must include a timezone")
                 object.__setattr__(self, field, value.astimezone(UTC))
-        if self.coverage == Coverage.PARTIAL and not self.missing:
-            raise ValueError("Partial coverage requires a reason")
+        if self.coverage != Coverage.COMPLETE and not self.missing:
+            raise ValueError("Incomplete or unavailable coverage requires a reason")
         if self.coverage == Coverage.COMPLETE and self.missing:
             raise ValueError("Complete coverage cannot contain missing data")
         if self.status != FetchStatus.OK:
-            if self.coverage != Coverage.PARTIAL or self.error is None:
-                raise ValueError("Failed section requires partial coverage and a safe error")
+            if self.coverage != Coverage.UNAVAILABLE or self.error is None:
+                raise ValueError("Failed section requires unavailable coverage and a safe error")
             if self.facts or self.evidence:
                 raise ValueError("Failed section must not contain successful facts")
-        elif self.error is not None:
-            raise ValueError("Successful section cannot contain an error")
+        elif self.error is not None or self.coverage == Coverage.UNAVAILABLE:
+            raise ValueError("Successful section cannot be unavailable or contain an error")
         evidence_ids = {item.id for item in self.evidence}
         if len(evidence_ids) != len(self.evidence):
             raise ValueError("Duplicate evidence ID")

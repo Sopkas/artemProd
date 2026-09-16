@@ -6,11 +6,13 @@ from enum import StrEnum
 
 from claims_assistant.application.company_data import CompanyDataRequest
 from claims_assistant.domain.external import (
+    CompanyStatus,
     Coverage,
     DataMode,
     Evidence,
     ExternalSnapshot,
     Fact,
+    FactKind,
     FetchStatus,
     Period,
     ProviderError,
@@ -52,7 +54,7 @@ class DemoCompanyDataProvider:
             return ExternalSnapshot(
                 **base,
                 status=FetchStatus.UNAVAILABLE,
-                coverage=Coverage.PARTIAL,
+                coverage=Coverage.UNAVAILABLE,
                 missing=("Демонстрационный источник недоступен; раздел не проверен.",),
                 error=ProviderError("demo_unavailable", "Синтетический пример сбоя источника."),
             )
@@ -67,7 +69,9 @@ class DemoCompanyDataProvider:
         evidence = Evidence(f"{inn}:{section}:demo-record", source, f"demo:{section}")
         facts = []
 
-        def add(kind: str, value: str | Decimal, *, unit: str | None = None) -> None:
+        def add(
+            kind: FactKind, value: str | Decimal | CompanyStatus, *, unit: str | None = None
+        ) -> None:
             facts.append(
                 Fact(
                     id=f"{inn}:{section}:{kind}",
@@ -82,18 +86,18 @@ class DemoCompanyDataProvider:
             )
 
         if section == Section.COMPANY:
-            add("company_name", "ДЕМО — вымышленная компания")
-            add("company_status", "active")
+            add(FactKind.COMPANY_NAME, "ДЕМО — вымышленная компания")
+            add(FactKind.COMPANY_STATUS, CompanyStatus.ACTIVE)
         elif section == Section.FINANCES:
-            add("revenue", Decimal("12000000.00"), unit="RUB")
-            add("net_profit", Decimal("0.00"), unit="RUB")
+            add(FactKind.REVENUE, Decimal("12000000.00"), unit="RUB")
+            add(FactKind.NET_PROFIT, Decimal("0.00"), unit="RUB")
         elif self.scenario == DemoScenario.ALARM:
-            add("bankruptcy_event", "ДЕМО — сообщение о введении наблюдения")
+            add(FactKind.BANKRUPTCY_EVENT, "ДЕМО — сообщение о введении наблюдения")
         return ExternalSnapshot(
             **base,
             status=FetchStatus.OK,
             coverage=Coverage.COMPLETE,
-            covered_period=period,
+            covered_period=None if section == Section.COMPANY else period,
             facts=tuple(facts),
             # Even a complete empty selection has a synthetic source record.
             evidence=(evidence,),

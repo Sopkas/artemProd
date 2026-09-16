@@ -10,12 +10,15 @@ from claims_assistant.application.company_data import (
     RequestLimits,
 )
 from claims_assistant.domain.external import (
+    CompanyStatus,
     Coverage,
     DataMode,
     ExternalSnapshot,
     Fact,
+    FactKind,
     FetchStatus,
     Period,
+    ProviderError,
     Section,
 )
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
@@ -57,11 +60,11 @@ async def test_empty_complete_selection_differs_from_missing_data_and_error():
     failed = results[DemoScenario.ERROR][1]
     assert ordinary.facts == () and ordinary.coverage == Coverage.COMPLETE
     assert ordinary.status == FetchStatus.OK and ordinary.covered_period is not None
-    assert alarm.facts[0].kind == "bankruptcy_event"
+    assert alarm.facts[0].kind == FactKind.BANKRUPTCY_EVENT
     assert "ДЕМО" in alarm.facts[0].value
     assert partial.facts == () and partial.coverage == Coverage.PARTIAL and partial.missing
     assert partial.status == FetchStatus.OK
-    assert failed.facts == () and failed.coverage == Coverage.PARTIAL and failed.error
+    assert failed.facts == () and failed.coverage == Coverage.UNAVAILABLE and failed.error
     assert failed.status == FetchStatus.UNAVAILABLE
     incomplete = results[DemoScenario.INCOMPLETE]
     assert incomplete[0].status == FetchStatus.OK
@@ -81,16 +84,16 @@ async def test_requested_subset_order_and_exact_zero_are_preserved():
 @pytest.mark.parametrize("value", [0.1, Decimal("NaN"), Decimal("Infinity")])
 def test_inexact_or_nonfinite_fact_is_rejected(value):
     with pytest.raises((TypeError, ValueError)):
-        Fact("f", INN, "revenue", value, ("e",), observed_on=date(2025, 12, 31))
+        Fact("f", INN, FactKind.REVENUE, value, ("e",), observed_on=date(2025, 12, 31))
 
 
 def test_unknown_value_requires_reason_and_is_distinct_from_zero():
     with pytest.raises(ValueError, match="reason"):
-        Fact("f", INN, "revenue", None, ("e",), observed_on=date(2025, 12, 31))
+        Fact("f", INN, FactKind.REVENUE, None, ("e",), observed_on=date(2025, 12, 31))
     fact = Fact(
         "f",
         INN,
-        "revenue",
+        FactKind.REVENUE,
         None,
         ("e",),
         observed_on=date(2025, 12, 31),
@@ -151,3 +154,59 @@ def test_bad_section_requests_are_rejected(sections):
 def test_invalid_limits_are_rejected(limits):
     with pytest.raises(ValueError):
         RequestLimits(**limits)
+
+
+@pytest.mark.parametrize("status", [s for s in FetchStatus if s != FetchStatus.OK])
+@pytest.mark.parametrize("coverage", list(Coverage))
+def test_failed_section_requires_unavailable_coverage(status, coverage):
+    args = dict(
+        inn=INN,
+        section=Section.FINANCES,
+        source="test",
+        mode=DataMode.DEMO,
+        fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+        status=status,
+        coverage=coverage,
+        missing=("No verified data",),
+        error=ProviderError("test_failure", "Unavailable"),
+    )
+    if coverage == Coverage.UNAVAILABLE:
+        assert ExternalSnapshot(**args).facts == ()
+    else:
+        with pytest.raises(ValueError):
+            ExternalSnapshot(**args)
+
+
+async def test_success_cannot_be_unavailable_and_failure_cannot_claim_facts():
+    company = (await DemoCompanyDataProvider().fetch(CompanyDataRequest(INN)))[0]
+    with pytest.raises(ValueError):
+        replace(company, coverage=Coverage.UNAVAILABLE, missing=("No data",))
+    with pytest.raises(ValueError):
+        replace(
+            company,
+            status=FetchStatus.UNAVAILABLE,
+            coverage=Coverage.UNAVAILABLE,
+            missing=("No data",),
+            error=ProviderError("failed", "Unavailable"),
+        )
+    failed = (await DemoCompanyDataProvider(DemoScenario.ERROR).fetch(CompanyDataRequest(INN)))[0]
+    with pytest.raises(ValueError):
+        replace(failed, missing=())
+    with pytest.raises(ValueError):
+        replace(failed, error=None)
+
+
+async def test_fact_kinds_and_company_status_are_typed_and_point_in_time():
+    company, _, finance = await DemoCompanyDataProvider().fetch(CompanyDataRequest(INN))
+    assert all(isinstance(f.kind, FactKind) for f in (*company.facts, *finance.facts))
+    status = next(f for f in company.facts if f.kind == FactKind.COMPANY_STATUS)
+    assert status.value is CompanyStatus.ACTIVE
+    assert company.covered_period is None
+    assert all(f.observed_on is not None and f.period is None for f in company.facts)
+    assert finance.covered_period == Period(date(2025, 1, 1), date(2025, 12, 31))
+    with pytest.raises(TypeError):
+        replace(status, value="active")
+    with pytest.raises(TypeError):
+        replace(status, kind="company_status")
+    with pytest.raises(TypeError):
+        replace(status, kind=FactKind.REVENUE)
