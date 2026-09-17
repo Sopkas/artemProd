@@ -1,0 +1,42 @@
+# Контракт хранения проверки — S2-01
+
+Предложение A на согласование B до реализации SQLite и миграций. Это общие типы: `domain.analysis` и интерфейс `application.analysis_repository`. Эталонная реализация в памяти — `infrastructure.memory.analysis.InMemoryAnalysisRepository`; реализация на SQLite/SQLAlchemy/Alembic появится вторым PR после согласования и должна пройти те же контрактные тесты `tests/unit/test_analysis_repository.py` без изменений.
+
+## Что хранится
+
+| Тип | Поля | Правила |
+| --- | --- | --- |
+| `AnalysisRun` | `id`, `owner_id` (Telegram ID > 0), `analysis_date` (календарная дата), `mode` (`demo`/`live`), `status`, `created_at`, `updated_at` (UTC), `files` | Все файлы принадлежат этой проверке; `updated_at ≥ created_at` |
+| `UploadedFile` | `id`, `run_id`, `kind`, `checksum` (SHA-256, hex в нижнем регистре), `size_bytes` > 0, `stored_path` (относительный путь внутри хранилища, без `..` и абсолютных путей), `uploaded_at` (UTC), `coverage` (`Period` или `None`) | `coverage` — период, который пользователь подтвердил для платежей/взаимодействий; для контрагентов обычно `None` |
+| `FileKind` | `counterparties`, `payments`, `interactions`, `debt_history` | Листы из [контрактов данных](data-contracts.md); тип называет пользователь при загрузке |
+| `RunStatus` | `draft → queued → running → completed \| partial \| failed` | Как в [архитектуре](architecture.md); финальные состояния без выходов; `can_transition()` — единственный источник правил |
+
+Содержимое файлов и результаты разбора строк в этом контракте **не хранятся**: файл лежит на диске по `stored_path`, ошибки строк — результат импорта (S2-04) и добавятся отдельным типом при S2-03. Результаты шагов по ключу `(run_id, inn, step, version)` и очередь заданий — S2-02/S3-03, отдельным PR.
+
+## Интерфейс `AnalysisRepository`
+
+Асинхронный, как `CompanyDataProvider`. Каждый вызов принимает `owner_id`: проверка другого владельца и несуществующая проверка дают одинаковый `RunNotFound` без ID в сообщении.
+
+| Метод | Результат | Ошибки |
+| --- | --- | --- |
+| `create_run(owner_id, analysis_date, mode)` | Новый `draft` без файлов | — |
+| `get_run(owner_id, run_id)` | Снимок проверки с файлами | `RunNotFound` |
+| `list_runs(owner_id)` | Проверки владельца, новые первыми | — |
+| `add_file(owner_id, run_id, NewFile)` | Сохранённый `UploadedFile` | `RunNotFound`; `RunLocked`, если проверка уже не `draft` |
+| `transition(owner_id, run_id, target)` | Снимок с новым статусом и `updated_at` | `RunNotFound`; `InvalidTransition(current, requested)`, состояние не меняется |
+
+- Повтор одного файла (тот же `kind` и `checksum`) возвращает уже сохранённый файл и не создаёт дубликат — «повтор файла в пакете не дублирует строки».
+- Пакет замораживается при переходе в `queued`: новые файлы требуют новой проверки.
+- Возвращаемые объекты — неизменяемые снимки; последующие изменения в хранилище их не трогают.
+- `RepositoryError` — техническая неисправность хранилища; реализация обязана бросать её, а не возвращать пустой успешный результат.
+- `NewFile` проверяет те же инварианты, что `UploadedFile`, до обращения к хранилищу.
+
+## Что просить у B
+
+1. Достаточно ли `coverage` на файле для S2-04/S2-05, или период покрытия нужен и на уровне проверки.
+2. Нужен ли `analysis_date` в `UploadedFile` (сейчас — только у проверки, «пакет имеет единую дату анализа»).
+3. Ошибки строк импорта: отдельный тип `ImportIssue(file_id, sheet, row, column, reason)` в S2-03 — согласовать форму заранее, чтобы парсер S2-04 возвращал её же.
+
+## Проверка
+
+`tests/unit/test_analysis_domain.py` (инварианты типов и переходы) и `tests/unit/test_analysis_repository.py` (контракт, параметризован по реализациям; сейчас `memory`). Новых зависимостей нет.
