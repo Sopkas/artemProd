@@ -1,5 +1,6 @@
 import pytest
 
+from claims_assistant.infrastructure.demo.company_data import DemoScenario
 from claims_assistant.runtime.settings import ConfigurationError, Settings
 
 TOKEN = "123456789:synthetic_token_for_offline_tests_only"
@@ -7,7 +8,7 @@ TOKEN = "123456789:synthetic_token_for_offline_tests_only"
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch):
-    for key in ("TELEGRAM_BOT_TOKEN", "ALLOWED_TELEGRAM_IDS", "LOG_LEVEL"):
+    for key in ("TELEGRAM_BOT_TOKEN", "ALLOWED_TELEGRAM_IDS", "LOG_LEVEL", "DEMO_SCENARIO"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -50,6 +51,23 @@ def test_rejects_token_without_disclosing_value(raw, tmp_path, monkeypatch):
         Settings.load(tmp_path / "missing.env")
     if raw:
         assert raw not in str(error.value)
+
+
+def test_demo_scenario_defaults_to_ordinary_and_accepts_any_case(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    assert Settings.load(tmp_path / "missing.env").demo_scenario == DemoScenario.ORDINARY
+    monkeypatch.setenv("DEMO_SCENARIO", " Alarm ")
+    assert Settings.load(tmp_path / "missing.env").demo_scenario == DemoScenario.ALARM
+
+
+def test_invalid_demo_scenario(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("DEMO_SCENARIO", "secret")
+    with pytest.raises(ConfigurationError, match="DEMO_SCENARIO") as error:
+        Settings.load(tmp_path / "missing.env")
+    assert "secret" not in str(error.value)
 
 
 def test_invalid_log_level(tmp_path, monkeypatch):

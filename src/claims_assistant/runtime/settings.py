@@ -6,6 +6,8 @@ from pathlib import Path
 from aiogram.utils.token import TokenValidationError, validate_token
 from dotenv import dotenv_values
 
+from claims_assistant.infrastructure.demo.company_data import DemoScenario
+
 
 class ConfigurationError(ValueError):
     """Safe, user-facing configuration error without the rejected value."""
@@ -16,6 +18,8 @@ class Settings:
     token: str = field(repr=False)
     allowed_ids: frozenset[int]
     log_level: str = "INFO"
+    # Which synthetic answer the demo provider gives; the scenario is never chosen by INN.
+    demo_scenario: DemoScenario = DemoScenario.ORDINARY
 
     @classmethod
     def load(cls, env_file: Path = Path(".env")) -> "Settings":
@@ -47,4 +51,11 @@ class Settings:
         level = (values.get("LOG_LEVEL") or "INFO").strip().upper()
         if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ConfigurationError("LOG_LEVEL: допустимы DEBUG, INFO, WARNING, ERROR, CRITICAL.")
-        return cls(token=token, allowed_ids=allowed_ids, log_level=level)
+
+        raw_scenario = (values.get("DEMO_SCENARIO") or "").strip().lower() or "ordinary"
+        try:
+            scenario = DemoScenario(raw_scenario)
+        except ValueError:
+            allowed = ", ".join(item.value for item in DemoScenario)
+            raise ConfigurationError(f"DEMO_SCENARIO: допустимы {allowed}.") from None
+        return cls(token=token, allowed_ids=allowed_ids, log_level=level, demo_scenario=scenario)

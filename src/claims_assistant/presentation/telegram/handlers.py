@@ -7,10 +7,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ErrorEvent, Message
 
-from claims_assistant.domain.inn import InvalidInn, validate_legal_inn
+from claims_assistant.application.check_company import check_company
+from claims_assistant.application.company_data import CompanyDataProvider
+from claims_assistant.domain.inn import InvalidInn
+from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 
 from . import texts
 from .access import AccessMiddleware
+from .card import format_card
 from .menu import CANCEL, CHECK_INN, cancel_menu, main_menu
 
 logger = logging.getLogger(__name__)
@@ -20,7 +24,11 @@ class InnDialog(StatesGroup):
     waiting_for_inn = State()
 
 
-def create_dispatcher(allowed_ids: frozenset[int]) -> Dispatcher:
+def create_dispatcher(
+    allowed_ids: frozenset[int], provider: CompanyDataProvider | None = None
+) -> Dispatcher:
+    if provider is None:
+        provider = DemoCompanyDataProvider()
     # Dialog state lives in memory: it is short and may be lost on restart (S0-03, remark 2).
     dispatcher = Dispatcher()
     router = Router(name="shell")
@@ -63,12 +71,18 @@ def create_dispatcher(allowed_ids: frozenset[int]) -> Dispatcher:
     @router.message(InnDialog.waiting_for_inn, F.text)
     async def receive_inn(message: Message, state: FSMContext) -> None:
         try:
-            inn = validate_legal_inn(message.text or "")
+            check = await check_company(message.text or "", provider)
         except InvalidInn as error:
             await message.answer(texts.inn_invalid(str(error)), reply_markup=cancel_menu())
             return
+        except Exception as exc:
+            # The INN and the provider's message may be private; log only the error type.
+            logger.error("check_failed error_type=%s", type(exc).__name__)
+            await state.clear()
+            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
         await state.clear()
-        await message.answer(texts.inn_accepted(inn), reply_markup=main_menu())
+        await message.answer(format_card(check), reply_markup=main_menu())
 
     @router.message(StateFilter(None), Command("cancel"))
     async def nothing_to_cancel(message: Message) -> None:

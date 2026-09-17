@@ -6,6 +6,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommandScopeAllPrivateChats
 
+from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 from claims_assistant.presentation.telegram.menu import bot_commands
 
@@ -51,7 +52,9 @@ async def run(settings: Settings) -> None:
                 "Для этого бота уже настроен webhook. Отключите его перед локальным запуском."
             )
         await bot.set_my_commands(bot_commands(), scope=BotCommandScopeAllPrivateChats())
-        dispatcher = create_dispatcher(settings.allowed_ids)
+        dispatcher = create_dispatcher(
+            settings.allowed_ids, DemoCompanyDataProvider(settings.demo_scenario)
+        )
         logger.info("bot_started")
         await dispatcher.start_polling(bot, allowed_updates=["message"], close_bot_session=False)
     finally:
