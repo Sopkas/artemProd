@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from claims_assistant.application.analysis_repository import RepositoryError
+from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
+from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
+from claims_assistant.infrastructure.storage.local import LocalFileStorage
 from claims_assistant.runtime import app
 from claims_assistant.runtime.settings import ConfigurationError, Settings
 
@@ -68,6 +71,11 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
     else:
         await app.run(settings)
         provider = create_dispatcher.call_args.args[1]
+        kwargs = create_dispatcher.call_args.kwargs
+        assert kwargs["repository"] is repository
+        assert isinstance(kwargs["files"], LocalFileStorage)
+        assert isinstance(kwargs["reader"], OpenpyxlSheetReader)
+        assert kwargs["mode"] == DataMode.DEMO
         assert isinstance(provider, DemoCompanyDataProvider)
         assert provider.scenario == DemoScenario.ALARM
         commands = bot.set_my_commands.call_args.args[0]
@@ -76,6 +84,8 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
             "help",
             "about",
             "inn",
+            "check",
+            "status",
             "cancel",
         ]
         assert bot.set_my_commands.call_args.kwargs["scope"].type == "all_private_chats"

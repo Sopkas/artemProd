@@ -7,9 +7,12 @@ from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommandScopeAllPrivateChats
 
 from claims_assistant.application.analysis_repository import RepositoryError
+from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
+from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
+from claims_assistant.infrastructure.storage.local import LocalFileStorage
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 from claims_assistant.presentation.telegram.menu import bot_commands
 
@@ -66,7 +69,14 @@ async def run(settings: Settings) -> None:
                 if settings.data_provider == "checko"
                 else DemoCompanyDataProvider(settings.demo_scenario)
             )
-            dispatcher = create_dispatcher(settings.allowed_ids, provider)
+            dispatcher = create_dispatcher(
+                settings.allowed_ids,
+                provider,
+                repository=repository,
+                files=LocalFileStorage(settings.storage_path),
+                reader=OpenpyxlSheetReader(),
+                mode=DataMode.LIVE if settings.data_provider == "checko" else DataMode.DEMO,
+            )
             logger.info("bot_started")
             await dispatcher.start_polling(
                 bot, allowed_updates=["message"], close_bot_session=False
