@@ -262,3 +262,19 @@ async def test_recover_interrupted_leaves_other_statuses_alone(repository):
     assert await repository.recover_interrupted() == ()
     assert (await repository.get_run(OWNER, draft.id)).status == RunStatus.DRAFT
     assert (await repository.get_run(OWNER, queued.id)).status == RunStatus.QUEUED
+
+
+async def test_claim_and_recovery_order_is_creation_order_when_timestamps_tie(tmp_path):
+    """Both implementations must break ties the same way: by creation sequence."""
+    frozen = lambda: START  # noqa: E731 — a clock that never moves
+    for repository in (
+        InMemoryAnalysisRepository(clock=frozen),
+        open_sqlite_repository(tmp_path / "tie.sqlite3", clock=frozen),
+    ):
+        runs = [await queued_run(repository) for _ in range(3)]
+        assert [run.updated_at for run in runs] == [START] * 3
+        assert (await repository.claim_next()).id == runs[0].id
+        assert (await repository.claim_next()).id == runs[1].id
+        assert (await repository.claim_next()).id == runs[2].id
+        recovered = await repository.recover_interrupted()
+        assert [run.id for run in recovered] == [run.id for run in runs]

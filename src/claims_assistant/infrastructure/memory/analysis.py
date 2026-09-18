@@ -24,6 +24,8 @@ class InMemoryAnalysisRepository:
     def __init__(self, clock: Callable[[], datetime] = _now) -> None:
         self._clock = clock
         self._runs: dict[str, AnalysisRun] = {}
+        # Creation order, the same tie-breaker the SQLite implementation stores as `sequence`.
+        self._sequence: dict[str, int] = {}
 
     async def create_run(self, owner_id: int, analysis_date: date, mode: DataMode) -> AnalysisRun:
         now = self._clock()
@@ -37,6 +39,7 @@ class InMemoryAnalysisRepository:
             updated_at=now,
         )
         self._runs[run.id] = run
+        self._sequence[run.id] = len(self._sequence) + 1
         return run
 
     async def get_run(self, owner_id: int, run_id: str) -> AnalysisRun:
@@ -47,7 +50,9 @@ class InMemoryAnalysisRepository:
 
     async def list_runs(self, owner_id: int) -> tuple[AnalysisRun, ...]:
         mine = [run for run in self._runs.values() if run.owner_id == owner_id]
-        return tuple(sorted(mine, key=lambda run: run.created_at, reverse=True))
+        return tuple(
+            sorted(mine, key=lambda run: (run.created_at, self._sequence[run.id]), reverse=True)
+        )
 
     async def add_file(self, owner_id: int, run_id: str, file: NewFile) -> UploadedFile:
         run = await self.get_run(owner_id, run_id)
@@ -84,7 +89,7 @@ class InMemoryAnalysisRepository:
         queued = [run for run in self._runs.values() if run.status == RunStatus.QUEUED]
         if not queued:
             return None
-        run = min(queued, key=lambda item: (item.updated_at, item.created_at))
+        run = min(queued, key=lambda item: (item.updated_at, self._sequence[item.id]))
         claimed = replace(
             run, status=RunStatus.RUNNING, attempts=run.attempts + 1, updated_at=self._clock()
         )
@@ -105,9 +110,8 @@ class InMemoryAnalysisRepository:
 
     async def recover_interrupted(self) -> tuple[AnalysisRun, ...]:
         recovered = []
-        for run in list(self._runs.values()):
-            if run.status != RunStatus.RUNNING:
-                continue
+        running = [run for run in self._runs.values() if run.status == RunStatus.RUNNING]
+        for run in sorted(running, key=lambda item: self._sequence[item.id]):
             if run.attempts >= MAX_ATTEMPTS:
                 updated = replace(
                     run, status=RunStatus.FAILED, failure=GAVE_UP, updated_at=self._clock()
