@@ -29,7 +29,10 @@ analysis_runs = Table(
     Column("created_at", String(32), nullable=False),
     Column("updated_at", String(32), nullable=False),
     Column("sequence", Integer, nullable=False),
+    Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("failure", String(500), nullable=True),
     Index("ix_analysis_runs_owner_created", "owner_id", "created_at", "sequence"),
+    Index("ix_analysis_runs_status_updated", "status", "updated_at"),
 )
 
 uploaded_files = Table(

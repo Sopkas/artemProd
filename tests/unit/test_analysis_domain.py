@@ -51,6 +51,7 @@ def make_run(**overrides) -> AnalysisRun:
         (RunStatus.RUNNING, RunStatus.COMPLETED, True),
         (RunStatus.RUNNING, RunStatus.PARTIAL, True),
         (RunStatus.RUNNING, RunStatus.FAILED, True),
+        (RunStatus.RUNNING, RunStatus.QUEUED, True),  # restart recovery
         (RunStatus.DRAFT, RunStatus.RUNNING, False),
         (RunStatus.DRAFT, RunStatus.COMPLETED, False),
         (RunStatus.QUEUED, RunStatus.DRAFT, False),
@@ -164,3 +165,29 @@ def test_file_metadata_requires_domain_types(fields):
     values.update(fields)
     with pytest.raises(ValueError):
         NewFile(**values)
+
+
+def test_run_defaults_have_no_attempts_and_no_failure():
+    run = make_run()
+    assert run.attempts == 0 and run.failure is None
+
+
+@pytest.mark.parametrize("status", [RunStatus.FAILED, RunStatus.PARTIAL])
+def test_failure_text_is_allowed_for_failed_and_partial_runs(status):
+    run = make_run(status=status, failure="Источник недоступен", attempts=2)
+    assert run.failure == "Источник недоступен" and run.attempts == 2
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"attempts": -1},
+        {"attempts": 1.0},
+        {"failure": ""},
+        {"status": RunStatus.RUNNING, "failure": "x"},
+        {"status": RunStatus.COMPLETED, "failure": "x"},
+    ],
+)
+def test_run_rejects_bad_attempts_and_misplaced_failure(overrides):
+    with pytest.raises(ValueError):
+        make_run(**overrides)
