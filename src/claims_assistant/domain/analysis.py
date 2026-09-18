@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 
 from .external import DataMode, Period
 
@@ -54,7 +54,16 @@ def validate_checksum(checksum: str) -> None:
 
 def validate_stored_path(path: str) -> None:
     parts = PurePosixPath(path)
-    if not path or parts.is_absolute() or ".." in parts.parts or "\\" in path:
+    if (
+        not path
+        or not parts.parts
+        or parts.is_absolute()
+        or ".." in parts.parts
+        or "\\" in path
+        or ":" in path
+        or "\x00" in path
+        or PureWindowsPath(path).drive
+    ):
         raise ValueError("Stored path must be relative to the storage root and stay inside it")
 
 
@@ -72,6 +81,10 @@ class UploadedFile:
     def __post_init__(self) -> None:
         if not self.id or not self.run_id:
             raise ValueError("File and run identifiers must not be empty")
+        if not isinstance(self.kind, FileKind):
+            raise ValueError("File kind must be a FileKind")
+        if self.coverage is not None and not isinstance(self.coverage, Period):
+            raise ValueError("Coverage must be a Period or None")
         validate_checksum(self.checksum)
         if type(self.size_bytes) is not int or self.size_bytes <= 0:
             raise ValueError("File size must be a positive integer")
@@ -91,6 +104,12 @@ class AnalysisRun:
     files: tuple[UploadedFile, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.analysis_date) is not date:
+            raise ValueError("Analysis date must be a calendar date")
+        if not isinstance(self.mode, DataMode) or not isinstance(self.status, RunStatus):
+            raise ValueError("Run mode and status must be enums")
+        if not isinstance(self.files, tuple):
+            raise ValueError("Files must be an immutable tuple")
         if not self.id:
             raise ValueError("Run identifier must not be empty")
         if type(self.owner_id) is not int or self.owner_id <= 0:

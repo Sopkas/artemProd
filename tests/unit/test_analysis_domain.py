@@ -126,3 +126,41 @@ def test_file_kinds_match_the_data_contracts():
         "interactions",
         "debt_history",
     }
+
+
+@pytest.mark.parametrize(
+    "path", [".", "./", "C:/outside.xlsx", "C:outside.xlsx", "file:stream", "bad\x00name"]
+)
+def test_storage_path_is_safe_on_windows_and_posix(path):
+    from claims_assistant.application.analysis_repository import NewFile
+
+    with pytest.raises(ValueError):
+        make_file(stored_path=path)
+    with pytest.raises(ValueError):
+        NewFile(FileKind.PAYMENTS, CHECKSUM, 1, path)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"analysis_date": NOW},
+        {"mode": "demo"},
+        {"status": "draft"},
+        {"files": []},
+    ],
+)
+def test_run_rejects_invalid_or_mutable_values(fields):
+    with pytest.raises(ValueError):
+        make_run(**fields)
+
+
+@pytest.mark.parametrize("fields", [{"kind": "payments"}, {"coverage": "2025"}])
+def test_file_metadata_requires_domain_types(fields):
+    from claims_assistant.application.analysis_repository import NewFile
+
+    with pytest.raises(ValueError):
+        make_file(**fields)
+    values = dict(kind=FileKind.PAYMENTS, checksum=CHECKSUM, size_bytes=1, stored_path="a.xlsx")
+    values.update(fields)
+    with pytest.raises(ValueError):
+        NewFile(**values)

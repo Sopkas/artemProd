@@ -50,6 +50,10 @@ class NewFile:
     coverage: Period | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.kind, FileKind):
+            raise ValueError("File kind must be a FileKind")
+        if self.coverage is not None and not isinstance(self.coverage, Period):
+            raise ValueError("Coverage must be a Period or None")
         validate_checksum(self.checksum)
         if type(self.size_bytes) is not int or self.size_bytes <= 0:
             raise ValueError("File size must be a positive integer")
