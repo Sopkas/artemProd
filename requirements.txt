@@ -7,10 +7,12 @@ aiosignal==1.4.0
 annotated-types==0.8.0
 attrs==26.1.0
 certifi==2026.7.22
+et-xmlfile==2.0.0
 frozenlist==1.8.0
 idna==3.19
 magic-filter==1.0.12
 multidict==6.8.0
+openpyxl==3.1.5
 propcache==0.5.2
 pydantic==2.13.5
 pydantic-core==2.46.5
