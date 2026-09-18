@@ -63,7 +63,7 @@ async def test_incomplete_card_separates_partial_and_unavailable():
 async def test_error_card_marks_every_section_unavailable_and_promises_nothing():
     text = await card_for(DemoScenario.ERROR)
     assert text.count("— раздел недоступен") == 3
-    assert "Источник:" not in text
+    assert text.count("Источник:") == 3
     assert "приоритет" not in text.lower()
     assert "риск" not in text.lower()
 
