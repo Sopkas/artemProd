@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from claims_assistant.infrastructure.demo.company_data import DemoScenario
@@ -8,7 +10,13 @@ TOKEN = "123456789:synthetic_token_for_offline_tests_only"
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch):
-    for key in ("TELEGRAM_BOT_TOKEN", "ALLOWED_TELEGRAM_IDS", "LOG_LEVEL", "DEMO_SCENARIO"):
+    for key in (
+        "TELEGRAM_BOT_TOKEN",
+        "ALLOWED_TELEGRAM_IDS",
+        "LOG_LEVEL",
+        "DEMO_SCENARIO",
+        "DATABASE_PATH",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -51,6 +59,17 @@ def test_rejects_token_without_disclosing_value(raw, tmp_path, monkeypatch):
         Settings.load(tmp_path / "missing.env")
     if raw:
         assert raw not in str(error.value)
+
+
+def test_database_path_defaults_to_data_dir_and_accepts_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    assert Settings.load(tmp_path / "missing.env").database_path == Path("data/claims.sqlite3")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "other.sqlite3"))
+    assert Settings.load(tmp_path / "missing.env").database_path == tmp_path / "other.sqlite3"
+    monkeypatch.setenv("DATABASE_PATH", "   ")
+    with pytest.raises(ConfigurationError, match="DATABASE_PATH"):
+        Settings.load(tmp_path / "missing.env")
 
 
 def test_demo_scenario_defaults_to_ordinary_and_accepts_any_case(tmp_path, monkeypatch):

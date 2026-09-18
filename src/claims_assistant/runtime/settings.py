@@ -20,6 +20,8 @@ class Settings:
     log_level: str = "INFO"
     # Which synthetic answer the demo provider gives; the scenario is never chosen by INN.
     demo_scenario: DemoScenario = DemoScenario.ORDINARY
+    # SQLite file with runs and uploaded files; created with its directory on first start.
+    database_path: Path = Path("data/claims.sqlite3")
 
     @classmethod
     def load(cls, env_file: Path = Path(".env")) -> "Settings":
@@ -58,4 +60,17 @@ class Settings:
         except ValueError:
             allowed = ", ".join(item.value for item in DemoScenario)
             raise ConfigurationError(f"DEMO_SCENARIO: допустимы {allowed}.") from None
-        return cls(token=token, allowed_ids=allowed_ids, log_level=level, demo_scenario=scenario)
+        raw_path = values.get("DATABASE_PATH")
+        if raw_path is None:
+            database_path = Path("data/claims.sqlite3")
+        elif not raw_path.strip():
+            raise ConfigurationError("DATABASE_PATH: укажите путь к файлу базы данных.")
+        else:
+            database_path = Path(raw_path.strip())
+        return cls(
+            token=token,
+            allowed_ids=allowed_ids,
+            log_level=level,
+            demo_scenario=scenario,
+            database_path=database_path,
+        )

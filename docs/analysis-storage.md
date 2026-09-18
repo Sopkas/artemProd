@@ -39,9 +39,18 @@
 2. Нужен ли `analysis_date` в `UploadedFile` (сейчас — только у проверки, «пакет имеет единую дату анализа»).
 3. Ошибки строк импорта: отдельный тип `ImportIssue(file_id, sheet, row, column, reason)` в S2-03 — согласовать форму заранее, чтобы парсер S2-04 возвращал её же.
 
+## Реализация на SQLite — шаг 2
+
+`infrastructure/persistence/sqlite.py`: `open_sqlite_repository(path)` создаёт каталог и файл, применяет миграции Alembic до `head` и возвращает `SqliteAnalysisRepository`. Блокирующая работа с БД выполняется в рабочем потоке (`asyncio.to_thread`), поэтому цикл Telegram не блокируется; сетевых вызовов внутри транзакций нет.
+
+- Схема: `analysis_runs` (id, owner_id, analysis_date, mode, status, created_at, updated_at, sequence) и `uploaded_files` (id, run_id → analysis_runs, kind, checksum, size_bytes, stored_path, uploaded_at, coverage_start/end, sequence) с уникальностью `(run_id, kind, checksum)`. Технические времена — ISO 8601 в UTC текстом; даты — ISO-даты; `sequence` задаёт порядок при равных временах.
+- Миграции лежат внутри пакета (`persistence/migrations/`), чтобы работать и из установленного wheel; `alembic.ini` в корне — для `alembic revision --autogenerate` и `alembic check` (дрейф схемы относительно `schema.py`).
+- Все методы owner-scoped на уровне запроса (`WHERE id = ? AND owner_id = ?`); `SQLAlchemyError` и обращение к закрытому хранилищу → `RepositoryError`.
+- Приложение открывает хранилище при старте до опроса Telegram (`DATABASE_PATH`); сбой БД останавливает запуск с кодом 1, а не превращается в пустые ответы.
+
 ## Проверка
 
-`tests/unit/test_analysis_domain.py` (инварианты типов и переходы) и `tests/unit/test_analysis_repository.py` (контракт, параметризован по реализациям; сейчас `memory`). Новых зависимостей нет.
+`tests/unit/test_analysis_domain.py` (инварианты типов и переходы), `tests/unit/test_analysis_repository.py` (контракт, параметризован по реализациям `memory` и `sqlite` — один и тот же набор), `tests/integration/test_sqlite_storage.py` (переживает переоткрытие файла, повторная миграция, создание каталога, сбой → `RepositoryError`, изоляция владельцев после перезапуска). Зависимости: `sqlalchemy`, `alembic` (закреплены в `requirements.txt`).
 
 
 ## Ответ B по контракту — 18.09.2026
