@@ -16,6 +16,7 @@ from alembic.config import Config
 from sqlalchemy import Connection, Engine, create_engine, event, func, select
 from sqlalchemy.exc import SQLAlchemyError
 
+from claims_assistant.application.analysis_queue import GAVE_UP, MAX_ATTEMPTS, RunOutcome
 from claims_assistant.application.analysis_repository import (
     InvalidTransition,
     NewFile,
@@ -103,6 +104,15 @@ class SqliteAnalysisRepository:
 
     async def transition(self, owner_id: int, run_id: str, target: RunStatus) -> AnalysisRun:
         return await self._run(self._transition, owner_id, run_id, target)
+
+    async def claim_next(self) -> AnalysisRun | None:
+        return await self._run(self._claim_next)
+
+    async def finish(self, run_id: str, outcome: RunOutcome) -> AnalysisRun:
+        return await self._run(self._finish, run_id, outcome)
+
+    async def recover_interrupted(self) -> tuple[AnalysisRun, ...]:
+        return await self._run(self._recover_interrupted)
 
     async def _run(self, operation, *args):
         if self._closed:
@@ -216,6 +226,77 @@ class SqliteAnalysisRepository:
             )
             return self._load_run(connection, owner_id, run_id)
 
+    def _claim_next(self) -> AnalysisRun | None:
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(analysis_runs.c.id)
+                .where(analysis_runs.c.status == RunStatus.QUEUED.value)
+                .order_by(analysis_runs.c.updated_at, analysis_runs.c.sequence)
+                .limit(1)
+            ).first()
+            if row is None:
+                return None
+            # The status guard makes the claim atomic even with a second worker.
+            claimed = connection.execute(
+                analysis_runs.update()
+                .where(
+                    analysis_runs.c.id == row.id,
+                    analysis_runs.c.status == RunStatus.QUEUED.value,
+                )
+                .values(
+                    status=RunStatus.RUNNING.value,
+                    attempts=analysis_runs.c.attempts + 1,
+                    updated_at=_stamp(self._clock()),
+                )
+            ).rowcount
+            if claimed != 1:
+                return None
+            return self._to_run(connection, self._row_by_id(connection, row.id))
+
+    def _finish(self, run_id: str, outcome: RunOutcome) -> AnalysisRun:
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(analysis_runs).where(analysis_runs.c.id == run_id)
+            ).one_or_none()
+            if row is None:
+                raise RunNotFound()
+            if row.status != RunStatus.RUNNING.value:
+                raise InvalidTransition(RunStatus(row.status), outcome.status)
+            connection.execute(
+                analysis_runs.update()
+                .where(analysis_runs.c.id == run_id)
+                .values(
+                    status=outcome.status.value,
+                    failure=outcome.failure,
+                    updated_at=_stamp(self._clock()),
+                )
+            )
+            return self._to_run(connection, self._row_by_id(connection, run_id))
+
+    def _recover_interrupted(self) -> tuple[AnalysisRun, ...]:
+        recovered = []
+        with self._engine.begin() as connection:
+            rows = connection.execute(
+                select(analysis_runs)
+                .where(analysis_runs.c.status == RunStatus.RUNNING.value)
+                .order_by(analysis_runs.c.sequence)
+            ).all()
+            for row in rows:
+                if row.attempts >= MAX_ATTEMPTS:
+                    values = {"status": RunStatus.FAILED.value, "failure": GAVE_UP}
+                else:
+                    values = {"status": RunStatus.QUEUED.value}
+                connection.execute(
+                    analysis_runs.update()
+                    .where(analysis_runs.c.id == row.id)
+                    .values(updated_at=_stamp(self._clock()), **values)
+                )
+                recovered.append(self._to_run(connection, self._row_by_id(connection, row.id)))
+        return tuple(recovered)
+
+    def _row_by_id(self, connection: Connection, run_id: str):
+        return connection.execute(select(analysis_runs).where(analysis_runs.c.id == run_id)).one()
+
     def _load_run(self, connection: Connection, owner_id: int, run_id: str) -> AnalysisRun:
         row = connection.execute(
             select(analysis_runs).where(
@@ -258,4 +339,6 @@ class SqliteAnalysisRepository:
             created_at=_unstamp(row.created_at),
             updated_at=_unstamp(row.updated_at),
             files=files,
+            attempts=row.attempts,
+            failure=row.failure,
         )
