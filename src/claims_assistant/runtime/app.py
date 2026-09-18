@@ -7,8 +7,11 @@ from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommandScopeAllPrivateChats
 
 from claims_assistant.application.analysis_repository import RepositoryError
+from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
+from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
+from claims_assistant.infrastructure.storage.local import LocalFileStorage
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 from claims_assistant.presentation.telegram.menu import bot_commands
 
@@ -59,7 +62,12 @@ async def run(settings: Settings) -> None:
         try:
             logger.info("storage_ready")
             dispatcher = create_dispatcher(
-                settings.allowed_ids, DemoCompanyDataProvider(settings.demo_scenario)
+                settings.allowed_ids,
+                DemoCompanyDataProvider(settings.demo_scenario),
+                repository=repository,
+                files=LocalFileStorage(settings.storage_path),
+                reader=OpenpyxlSheetReader(),
+                mode=DataMode.DEMO,
             )
             logger.info("bot_started")
             await dispatcher.start_polling(
