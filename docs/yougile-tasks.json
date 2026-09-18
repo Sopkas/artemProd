@@ -88,8 +88,9 @@
       "role": "B",
       "sprint": 1,
       "hours": 8,
-      "status": "Бэклог",
-      "task_id": "2dba1165-d459-431b-9ba3-f10e8412379e"
+      "status": "На проверке",
+      "task_id": "2dba1165-d459-431b-9ba3-f10e8412379e",
+      "pr_url": "https://github.com/Sopkas/artemProd/pull/7"
     },
     {
       "roadmap_id": "S2-01",
