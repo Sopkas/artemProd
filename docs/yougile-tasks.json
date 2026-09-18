@@ -1,5 +1,5 @@
 {
-  "verified_on": "2026-09-16",
+  "verified_on": "2026-09-18",
   "project_id": "808c037c-d9ef-4642-8690-aa6894e07ce1",
   "board_id": "3796d179-18e7-434a-842f-695784e14c06",
   "project_url": "https://yougile.com/team/37386113467a/Artemka",
@@ -34,8 +34,9 @@
       "role": "A",
       "sprint": 0,
       "hours": 4,
-      "status": "На проверке",
-      "task_id": "955f5a67-7fa9-49d0-97c2-9704a74aaf44"
+      "status": "Готово",
+      "task_id": "955f5a67-7fa9-49d0-97c2-9704a74aaf44",
+      "pr_url": "https://github.com/Sopkas/artemProd/pull/2"
     },
     {
       "roadmap_id": "S0-04",
@@ -50,33 +51,37 @@
       "role": "A",
       "sprint": 1,
       "hours": 4,
-      "status": "Бэклог",
-      "task_id": "38a1c2d5-e92f-48dd-9ca2-44bb86bb73b5"
+      "status": "Готово",
+      "task_id": "38a1c2d5-e92f-48dd-9ca2-44bb86bb73b5",
+      "pr_url": "https://github.com/Sopkas/artemProd/pull/3"
     },
     {
       "roadmap_id": "S1-02",
       "role": "A",
       "sprint": 1,
       "hours": 4,
-      "status": "Бэклог",
-      "task_id": "6e8aff8c-90dd-4d61-8e2d-36598523da54"
+      "status": "Готово",
+      "task_id": "6e8aff8c-90dd-4d61-8e2d-36598523da54",
+      "pr_url": "https://github.com/Sopkas/artemProd/pull/4"
     },
     {
       "roadmap_id": "S1-03",
       "role": "A",
       "sprint": 1,
       "hours": 6,
-      "status": "Бэклог",
-      "task_id": "c366d484-6c38-4a11-a020-330d6b6e362f"
+      "status": "Готово",
+      "task_id": "c366d484-6c38-4a11-a020-330d6b6e362f",
+      "pr_url": "https://github.com/Sopkas/artemProd/pull/5"
     },
     {
       "roadmap_id": "S1-04",
       "role": "B",
       "sprint": 1,
       "hours": 6,
-      "status": "На проверке",
+      "status": "Готово",
       "task_id": "fd73fec8-542e-4a13-8b31-6970bf989c2b",
-      "pull_request": "https://github.com/Sopkas/artemProd/pull/1"
+      "pull_request": "https://github.com/Sopkas/artemProd/pull/1",
+      "pr_url": "https://github.com/Sopkas/artemProd/pull/1"
     },
     {
       "roadmap_id": "S1-05",
@@ -91,8 +96,9 @@
       "role": "A",
       "sprint": 2,
       "hours": 7,
-      "status": "Бэклог",
-      "task_id": "b2bd441b-78d6-4893-b604-94dea932d7f3"
+      "status": "На проверке",
+      "task_id": "b2bd441b-78d6-4893-b604-94dea932d7f3",
+      "pr_url": "https://github.com/Sopkas/artemProd/pull/6"
     },
     {
       "roadmap_id": "S2-02",
