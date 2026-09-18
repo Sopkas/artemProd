@@ -21,6 +21,9 @@ class Settings:
     # Which synthetic answer the demo provider gives; the scenario is never chosen by INN.
     demo_scenario: DemoScenario = DemoScenario.ORDINARY
 
+    data_provider: str = "demo"
+    checko_api_key: str = field(default="", repr=False)
+
     @classmethod
     def load(cls, env_file: Path = Path(".env")) -> "Settings":
         try:
@@ -58,4 +61,17 @@ class Settings:
         except ValueError:
             allowed = ", ".join(item.value for item in DemoScenario)
             raise ConfigurationError(f"DEMO_SCENARIO: допустимы {allowed}.") from None
-        return cls(token=token, allowed_ids=allowed_ids, log_level=level, demo_scenario=scenario)
+        provider = (values.get("DATA_PROVIDER") or "demo").strip().lower()
+        if provider not in {"demo", "checko"}:
+            raise ConfigurationError("DATA_PROVIDER: допустимы demo, checko.")
+        checko_key = (values.get("CHECKO_API_KEY") or "").strip()
+        if provider == "checko" and not checko_key:
+            raise ConfigurationError("Для DATA_PROVIDER=checko укажите CHECKO_API_KEY.")
+        return cls(
+            token=token,
+            allowed_ids=allowed_ids,
+            log_level=level,
+            demo_scenario=scenario,
+            data_provider=provider,
+            checko_api_key=checko_key,
+        )
