@@ -22,6 +22,8 @@ class Settings:
     demo_scenario: DemoScenario = DemoScenario.ORDINARY
     # SQLite file with runs and uploaded files; created with its directory on first start.
     database_path: Path = Path("data/claims.sqlite3")
+    # Directory for uploaded .xlsx packages; created on first upload.
+    storage_path: Path = Path("data/uploads")
 
     @classmethod
     def load(cls, env_file: Path = Path(".env")) -> "Settings":
@@ -60,17 +62,24 @@ class Settings:
         except ValueError:
             allowed = ", ".join(item.value for item in DemoScenario)
             raise ConfigurationError(f"DEMO_SCENARIO: допустимы {allowed}.") from None
-        raw_path = values.get("DATABASE_PATH")
-        if raw_path is None:
-            database_path = Path("data/claims.sqlite3")
-        elif not raw_path.strip():
-            raise ConfigurationError("DATABASE_PATH: укажите путь к файлу базы данных.")
-        else:
-            database_path = Path(raw_path.strip())
+        database_path = _path_setting(
+            values, "DATABASE_PATH", "data/claims.sqlite3", "файлу базы данных"
+        )
+        storage_path = _path_setting(values, "STORAGE_PATH", "data/uploads", "каталогу загрузок")
         return cls(
             token=token,
             allowed_ids=allowed_ids,
             log_level=level,
             demo_scenario=scenario,
             database_path=database_path,
+            storage_path=storage_path,
         )
+
+
+def _path_setting(values: dict, key: str, default: str, what: str) -> Path:
+    raw = values.get(key)
+    if raw is None:
+        return Path(default)
+    if not raw.strip():
+        raise ConfigurationError(f"{key}: укажите путь к {what}.")
+    return Path(raw.strip())

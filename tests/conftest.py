@@ -5,8 +5,8 @@ from typing import Any
 import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import SendMessage
-from aiogram.types import Message, Update
+from aiogram.methods import GetFile, SendDocument, SendMessage
+from aiogram.types import File, Message, Update
 
 TEST_TOKEN = "123456789:synthetic_token_for_offline_tests_only"
 
@@ -17,6 +17,8 @@ class RecordingSession(BaseSession):
         self.calls: list[Any] = []
         self.closed = False
         self.fail_once: Exception | None = None
+        # Bytes served for a known file_id; anything else must never be downloaded.
+        self.files: dict[str, bytes] = {}
 
     async def close(self) -> None:
         self.closed = True
@@ -33,11 +35,25 @@ class RecordingSession(BaseSession):
                 chat={"id": method.chat_id, "type": "private"},
                 text=method.text,
             )
+        if isinstance(method, SendDocument):
+            return Message(
+                message_id=101,
+                date=datetime.now(UTC),
+                chat={"id": method.chat_id, "type": "private"},
+                document={"file_id": "sent", "file_unique_id": "sent"},
+            )
+        if isinstance(method, GetFile) and method.file_id in self.files:
+            return File(file_id=method.file_id, file_unique_id="u", file_path=method.file_id)
         raise AssertionError(f"Unexpected Telegram request: {type(method).__name__}")
 
-    async def stream_content(self, *args: Any, **kwargs: Any) -> AsyncGenerator[bytes, None]:
+    async def stream_content(
+        self, url: str, *args: Any, **kwargs: Any
+    ) -> AsyncGenerator[bytes, None]:
+        for file_id, data in self.files.items():
+            if url.endswith("/" + file_id):
+                yield data
+                return
         raise AssertionError("Files must never be downloaded")
-        yield b""  # pragma: no cover
 
 
 @pytest.fixture
