@@ -14,6 +14,7 @@ from claims_assistant.application.analysis_repository import (
 from claims_assistant.domain.analysis import FileKind, RunStatus
 from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.infrastructure.memory.analysis import InMemoryAnalysisRepository
+from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
 
 OWNER = 42
 STRANGER = 99
@@ -30,10 +31,12 @@ class Clock:
         return self.now
 
 
-@pytest.fixture(params=["memory"])
-def repository(request) -> AnalysisRepository:
+@pytest.fixture(params=["memory", "sqlite"])
+def repository(request, tmp_path) -> AnalysisRepository:
     if request.param == "memory":
         return InMemoryAnalysisRepository(clock=Clock())
+    if request.param == "sqlite":
+        return open_sqlite_repository(tmp_path / "claims.sqlite3", clock=Clock())
     raise AssertionError(request.param)
 
 
