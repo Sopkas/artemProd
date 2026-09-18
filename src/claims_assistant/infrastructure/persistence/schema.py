@@ -11,8 +11,10 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    PrimaryKeyConstraint,
     String,
     Table,
+    Text,
     UniqueConstraint,
 )
 
@@ -50,4 +52,31 @@ uploaded_files = Table(
     Column("sequence", Integer, nullable=False),
     UniqueConstraint("run_id", "kind", "checksum", name="uq_uploaded_files_run_kind_checksum"),
     Index("ix_uploaded_files_run", "run_id", "sequence"),
+)
+
+run_steps = Table(
+    "run_steps",
+    metadata,
+    Column("run_id", String(32), ForeignKey("analysis_runs.id"), nullable=False),
+    Column("inn", String(10), nullable=False),
+    Column("step", String(64), nullable=False),
+    Column("version", String(64), nullable=False),
+    Column("status", String(8), nullable=False),
+    Column("payload", Text, nullable=True),
+    Column("error", String(500), nullable=True),
+    Column("completed_at", String(32), nullable=False),
+    Column("sequence", Integer, nullable=False),
+    PrimaryKeyConstraint("run_id", "inn", "step", "version", name="pk_run_steps"),
+    Index("ix_run_steps_run", "run_id", "sequence"),
+)
+
+report_artifacts = Table(
+    "report_artifacts",
+    metadata,
+    Column("run_id", String(32), ForeignKey("analysis_runs.id"), primary_key=True),
+    Column("stored_path", String(512), nullable=False),
+    Column("created_at", String(32), nullable=False),
+    Column("delivery", String(16), nullable=False),
+    Column("delivered_at", String(32), nullable=True),
+    Column("delivery_error", String(500), nullable=True),
 )

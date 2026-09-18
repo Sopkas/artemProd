@@ -32,8 +32,9 @@ from claims_assistant.domain.analysis import (
     can_transition,
 )
 from claims_assistant.domain.external import DataMode, Period
+from claims_assistant.domain.steps import DeliveryStatus, ReportArtifact, StepResult, StepStatus
 
-from .schema import analysis_runs, uploaded_files
+from .schema import analysis_runs, report_artifacts, run_steps, uploaded_files
 
 _MIGRATIONS = Path(__file__).with_name("migrations")
 
@@ -113,6 +114,26 @@ class SqliteAnalysisRepository:
 
     async def recover_interrupted(self) -> tuple[AnalysisRun, ...]:
         return await self._run(self._recover_interrupted)
+
+    async def save_step(self, result: StepResult) -> StepResult:
+        return await self._run(self._save_step, result)
+
+    async def get_step(self, run_id: str, inn: str, step: str, version: str) -> StepResult | None:
+        return await self._run(self._get_step, run_id, inn, step, version)
+
+    async def list_steps(self, run_id: str) -> tuple[StepResult, ...]:
+        return await self._run(self._list_steps, run_id)
+
+    async def save_report(self, run_id: str, stored_path: str) -> ReportArtifact:
+        return await self._run(self._save_report, run_id, stored_path)
+
+    async def get_report(self, owner_id: int, run_id: str) -> ReportArtifact | None:
+        return await self._run(self._get_report, owner_id, run_id)
+
+    async def mark_delivery(
+        self, run_id: str, status: DeliveryStatus, error: str | None = None
+    ) -> ReportArtifact:
+        return await self._run(self._mark_delivery, run_id, status, error)
 
     async def _run(self, operation, *args):
         if self._closed:
@@ -294,6 +315,118 @@ class SqliteAnalysisRepository:
                 recovered.append(self._to_run(connection, self._row_by_id(connection, row.id)))
         return tuple(recovered)
 
+    # --- steps and reports ---
+
+    def _run_exists(self, connection: Connection, run_id: str) -> bool:
+        query = select(analysis_runs.c.id).where(analysis_runs.c.id == run_id)
+        return connection.execute(query).first() is not None
+
+    def _save_step(self, result: StepResult) -> StepResult:
+        with self._engine.begin() as connection:
+            if not self._run_exists(connection, result.run_id):
+                raise RunNotFound()
+            existing = self._step_row(connection, *result.key)
+            if existing is not None:
+                return _to_step(existing)
+            sequence = connection.execute(
+                select(func.coalesce(func.max(run_steps.c.sequence), 0) + 1).where(
+                    run_steps.c.run_id == result.run_id
+                )
+            ).scalar_one()
+            connection.execute(
+                run_steps.insert().values(
+                    run_id=result.run_id,
+                    inn=result.inn,
+                    step=result.step,
+                    version=result.version,
+                    status=result.status.value,
+                    payload=result.payload,
+                    error=result.error,
+                    completed_at=_stamp(result.completed_at),
+                    sequence=sequence,
+                )
+            )
+            return result
+
+    def _get_step(self, run_id: str, inn: str, step: str, version: str) -> StepResult | None:
+        with self._engine.connect() as connection:
+            row = self._step_row(connection, run_id, inn, step, version)
+            return None if row is None else _to_step(row)
+
+    def _list_steps(self, run_id: str) -> tuple[StepResult, ...]:
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                select(run_steps).where(run_steps.c.run_id == run_id).order_by(run_steps.c.sequence)
+            ).all()
+            return tuple(_to_step(row) for row in rows)
+
+    def _step_row(self, connection: Connection, run_id: str, inn: str, step: str, version: str):
+        return connection.execute(
+            select(run_steps).where(
+                run_steps.c.run_id == run_id,
+                run_steps.c.inn == inn,
+                run_steps.c.step == step,
+                run_steps.c.version == version,
+            )
+        ).one_or_none()
+
+    def _save_report(self, run_id: str, stored_path: str) -> ReportArtifact:
+        with self._engine.begin() as connection:
+            if not self._run_exists(connection, run_id):
+                raise RunNotFound()
+            report = ReportArtifact(
+                run_id=run_id, stored_path=stored_path, created_at=self._clock()
+            )
+            connection.execute(report_artifacts.delete().where(report_artifacts.c.run_id == run_id))
+            connection.execute(
+                report_artifacts.insert().values(
+                    run_id=run_id,
+                    stored_path=report.stored_path,
+                    created_at=_stamp(report.created_at),
+                    delivery=report.delivery.value,
+                    delivered_at=None,
+                    delivery_error=None,
+                )
+            )
+            return report
+
+    def _get_report(self, owner_id: int, run_id: str) -> ReportArtifact | None:
+        with self._engine.connect() as connection:
+            self._load_run(connection, owner_id, run_id)
+            row = connection.execute(
+                select(report_artifacts).where(report_artifacts.c.run_id == run_id)
+            ).one_or_none()
+            return None if row is None else _to_report(row)
+
+    def _mark_delivery(
+        self, run_id: str, status: DeliveryStatus, error: str | None
+    ) -> ReportArtifact:
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(report_artifacts).where(report_artifacts.c.run_id == run_id)
+            ).one_or_none()
+            if row is None:
+                raise RunNotFound()
+            delivered_at = self._clock() if status is DeliveryStatus.DELIVERED else None
+            updated = ReportArtifact(
+                run_id=run_id,
+                stored_path=row.stored_path,
+                created_at=_unstamp(row.created_at),
+                delivery=status,
+                delivered_at=delivered_at,
+                delivery_error=error,
+            )
+            connection.execute(
+                report_artifacts.update()
+                .where(report_artifacts.c.run_id == run_id)
+                .values(
+                    delivery=status.value,
+                    delivered_at=None if delivered_at is None else _stamp(updated.delivered_at),
+                    delivery_error=error,
+                )
+            )
+            return updated
+
     def _row_by_id(self, connection: Connection, run_id: str):
         return connection.execute(select(analysis_runs).where(analysis_runs.c.id == run_id)).one()
 
@@ -342,3 +475,27 @@ class SqliteAnalysisRepository:
             attempts=row.attempts,
             failure=row.failure,
         )
+
+
+def _to_step(row) -> StepResult:
+    return StepResult(
+        run_id=row.run_id,
+        inn=row.inn,
+        step=row.step,
+        version=row.version,
+        status=StepStatus(row.status),
+        completed_at=_unstamp(row.completed_at),
+        payload=row.payload,
+        error=row.error,
+    )
+
+
+def _to_report(row) -> ReportArtifact:
+    return ReportArtifact(
+        run_id=row.run_id,
+        stored_path=row.stored_path,
+        created_at=_unstamp(row.created_at),
+        delivery=DeliveryStatus(row.delivery),
+        delivered_at=None if row.delivered_at is None else _unstamp(row.delivered_at),
+        delivery_error=row.delivery_error,
+    )
