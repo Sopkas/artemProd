@@ -13,9 +13,7 @@ from aiogram.types import Message, Update
 # Safety net covering collection and fixtures, which pytest-timeout does not: if the
 # session stalls (seen on Windows CI), dump every thread's stack and exit rather than
 # letting the job burn its full time budget with no diagnostic.
-faulthandler.dump_traceback_later(
-    float(os.environ.get("PYTEST_FAULT_TIMEOUT", "120")), exit=True
-)
+faulthandler.dump_traceback_later(float(os.environ.get("PYTEST_FAULT_TIMEOUT", "120")), exit=True)
 
 TEST_TOKEN = "123456789:synthetic_token_for_offline_tests_only"
 
