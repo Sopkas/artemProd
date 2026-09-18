@@ -31,6 +31,10 @@ class FileStorage(Protocol):
 
     def remove(self, stored_path: str) -> None: ...
 
+    def read(self, stored_path: str) -> bytes:
+        """Return the stored bytes; StorageError if the file is missing or unsafe."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class PackageAccepted:

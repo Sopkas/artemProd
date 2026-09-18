@@ -1,6 +1,7 @@
 from datetime import date
 
 from claims_assistant.domain.analysis import AnalysisRun, RunStatus
+from claims_assistant.domain.external import DataMode
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 
 START = (
@@ -127,8 +128,7 @@ def package_summary(
 def check_queued(run: AnalysisRun) -> str:
     return (
         f"{CHECK_QUEUED_PREFIX}: дата анализа {_date(run.analysis_date)}, "
-        f"файлов {len(run.files)}. Обработка появится в следующем обновлении; "
-        "состояние — /status."
+        f"файлов {len(run.files)}. Обработка идёт в фоне; состояние — /status."
     )
 
 
@@ -139,7 +139,9 @@ def run_status(run: AnalysisRun) -> str:
         f"Создана: {run.created_at.strftime('%d.%m.%Y %H:%M')} UTC",
         f"Файлов в пакете: {len(run.files)}",
     ]
-    if run.mode == "demo":
+    if run.failure:
+        lines.append(f"Причина: {run.failure}")
+    if run.mode is DataMode.DEMO:
         lines.append("Режим: демонстрационные данные.")
     return "\n".join(lines)
 

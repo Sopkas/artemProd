@@ -30,6 +30,13 @@ class LocalFileStorage:
             raise StorageError("Не удалось сохранить файл.") from error
         return relative
 
+    def read(self, stored_path: str) -> bytes:
+        target = self._inside_root(stored_path)
+        try:
+            return target.read_bytes()
+        except OSError as error:
+            raise StorageError("Файл пакета не найден в хранилище.") from error
+
     def remove(self, stored_path: str) -> None:
         target = self._inside_root(stored_path)
         try:

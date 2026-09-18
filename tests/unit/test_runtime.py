@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -56,7 +57,7 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
     monkeypatch.setattr(app, "Bot", Mock(return_value=bot))
     create_dispatcher = Mock(return_value=dispatcher)
     monkeypatch.setattr(app, "create_dispatcher", create_dispatcher)
-    repository = SimpleNamespace(close=Mock())
+    repository = SimpleNamespace(close=Mock(), recover_interrupted=AsyncMock(return_value=()))
     open_repository = Mock(return_value=repository)
     monkeypatch.setattr(app, "open_sqlite_repository", open_repository)
     settings = Settings(
@@ -71,6 +72,7 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
     else:
         await app.run(settings)
         provider = create_dispatcher.call_args.args[1]
+        repository.recover_interrupted.assert_awaited_once()
         kwargs = create_dispatcher.call_args.kwargs
         assert kwargs["repository"] is repository
         assert isinstance(kwargs["files"], LocalFileStorage)
@@ -141,9 +143,8 @@ async def test_checko_provider_is_selected_without_network(monkeypatch):
     create = Mock(return_value=SimpleNamespace(start_polling=AsyncMock()))
     monkeypatch.setattr(app, "Bot", Mock(return_value=bot))
     monkeypatch.setattr(app, "create_dispatcher", create)
-    monkeypatch.setattr(
-        app, "open_sqlite_repository", Mock(return_value=SimpleNamespace(close=Mock()))
-    )
+    repository = SimpleNamespace(close=Mock(), recover_interrupted=AsyncMock(return_value=()))
+    monkeypatch.setattr(app, "open_sqlite_repository", Mock(return_value=repository))
     await app.run(
         Settings(TOKEN, frozenset({42}), data_provider="checko", checko_api_key="synthetic-key")
     )
@@ -154,3 +155,45 @@ async def test_checko_provider_is_selected_without_network(monkeypatch):
 def test_safe_formatter_redacts_checko_key():
     record = logging.LogRecord("test", logging.ERROR, "", 0, "%s", ("synthetic-key",), None)
     assert "synthetic-key" not in app.SafeFormatter(TOKEN, "synthetic-key").format(record)
+
+
+async def test_worker_runs_alongside_polling_and_stops_with_it(monkeypatch):
+    bot = SimpleNamespace(
+        get_me=AsyncMock(),
+        get_webhook_info=AsyncMock(return_value=SimpleNamespace(url="")),
+        set_my_commands=AsyncMock(),
+        session=SimpleNamespace(close=AsyncMock()),
+    )
+    seen = []
+
+    async def polling(*args, **kwargs):
+        seen.append("polling")
+        await asyncio.sleep(0.05)
+
+    dispatcher = SimpleNamespace(start_polling=polling)
+    monkeypatch.setattr(app, "Bot", Mock(return_value=bot))
+    monkeypatch.setattr(app, "create_dispatcher", Mock(return_value=dispatcher))
+    repository = SimpleNamespace(close=Mock(), recover_interrupted=AsyncMock(return_value=()))
+    monkeypatch.setattr(app, "open_sqlite_repository", Mock(return_value=repository))
+
+    class Worker:
+        def __init__(self, *args, **kwargs):
+            self.stopped = False
+
+        async def recover(self):
+            return await repository.recover_interrupted()
+
+        async def run_forever(self):
+            seen.append("worker")
+            while not self.stopped:
+                await asyncio.sleep(0.01)
+
+        def stop(self):
+            self.stopped = True
+            seen.append("stopped")
+
+    monkeypatch.setattr(app, "RunWorker", Worker)
+    await asyncio.wait_for(app.run(Settings(TOKEN, frozenset({42}))), timeout=2)
+    assert seen[:2] == ["worker", "polling"] or seen[:2] == ["polling", "worker"]
+    assert seen[-1] == "stopped"
+    repository.close.assert_called_once()

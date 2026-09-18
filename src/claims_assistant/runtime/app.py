@@ -7,6 +7,8 @@ from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommandScopeAllPrivateChats
 
 from claims_assistant.application.analysis_repository import RepositoryError
+from claims_assistant.application.package_processor import PackageProcessor
+from claims_assistant.application.worker import RunWorker
 from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
@@ -64,6 +66,8 @@ async def run(settings: Settings) -> None:
         repository = open_sqlite_repository(settings.database_path)
         try:
             logger.info("storage_ready")
+            files = LocalFileStorage(settings.storage_path)
+            reader = OpenpyxlSheetReader()
             provider = (
                 CheckoCompanyDataProvider(settings.checko_api_key)
                 if settings.data_provider == "checko"
@@ -73,14 +77,23 @@ async def run(settings: Settings) -> None:
                 settings.allowed_ids,
                 provider,
                 repository=repository,
-                files=LocalFileStorage(settings.storage_path),
-                reader=OpenpyxlSheetReader(),
+                files=files,
+                reader=reader,
                 mode=DataMode.LIVE if settings.data_provider == "checko" else DataMode.DEMO,
             )
+            # One worker in this process; runs left "running" by a crash go back to the queue.
+            worker = RunWorker(repository, PackageProcessor(files, reader))
+            await worker.recover()
+            worker_task = asyncio.create_task(worker.run_forever(), name="run-worker")
             logger.info("bot_started")
-            await dispatcher.start_polling(
-                bot, allowed_updates=["message"], close_bot_session=False
-            )
+            try:
+                await dispatcher.start_polling(
+                    bot, allowed_updates=["message"], close_bot_session=False
+                )
+            finally:
+                worker.stop()
+                worker_task.cancel()
+                await asyncio.gather(worker_task, return_exceptions=True)
         finally:
             repository.close()
     finally:

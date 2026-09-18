@@ -248,3 +248,17 @@ async def test_unlisted_user_cannot_start_a_check(setup, bot, update_factory):
     dispatcher, _ = setup
     reply = await send(dispatcher, bot, update_factory, "/check", user_id=99)
     assert reply.text == texts.access_denied(99)
+
+
+async def test_status_shows_the_failure_reason_after_processing(setup, bot, update_factory):
+    from claims_assistant.application.analysis_queue import RunOutcome
+
+    dispatcher, repository = setup
+    await start_check(dispatcher, bot, update_factory)
+    await send_document(dispatcher, bot, update_factory, build_counterparties_template())
+    await send(dispatcher, bot, update_factory, "Запустить проверку")
+    run = await repository.claim_next()
+    await repository.finish(run.id, RunOutcome(RunStatus.PARTIAL, "Строк с ошибками: 1"))
+    reply = await send(dispatcher, bot, update_factory, "/status")
+    assert texts.status_label(RunStatus.PARTIAL) in reply.text
+    assert "Строк с ошибками: 1" in reply.text
