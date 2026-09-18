@@ -55,7 +55,13 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
     else:
         await app.run(Settings(TOKEN, frozenset({42})))
         commands = bot.set_my_commands.call_args.args[0]
-        assert [command.command for command in commands] == ["start", "help", "about"]
+        assert [command.command for command in commands] == [
+            "start",
+            "help",
+            "about",
+            "inn",
+            "cancel",
+        ]
         assert bot.set_my_commands.call_args.kwargs["scope"].type == "all_private_chats"
         dispatcher.start_polling.assert_awaited_once_with(
             bot, allowed_updates=["message"], close_bot_session=False

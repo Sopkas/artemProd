@@ -25,7 +25,11 @@ async def test_commands_and_menu(bot, update_factory, input_text, expected):
     reply = bot.session.calls[0]
     assert isinstance(reply, SendMessage)
     assert reply.text == expected
-    assert [button.text for button in reply.reply_markup.keyboard[0]] == ["О сервисе", "Помощь"]
+    assert [button.text for row in reply.reply_markup.keyboard for button in row] == [
+        "Проверить ИНН",
+        "О сервисе",
+        "Помощь",
+    ]
 
 
 @pytest.mark.parametrize("text", ["/start", "/help", "Помощь", "/about", "О сервисе", "hello"])
