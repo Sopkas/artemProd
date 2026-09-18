@@ -131,6 +131,9 @@ async def test_checko_provider_is_selected_without_network(monkeypatch):
     create = Mock(return_value=SimpleNamespace(start_polling=AsyncMock()))
     monkeypatch.setattr(app, "Bot", Mock(return_value=bot))
     monkeypatch.setattr(app, "create_dispatcher", create)
+    monkeypatch.setattr(
+        app, "open_sqlite_repository", Mock(return_value=SimpleNamespace(close=Mock()))
+    )
     await app.run(
         Settings(TOKEN, frozenset({42}), data_provider="checko", checko_api_key="synthetic-key")
     )
