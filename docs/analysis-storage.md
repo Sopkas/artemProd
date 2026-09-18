@@ -51,6 +51,10 @@
 
 Изменения общих типов: `AnalysisRun.attempts` (≥ 0) и `AnalysisRun.failure` (непустой текст, только при `failed`/`partial`; без ИНН, содержимого файлов и сообщений провайдера с ключами); переход `running → queued` разрешён только как восстановление после перезапуска. Миграция `0002` добавляет колонки и индекс по `(status, updated_at)`.
 
+### Обработчик
+
+`application/worker.py` — `RunWorker(queue, processor, poll_interval)`: `recover()` при старте, затем `run_forever()` как задача asyncio рядом с опросом Telegram; `process_one()` берёт одну проверку, вызывает `RunProcessor.process(run) -> RunOutcome`, исключение процессора превращается в `failed` с общим текстом (тип ошибки — только в журнал), сбой хранилища — пауза и повтор цикла. `application/package_processor.py` — тело шага спринта 2: перечитать файл «Контрагенты» из хранилища и записать `completed` / `partial` (число строк с ошибками) / `failed` (файл отсутствует или непригоден). S3-01 заменяет процессор конвейером импорт → провайдер → скоринг → отчёт.
+
 ## Реализация на SQLite — шаг 2
 
 `infrastructure/persistence/sqlite.py`: `open_sqlite_repository(path)` создаёт каталог и файл, применяет миграции Alembic до `head` и возвращает `SqliteAnalysisRepository`. Блокирующая работа с БД выполняется в рабочем потоке (`asyncio.to_thread`), поэтому цикл Telegram не блокируется; сетевых вызовов внутри транзакций нет.

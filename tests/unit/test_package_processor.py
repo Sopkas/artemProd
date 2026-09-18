@@ -21,7 +21,13 @@ async def accepted(tmp_path, data: bytes):
     repository = InMemoryAnalysisRepository()
     files = LocalFileStorage(tmp_path / "uploads")
     result = await accept_counterparties(
-        OWNER, DAY, DataMode.DEMO, data, repository=repository, files=files, reader=OpenpyxlSheetReader()
+        OWNER,
+        DAY,
+        DataMode.DEMO,
+        data,
+        repository=repository,
+        files=files,
+        reader=OpenpyxlSheetReader(),
     )
     await repository.transition(OWNER, result.run.id, RunStatus.QUEUED)
     run = await repository.claim_next()
