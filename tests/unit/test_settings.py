@@ -15,6 +15,8 @@ def clean_environment(monkeypatch):
         "ALLOWED_TELEGRAM_IDS",
         "LOG_LEVEL",
         "DEMO_SCENARIO",
+        "DATA_PROVIDER",
+        "CHECKO_API_KEY",
         "DATABASE_PATH",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -96,3 +98,40 @@ def test_invalid_log_level(tmp_path, monkeypatch):
     with pytest.raises(ConfigurationError, match="LOG_LEVEL") as error:
         Settings.load(tmp_path / "missing.env")
     assert "secret" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "provider,key,valid",
+    [
+        ("demo", "", True),
+        ("checko", "synthetic-key", True),
+        ("checko", "", False),
+        ("other", "synthetic-key", False),
+    ],
+)
+def test_provider_settings(monkeypatch, tmp_path, provider, key, valid):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("DATA_PROVIDER", provider)
+    monkeypatch.setenv("CHECKO_API_KEY", key)
+    if not valid:
+        with pytest.raises(ConfigurationError):
+            Settings.load(tmp_path / "missing.env")
+    else:
+        settings = Settings.load(tmp_path / "missing.env")
+        assert settings.data_provider == provider
+        assert settings.checko_api_key == key
+        if key:
+            assert key not in repr(settings)
+
+
+def test_provider_environment_overrides_file(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text(
+        f"TELEGRAM_BOT_TOKEN={TOKEN}\nALLOWED_TELEGRAM_IDS=42\n"
+        "DATA_PROVIDER=checko\nCHECKO_API_KEY=synthetic-key\n"
+    )
+    monkeypatch.setenv("DATA_PROVIDER", "demo")
+    monkeypatch.setenv("CHECKO_API_KEY", "")
+    assert Settings.load(path).data_provider == "demo"
+    assert Settings.load(path).checko_api_key == ""

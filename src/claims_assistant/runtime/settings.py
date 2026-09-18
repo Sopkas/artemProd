@@ -23,6 +23,9 @@ class Settings:
     # SQLite file with runs and uploaded files; created with its directory on first start.
     database_path: Path = Path("data/claims.sqlite3")
 
+    data_provider: str = "demo"
+    checko_api_key: str = field(default="", repr=False)
+
     @classmethod
     def load(cls, env_file: Path = Path(".env")) -> "Settings":
         try:
@@ -60,6 +63,12 @@ class Settings:
         except ValueError:
             allowed = ", ".join(item.value for item in DemoScenario)
             raise ConfigurationError(f"DEMO_SCENARIO: допустимы {allowed}.") from None
+        provider = (values.get("DATA_PROVIDER") or "demo").strip().lower()
+        if provider not in {"demo", "checko"}:
+            raise ConfigurationError("DATA_PROVIDER: допустимы demo, checko.")
+        checko_key = (values.get("CHECKO_API_KEY") or "").strip()
+        if provider == "checko" and not checko_key:
+            raise ConfigurationError("Для DATA_PROVIDER=checko укажите CHECKO_API_KEY.")
         raw_path = values.get("DATABASE_PATH")
         if raw_path is None:
             database_path = Path("data/claims.sqlite3")
@@ -72,5 +81,7 @@ class Settings:
             allowed_ids=allowed_ids,
             log_level=level,
             demo_scenario=scenario,
+            data_provider=provider,
+            checko_api_key=checko_key,
             database_path=database_path,
         )
