@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Protocol
 
 import aiohttp
@@ -26,6 +26,8 @@ from claims_assistant.domain.external import (
 SOURCE = "checko-company-v2"
 COMPANY_URL = "https://api.checko.ru/v2/company"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+# Checko issues extract dates in Moscow time, which is UTC+3 with no DST since 2014.
+_MOSCOW = timezone(timedelta(hours=3))
 
 
 class InvalidResponse(ValueError):
@@ -110,7 +112,10 @@ def normalize_company(payload: object, inn: str, fetched_at: datetime) -> Extern
         observed_on = date.fromisoformat(raw_date)
     except ValueError:
         raise InvalidResponse() from None
-    if observed_on > fetched_at.date():
+    # ДатаВып is issued in Moscow time (UTC+3, no DST since 2014). Compare against the
+    # Moscow calendar date so a fresh extract is not rejected as "future" while UTC is
+    # still on the previous day. A fixed offset avoids a tzdata dependency on Windows.
+    if observed_on > fetched_at.astimezone(_MOSCOW).date():
         raise InvalidResponse()
 
     raw_status = data.get("Статус")

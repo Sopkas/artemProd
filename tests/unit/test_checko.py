@@ -278,3 +278,25 @@ async def test_full_name_is_used_when_short_name_is_missing():
     payload["data"]["НаимПолн"] = "Синтетическое полное название"
     snapshot = (await provider(Transport(payload=payload)).fetch(CompanyDataRequest(INN)))[0]
     assert snapshot.facts[0].value == payload["data"]["НаимПолн"]
+
+
+async def test_extract_dated_today_in_moscow_is_not_rejected_near_utc_midnight():
+    # 21:30 UTC is 00:30 the next day in Moscow; an extract dated that Moscow day is
+    # current, not future, and must be accepted rather than treated as invalid.
+    late_utc = datetime(2026, 9, 18, 21, 30, tzinfo=UTC)
+    payload = deepcopy(PAYLOAD)
+    payload["data"]["ДатаВып"] = "2026-09-19"
+    live = checko.CheckoCompanyDataProvider(KEY, Transport(payload=payload), lambda: late_utc)
+    snapshot = (await live.fetch(CompanyDataRequest(INN)))[0]
+    assert snapshot.status == FetchStatus.OK
+    assert snapshot.facts[0].observed_on.isoformat() == "2026-09-19"
+
+
+async def test_extract_after_the_moscow_day_is_still_rejected():
+    # A date beyond the current Moscow day is implausible and stays invalid_response.
+    late_utc = datetime(2026, 9, 18, 21, 30, tzinfo=UTC)
+    payload = deepcopy(PAYLOAD)
+    payload["data"]["ДатаВып"] = "2026-09-20"
+    live = checko.CheckoCompanyDataProvider(KEY, Transport(payload=payload), lambda: late_utc)
+    snapshot = (await live.fetch(CompanyDataRequest(INN)))[0]
+    assert snapshot.status == FetchStatus.INVALID_RESPONSE
