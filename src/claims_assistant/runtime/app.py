@@ -6,8 +6,10 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommandScopeAllPrivateChats
 
+from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
+from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 from claims_assistant.presentation.telegram.menu import bot_commands
 
@@ -55,14 +57,22 @@ async def run(settings: Settings) -> None:
                 "Для этого бота уже настроен webhook. Отключите его перед локальным запуском."
             )
         await bot.set_my_commands(bot_commands(), scope=BotCommandScopeAllPrivateChats())
-        provider = (
-            CheckoCompanyDataProvider(settings.checko_api_key)
-            if settings.data_provider == "checko"
-            else DemoCompanyDataProvider(settings.demo_scenario)
-        )
-        dispatcher = create_dispatcher(settings.allowed_ids, provider)
-        logger.info("bot_started")
-        await dispatcher.start_polling(bot, allowed_updates=["message"], close_bot_session=False)
+        # Migrations run here, before polling: a broken database stops the start, not a user.
+        repository = open_sqlite_repository(settings.database_path)
+        try:
+            logger.info("storage_ready")
+            provider = (
+                CheckoCompanyDataProvider(settings.checko_api_key)
+                if settings.data_provider == "checko"
+                else DemoCompanyDataProvider(settings.demo_scenario)
+            )
+            dispatcher = create_dispatcher(settings.allowed_ids, provider)
+            logger.info("bot_started")
+            await dispatcher.start_polling(
+                bot, allowed_updates=["message"], close_bot_session=False
+            )
+        finally:
+            repository.close()
     finally:
         await bot.session.close()
         logger.info("bot_stopped")
@@ -85,6 +95,9 @@ def main() -> int:
         return 1
     except TelegramNetworkError:
         logger.error("Не удалось подключиться к Telegram. Проверьте сеть и повторите запуск.")
+        return 1
+    except RepositoryError as exc:
+        logger.error("%s Проверьте DATABASE_PATH и права на каталог.", exc)
         return 1
     except KeyboardInterrupt:
         return 0

@@ -20,6 +20,8 @@ class Settings:
     log_level: str = "INFO"
     # Which synthetic answer the demo provider gives; the scenario is never chosen by INN.
     demo_scenario: DemoScenario = DemoScenario.ORDINARY
+    # SQLite file with runs and uploaded files; created with its directory on first start.
+    database_path: Path = Path("data/claims.sqlite3")
 
     data_provider: str = "demo"
     checko_api_key: str = field(default="", repr=False)
@@ -67,6 +69,13 @@ class Settings:
         checko_key = (values.get("CHECKO_API_KEY") or "").strip()
         if provider == "checko" and not checko_key:
             raise ConfigurationError("Для DATA_PROVIDER=checko укажите CHECKO_API_KEY.")
+        raw_path = values.get("DATABASE_PATH")
+        if raw_path is None:
+            database_path = Path("data/claims.sqlite3")
+        elif not raw_path.strip():
+            raise ConfigurationError("DATABASE_PATH: укажите путь к файлу базы данных.")
+        else:
+            database_path = Path(raw_path.strip())
         return cls(
             token=token,
             allowed_ids=allowed_ids,
@@ -74,4 +83,5 @@ class Settings:
             demo_scenario=scenario,
             data_provider=provider,
             checko_api_key=checko_key,
+            database_path=database_path,
         )
