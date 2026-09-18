@@ -19,6 +19,7 @@ def clean_environment(monkeypatch):
         "CHECKO_API_KEY",
         "DATABASE_PATH",
         "STORAGE_PATH",
+        "BUSINESS_UTC_OFFSET_HOURS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -147,3 +148,17 @@ def test_provider_environment_overrides_file(tmp_path, monkeypatch):
     monkeypatch.setenv("CHECKO_API_KEY", "")
     assert Settings.load(path).data_provider == "demo"
     assert Settings.load(path).checko_api_key == ""
+
+
+def test_business_timezone_defaults_to_moscow_and_accepts_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    assert Settings.load(tmp_path / "missing.env").business_utc_offset_hours == 3
+    monkeypatch.setenv("BUSINESS_UTC_OFFSET_HOURS", "10")
+    assert Settings.load(tmp_path / "missing.env").business_utc_offset_hours == 10
+    monkeypatch.setenv("BUSINESS_UTC_OFFSET_HOURS", "15")
+    with pytest.raises(ConfigurationError, match="BUSINESS_UTC_OFFSET_HOURS"):
+        Settings.load(tmp_path / "missing.env")
+    monkeypatch.setenv("BUSINESS_UTC_OFFSET_HOURS", "x")
+    with pytest.raises(ConfigurationError, match="BUSINESS_UTC_OFFSET_HOURS"):
+        Settings.load(tmp_path / "missing.env")
