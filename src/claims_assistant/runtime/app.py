@@ -8,6 +8,7 @@ from aiogram.types import BotCommandScopeAllPrivateChats
 
 from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.domain.external import DataMode
+from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
@@ -21,9 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 class SafeFormatter(logging.Formatter):
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, checko_key: str = "") -> None:
         super().__init__("%(asctime)s %(levelname)s %(name)s %(message)s")
         self.token = token
+        self.checko_key = checko_key
 
     def formatException(self, exc_info: tuple) -> str:
         return f"error_type={exc_info[0].__name__}"
@@ -36,12 +38,13 @@ class SafeFormatter(logging.Formatter):
             record.args = ()
         # Avoid reusing exception text formatted by another logging handler.
         record.exc_text = None
-        return super().format(record).replace(self.token, "[REDACTED]")
+        text = super().format(record).replace(self.token, "[REDACTED]")
+        return text.replace(self.checko_key, "[REDACTED]") if self.checko_key else text
 
 
 def configure_logging(settings: Settings) -> None:
     handler = logging.StreamHandler()
-    handler.setFormatter(SafeFormatter(settings.token))
+    handler.setFormatter(SafeFormatter(settings.token, settings.checko_api_key))
     logging.basicConfig(level=settings.log_level, handlers=[handler], force=True)
     # Keep transport failure signals, with their content sanitized by SafeFormatter.
     logging.getLogger("aiogram").setLevel(logging.WARNING)
@@ -61,13 +64,18 @@ async def run(settings: Settings) -> None:
         repository = open_sqlite_repository(settings.database_path)
         try:
             logger.info("storage_ready")
+            provider = (
+                CheckoCompanyDataProvider(settings.checko_api_key)
+                if settings.data_provider == "checko"
+                else DemoCompanyDataProvider(settings.demo_scenario)
+            )
             dispatcher = create_dispatcher(
                 settings.allowed_ids,
-                DemoCompanyDataProvider(settings.demo_scenario),
+                provider,
                 repository=repository,
                 files=LocalFileStorage(settings.storage_path),
                 reader=OpenpyxlSheetReader(),
-                mode=DataMode.DEMO,
+                mode=DataMode.LIVE if settings.data_provider == "checko" else DataMode.DEMO,
             )
             logger.info("bot_started")
             await dispatcher.start_polling(

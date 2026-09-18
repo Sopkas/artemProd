@@ -8,6 +8,15 @@ from aiogram.client.session.base import BaseSession
 from aiogram.methods import GetFile, SendDocument, SendMessage
 from aiogram.types import File, Message, Update
 
+
+def pytest_make_parametrize_id(config, val, argname):
+    # Keep large parametrize values (e.g. a >2 MiB response body) out of the test ID.
+    # pytest stores that ID in PYTEST_CURRENT_TEST, and Windows caps an environment
+    # variable at 32767 chars, so a huge repr aborts the whole session with ValueError.
+    text = repr(val)
+    return None if len(text) <= 60 else f"{argname}<{len(text)} chars>"
+
+
 TEST_TOKEN = "123456789:synthetic_token_for_offline_tests_only"
 
 

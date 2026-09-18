@@ -127,3 +127,30 @@ def test_missing_configuration_exits_before_network(monkeypatch, tmp_path, capsy
     assert app.main() == 2
     assert "TELEGRAM_BOT_TOKEN" in capsys.readouterr().err
     bot_constructor.assert_not_called()
+
+
+async def test_checko_provider_is_selected_without_network(monkeypatch):
+    from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
+
+    bot = SimpleNamespace(
+        get_me=AsyncMock(),
+        get_webhook_info=AsyncMock(return_value=SimpleNamespace(url="")),
+        set_my_commands=AsyncMock(),
+        session=SimpleNamespace(close=AsyncMock()),
+    )
+    create = Mock(return_value=SimpleNamespace(start_polling=AsyncMock()))
+    monkeypatch.setattr(app, "Bot", Mock(return_value=bot))
+    monkeypatch.setattr(app, "create_dispatcher", create)
+    monkeypatch.setattr(
+        app, "open_sqlite_repository", Mock(return_value=SimpleNamespace(close=Mock()))
+    )
+    await app.run(
+        Settings(TOKEN, frozenset({42}), data_provider="checko", checko_api_key="synthetic-key")
+    )
+    assert isinstance(create.call_args.args[1], CheckoCompanyDataProvider)
+    bot.session.close.assert_awaited_once()
+
+
+def test_safe_formatter_redacts_checko_key():
+    record = logging.LogRecord("test", logging.ERROR, "", 0, "%s", ("synthetic-key",), None)
+    assert "synthetic-key" not in app.SafeFormatter(TOKEN, "synthetic-key").format(record)
