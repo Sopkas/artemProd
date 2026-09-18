@@ -19,6 +19,11 @@ def clean_environment(monkeypatch):
         "CHECKO_API_KEY",
         "DATABASE_PATH",
         "STORAGE_PATH",
+        "EXTERNAL_TIMEOUT_SECONDS",
+        "EXTERNAL_MAX_RETRIES",
+        "EXTERNAL_CACHE_TTL_SECONDS",
+        "RUN_TIME_LIMIT_SECONDS",
+        "RUN_REQUEST_LIMIT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -147,3 +152,49 @@ def test_provider_environment_overrides_file(tmp_path, monkeypatch):
     monkeypatch.setenv("CHECKO_API_KEY", "")
     assert Settings.load(path).data_provider == "demo"
     assert Settings.load(path).checko_api_key == ""
+
+
+def test_external_limits_default_to_the_architecture_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    limits = Settings.load(tmp_path / "missing.env").external
+    assert (limits.timeout_seconds, limits.max_retries) == (20.0, 2)
+    assert limits.cache_ttl_seconds == 3600
+    assert (limits.run_time_limit_seconds, limits.run_request_limit) == (900, 1500)
+
+
+def test_external_limits_are_overridable(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("EXTERNAL_TIMEOUT_SECONDS", "5.5")
+    monkeypatch.setenv("EXTERNAL_MAX_RETRIES", "0")
+    monkeypatch.setenv("EXTERNAL_CACHE_TTL_SECONDS", "0")
+    monkeypatch.setenv("RUN_TIME_LIMIT_SECONDS", "60")
+    monkeypatch.setenv("RUN_REQUEST_LIMIT", "10")
+    limits = Settings.load(tmp_path / "missing.env").external
+    assert limits.timeout_seconds == 5.5 and limits.max_retries == 0
+    assert limits.cache_ttl_seconds == 0
+    assert limits.run_time_limit_seconds == 60 and limits.run_request_limit == 10
+
+
+@pytest.mark.parametrize(
+    ("key", "raw"),
+    [
+        ("EXTERNAL_TIMEOUT_SECONDS", "0"),
+        ("EXTERNAL_TIMEOUT_SECONDS", "abc"),
+        ("EXTERNAL_MAX_RETRIES", "-1"),
+        ("EXTERNAL_MAX_RETRIES", "1.5"),
+        ("EXTERNAL_CACHE_TTL_SECONDS", "-5"),
+        ("RUN_TIME_LIMIT_SECONDS", "0"),
+        ("RUN_REQUEST_LIMIT", "0"),
+    ],
+)
+def test_invalid_external_limits_are_rejected_without_disclosing_value(
+    tmp_path, monkeypatch, key, raw
+):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv(key, raw)
+    with pytest.raises(ConfigurationError, match=key) as error:
+        Settings.load(tmp_path / "missing.env")
+    assert raw not in str(error.value) or raw in ("0",)
