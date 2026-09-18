@@ -1,7 +1,10 @@
 import pytest
 from aiogram.methods import SendMessage
 
+from claims_assistant.application.company_data import CompanyDataRequest
+from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 from claims_assistant.presentation.telegram import texts
+from claims_assistant.presentation.telegram.card import DEMO_BANNER
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 
 # Synthetic value built for the checksum, not a real organization.
@@ -30,10 +33,12 @@ async def test_main_menu_has_check_inn_button(bot, update_factory):
     assert buttons(reply) == ["Проверить ИНН", "О сервисе", "Помощь"]
 
 
-async def test_valid_inn_is_accepted_and_dialog_ends(bot, update_factory):
+async def test_valid_inn_shows_the_demo_card_and_dialog_ends(bot, update_factory):
     dispatcher = create_dispatcher(frozenset({42}))
     reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", f" {VALID_INN} ")
-    assert reply.text == texts.inn_accepted(VALID_INN)
+    assert reply.text.startswith(DEMO_BANNER)
+    assert f"ИНН {VALID_INN}" in reply.text
+    assert "Организация" in reply.text
     assert buttons(reply) == ["Проверить ИНН", "О сервисе", "Помощь"]
     # The dialog is over: plain text goes back to the fallback, not to the validator.
     reply = await feed(dispatcher, bot, update_factory, "привет")
@@ -52,7 +57,7 @@ async def test_invalid_inn_explains_and_keeps_waiting(bot, update_factory, raw):
     assert raw not in reply.text
     assert buttons(reply) == ["Отмена"]
     reply = await feed(dispatcher, bot, update_factory, VALID_INN)
-    assert reply.text == texts.inn_accepted(VALID_INN)
+    assert reply.text.startswith(DEMO_BANNER)
 
 
 @pytest.mark.parametrize("cancel", ["Отмена", "/cancel"])
@@ -122,5 +127,28 @@ async def test_group_cannot_enter_private_dialog(bot, update_factory):
     dispatcher = create_dispatcher(frozenset({42}))
     await dispatcher.feed_update(bot, update_factory("/inn", chat_type="group"))
     assert not bot.session.calls
+    reply = await feed(dispatcher, bot, update_factory, VALID_INN)
+    assert reply.text == texts.FALLBACK
+
+
+async def test_configured_scenario_is_used_for_the_card(bot, update_factory):
+    dispatcher = create_dispatcher(frozenset({42}), DemoCompanyDataProvider(DemoScenario.ERROR))
+    reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
+    assert reply.text.count("— раздел недоступен") == 3
+    assert buttons(reply) == ["Проверить ИНН", "О сервисе", "Помощь"]
+
+
+async def test_provider_bug_gives_a_safe_reply_and_leaves_the_dialog(bot, update_factory, caplog):
+    class BrokenProvider:
+        async def fetch(self, request: CompanyDataRequest):
+            raise RuntimeError("private debtor note")
+
+    dispatcher = create_dispatcher(frozenset({42}), BrokenProvider())
+    reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
+    assert reply.text == texts.CHECK_FAILED
+    assert buttons(reply) == ["Проверить ИНН", "О сервисе", "Помощь"]
+    assert "check_failed" in caplog.text
+    assert "private debtor note" not in caplog.text
+    assert VALID_INN not in caplog.text
     reply = await feed(dispatcher, bot, update_factory, VALID_INN)
     assert reply.text == texts.FALLBACK

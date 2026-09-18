@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 from claims_assistant.runtime import app
 from claims_assistant.runtime.settings import ConfigurationError, Settings
 
@@ -48,12 +49,17 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
     if failure == "startup":
         bot.set_my_commands.side_effect = RuntimeError("test failure")
     monkeypatch.setattr(app, "Bot", Mock(return_value=bot))
-    monkeypatch.setattr(app, "create_dispatcher", Mock(return_value=dispatcher))
+    create_dispatcher = Mock(return_value=dispatcher)
+    monkeypatch.setattr(app, "create_dispatcher", create_dispatcher)
+    settings = Settings(TOKEN, frozenset({42}), demo_scenario=DemoScenario.ALARM)
     if failure:
         with pytest.raises(ConfigurationError if failure == "webhook" else RuntimeError):
-            await app.run(Settings(TOKEN, frozenset({42})))
+            await app.run(settings)
     else:
-        await app.run(Settings(TOKEN, frozenset({42})))
+        await app.run(settings)
+        provider = create_dispatcher.call_args.args[1]
+        assert isinstance(provider, DemoCompanyDataProvider)
+        assert provider.scenario == DemoScenario.ALARM
         commands = bot.set_my_commands.call_args.args[0]
         assert [command.command for command in commands] == [
             "start",
