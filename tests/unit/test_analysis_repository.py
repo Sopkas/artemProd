@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+from claims_assistant.application.analysis_queue import MAX_ATTEMPTS, RunOutcome
 from claims_assistant.application.analysis_repository import (
     AnalysisRepository,
     InvalidTransition,
@@ -168,3 +169,96 @@ def test_new_file_validates_like_uploaded_file(bad):
     fields.update(bad)
     with pytest.raises(ValueError):
         NewFile(**fields)
+
+
+# --- AnalysisQueue: the worker side of the same storage ---
+
+
+async def queued_run(repository, owner: int = OWNER):
+    run = await repository.create_run(owner, DAY, DataMode.DEMO)
+    return await repository.transition(owner, run.id, RunStatus.QUEUED)
+
+
+async def test_claim_next_takes_the_oldest_queued_run_and_marks_it_running(repository):
+    first = await queued_run(repository)
+    second = await queued_run(repository)
+    claimed = await repository.claim_next()
+    assert claimed.id == first.id
+    assert claimed.status == RunStatus.RUNNING
+    assert claimed.attempts == 1
+    assert (await repository.get_run(OWNER, first.id)).status == RunStatus.RUNNING
+    assert (await repository.get_run(OWNER, second.id)).status == RunStatus.QUEUED
+
+
+async def test_claim_next_returns_none_when_nothing_is_queued(repository):
+    assert await repository.claim_next() is None
+    await repository.create_run(OWNER, DAY, DataMode.DEMO)  # a draft is not queued
+    assert await repository.claim_next() is None
+
+
+async def test_a_run_is_never_claimed_twice(repository):
+    await queued_run(repository)
+    first = await repository.claim_next()
+    assert first is not None
+    assert await repository.claim_next() is None
+
+
+async def test_finish_records_the_outcome_and_safe_failure(repository):
+    run = await queued_run(repository)
+    await repository.claim_next()
+    done = await repository.finish(run.id, RunOutcome(RunStatus.FAILED, "Источник недоступен"))
+    assert done.status == RunStatus.FAILED
+    assert done.failure == "Источник недоступен"
+    reloaded = await repository.get_run(OWNER, run.id)
+    assert reloaded == done
+    assert await repository.claim_next() is None
+
+
+async def test_finish_requires_a_running_run(repository):
+    run = await queued_run(repository)
+    with pytest.raises(InvalidTransition):
+        await repository.finish(run.id, RunOutcome(RunStatus.COMPLETED))
+    with pytest.raises(RunNotFound):
+        await repository.finish("missing", RunOutcome(RunStatus.COMPLETED))
+
+
+@pytest.mark.parametrize("status", [RunStatus.DRAFT, RunStatus.QUEUED, RunStatus.RUNNING])
+def test_outcome_must_be_a_final_status(status):
+    with pytest.raises(ValueError):
+        RunOutcome(status)
+
+
+def test_outcome_failure_text_needs_failed_or_partial():
+    with pytest.raises(ValueError):
+        RunOutcome(RunStatus.COMPLETED, "x")
+    assert RunOutcome(RunStatus.PARTIAL, "часть разделов недоступна").failure
+
+
+async def test_recover_interrupted_requeues_running_runs_keeping_attempts(repository):
+    run = await queued_run(repository)
+    await repository.claim_next()
+    recovered = await repository.recover_interrupted()
+    assert [item.id for item in recovered] == [run.id]
+    assert recovered[0].status == RunStatus.QUEUED
+    assert recovered[0].attempts == 1
+    assert (await repository.claim_next()).attempts == 2
+
+
+async def test_recover_interrupted_gives_up_after_max_attempts(repository):
+    run = await queued_run(repository)
+    for _ in range(MAX_ATTEMPTS):
+        assert (await repository.claim_next()).id == run.id
+        if _ < MAX_ATTEMPTS - 1:
+            await repository.recover_interrupted()
+    recovered = await repository.recover_interrupted()
+    assert recovered[0].status == RunStatus.FAILED
+    assert recovered[0].failure
+    assert await repository.claim_next() is None
+
+
+async def test_recover_interrupted_leaves_other_statuses_alone(repository):
+    draft = await repository.create_run(OWNER, DAY, DataMode.DEMO)
+    queued = await queued_run(repository)
+    assert await repository.recover_interrupted() == ()
+    assert (await repository.get_run(OWNER, draft.id)).status == RunStatus.DRAFT
+    assert (await repository.get_run(OWNER, queued.id)).status == RunStatus.QUEUED

@@ -18,10 +18,12 @@ class RunStatus(StrEnum):
 
 
 # docs/architecture.md: draft → queued → running → completed | partial | failed.
+# running → queued is restart recovery only: an interrupted run goes back to the queue.
+FINAL_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.PARTIAL, RunStatus.FAILED})
 _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.DRAFT: frozenset({RunStatus.QUEUED}),
     RunStatus.QUEUED: frozenset({RunStatus.RUNNING}),
-    RunStatus.RUNNING: frozenset({RunStatus.COMPLETED, RunStatus.PARTIAL, RunStatus.FAILED}),
+    RunStatus.RUNNING: FINAL_STATUSES | {RunStatus.QUEUED},
     RunStatus.COMPLETED: frozenset(),
     RunStatus.PARTIAL: frozenset(),
     RunStatus.FAILED: frozenset(),
@@ -102,8 +104,19 @@ class AnalysisRun:
     created_at: datetime
     updated_at: datetime
     files: tuple[UploadedFile, ...] = ()
+    # Worker bookkeeping: how many times processing started; a safe reason for
+    # failed/partial runs (no INNs, file contents or provider messages with keys).
+    attempts: int = 0
+    failure: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.attempts) is not int or self.attempts < 0:
+            raise ValueError("Attempts must be a non-negative integer")
+        if self.failure is not None:
+            if not self.failure.strip():
+                raise ValueError("Failure text must not be empty")
+            if self.status not in (RunStatus.FAILED, RunStatus.PARTIAL):
+                raise ValueError("Failure text is only meaningful for failed or partial runs")
         if type(self.analysis_date) is not date:
             raise ValueError("Analysis date must be a calendar date")
         if not isinstance(self.mode, DataMode) or not isinstance(self.status, RunStatus):

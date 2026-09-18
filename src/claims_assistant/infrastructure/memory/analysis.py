@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
+from claims_assistant.application.analysis_queue import GAVE_UP, MAX_ATTEMPTS, RunOutcome
 from claims_assistant.application.analysis_repository import (
     InvalidTransition,
     NewFile,
@@ -76,3 +77,43 @@ class InMemoryAnalysisRepository:
         updated = replace(run, status=target, updated_at=self._clock())
         self._runs[run.id] = updated
         return updated
+
+    # --- AnalysisQueue ---
+
+    async def claim_next(self) -> AnalysisRun | None:
+        queued = [run for run in self._runs.values() if run.status == RunStatus.QUEUED]
+        if not queued:
+            return None
+        run = min(queued, key=lambda item: (item.updated_at, item.created_at))
+        claimed = replace(
+            run, status=RunStatus.RUNNING, attempts=run.attempts + 1, updated_at=self._clock()
+        )
+        self._runs[run.id] = claimed
+        return claimed
+
+    async def finish(self, run_id: str, outcome: RunOutcome) -> AnalysisRun:
+        run = self._runs.get(run_id)
+        if run is None:
+            raise RunNotFound()
+        if run.status != RunStatus.RUNNING:
+            raise InvalidTransition(run.status, outcome.status)
+        done = replace(
+            run, status=outcome.status, failure=outcome.failure, updated_at=self._clock()
+        )
+        self._runs[run.id] = done
+        return done
+
+    async def recover_interrupted(self) -> tuple[AnalysisRun, ...]:
+        recovered = []
+        for run in list(self._runs.values()):
+            if run.status != RunStatus.RUNNING:
+                continue
+            if run.attempts >= MAX_ATTEMPTS:
+                updated = replace(
+                    run, status=RunStatus.FAILED, failure=GAVE_UP, updated_at=self._clock()
+                )
+            else:
+                updated = replace(run, status=RunStatus.QUEUED, updated_at=self._clock())
+            self._runs[run.id] = updated
+            recovered.append(updated)
+        return tuple(recovered)

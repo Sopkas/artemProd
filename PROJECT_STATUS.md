@@ -79,6 +79,8 @@
 
 ## История важных обновлений
 
+- **18.09.2026 — S2-02, контракт очереди (A):** `AnalysisQueue` (`claim_next`, `finish`, `recover_interrupted`) и `RunOutcome` в `application/analysis_queue.py`; `AnalysisRun.attempts`/`failure`, переход `running → queued` для восстановления; реализации в памяти и SQLite (миграция `0002`, атомарный захват с проверкой статуса). 24 новых контрактных теста для обеих реализаций, всего 322; `alembic check` без дрейфа. Сам обработчик — следующим PR после согласования.
+
 - **18.09.2026 — S2-01, шаг 2 (A):** SQLite-реализация согласованного контракта: `infrastructure/persistence/` (схема SQLAlchemy Core, миграция Alembic `0001`, `SqliteAnalysisRepository` с работой в потоке), `alembic.ini` для CLI, настройка `DATABASE_PATH`; хранилище открывается при старте до опроса Telegram, сбой БД останавливает запуск. Контрактные тесты прогоняются для `memory` и `sqlite` без изменений; добавлены тесты перезапуска. Всего 229 тестов, Ruff, `alembic check` без дрейфа. Реальный запуск: миграция применена, `storage_ready`, файл создан. Зависимости: sqlalchemy 2.0.54, alembic 1.20.0 (+ greenlet, mako, markupsafe).
 
 - **18.09.2026 — ImportIssue (A):** введён общий тип ошибки импорта `domain/imports.py` (`ImportIssue`, `IssueSeverity`) в форме, согласованной с B в PR #6: стабильный код, серьёзность, лист, причина без содержимого ячеек, строка с 1 и колонка буквами либо `None`, `file_id` от сценария загрузки. 22 теста, всего 174. Парсер S2-04 переводится на него отдельным follow-up B.
