@@ -200,6 +200,7 @@ async def test_deadline_is_enforced_even_for_custom_transport():
         (b"x" * (checko.MAX_RESPONSE_BYTES + 1), True),
         (json.dumps(PAYLOAD).encode(), False),
     ],
+    ids=["not_json", "too_large", "valid"],
 )
 async def test_http_transport_keeps_key_out_of_url_and_closes(monkeypatch, body, error):
     closed = []
