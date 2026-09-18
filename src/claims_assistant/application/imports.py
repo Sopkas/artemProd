@@ -12,32 +12,36 @@ from typing import Protocol
 from claims_assistant.domain.counterparties import (
     SHEET_NAME,
     Cell,
-    CellRef,
     CounterpartiesImport,
     ImportLimits,
-    RowError,
     parse_counterparties,
 )
+from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 
 # (header cells, iterable of (excel row number, row cells)).
 Sheet = tuple[tuple[Cell, ...], Iterable[tuple[int, tuple[Cell, ...]]]]
 
 
 class WorkbookError(Exception):
-    """Reader failure with a user-safe reason; never carries file contents."""
+    """Reader failure with a stable code and user-safe reason; never carries contents."""
 
+    code = "workbook_error"
     reason = "Файл не удалось прочитать."
 
 
 class CorruptWorkbook(WorkbookError):
+    code = "workbook_corrupt"
     reason = "Файл не является корректным .xlsx."
 
 
 class WorkbookTooLarge(WorkbookError):
+    code = "workbook_too_large"
     reason = "Распакованный файл превышает допустимый размер."
 
 
 class SheetMissing(WorkbookError):
+    code = "sheet_missing"
+
     def __init__(self, sheet: str) -> None:
         super().__init__(sheet)
         self.reason = f"Лист «{sheet}» не найден в файле."
@@ -59,9 +63,18 @@ def import_counterparties(
     limits: ImportLimits = ImportLimits(),
     analysis_date: date | None = None,
 ) -> CounterpartiesImport:
-    """Read and validate the «Контрагенты» sheet, mapping reader failures to an error."""
+    """Read and validate the «Контрагенты» sheet, mapping reader failures to an issue."""
     try:
         header, rows = reader.read(source, SHEET_NAME, limits)
     except WorkbookError as error:
-        return CounterpartiesImport(errors=(RowError(error.reason, CellRef(SHEET_NAME)),))
+        return CounterpartiesImport(
+            issues=(
+                ImportIssue(
+                    code=error.code,
+                    severity=IssueSeverity.ERROR,
+                    sheet=SHEET_NAME,
+                    reason=error.reason,
+                ),
+            )
+        )
     return parse_counterparties(header, rows, limits, analysis_date)
