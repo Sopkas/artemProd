@@ -1,10 +1,12 @@
 import logging
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 from claims_assistant.runtime import app
 from claims_assistant.runtime.settings import ConfigurationError, Settings
@@ -51,7 +53,15 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
     monkeypatch.setattr(app, "Bot", Mock(return_value=bot))
     create_dispatcher = Mock(return_value=dispatcher)
     monkeypatch.setattr(app, "create_dispatcher", create_dispatcher)
-    settings = Settings(TOKEN, frozenset({42}), demo_scenario=DemoScenario.ALARM)
+    repository = SimpleNamespace(close=Mock())
+    open_repository = Mock(return_value=repository)
+    monkeypatch.setattr(app, "open_sqlite_repository", open_repository)
+    settings = Settings(
+        TOKEN,
+        frozenset({42}),
+        demo_scenario=DemoScenario.ALARM,
+        database_path=Path("x/claims.sqlite3"),
+    )
     if failure:
         with pytest.raises(ConfigurationError if failure == "webhook" else RuntimeError):
             await app.run(settings)
@@ -72,6 +82,30 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
         dispatcher.start_polling.assert_awaited_once_with(
             bot, allowed_updates=["message"], close_bot_session=False
         )
+    bot.session.close.assert_awaited_once()
+    if failure in (None, "polling"):
+        open_repository.assert_called_once_with(Path("x/claims.sqlite3"))
+        repository.close.assert_called_once()
+    else:
+        open_repository.assert_not_called()
+
+
+async def test_storage_failure_stops_startup_before_polling(monkeypatch):
+    bot = SimpleNamespace(
+        get_me=AsyncMock(),
+        get_webhook_info=AsyncMock(return_value=SimpleNamespace(url="")),
+        set_my_commands=AsyncMock(),
+        session=SimpleNamespace(close=AsyncMock()),
+    )
+    dispatcher = SimpleNamespace(start_polling=AsyncMock())
+    monkeypatch.setattr(app, "Bot", Mock(return_value=bot))
+    monkeypatch.setattr(app, "create_dispatcher", Mock(return_value=dispatcher))
+    monkeypatch.setattr(
+        app, "open_sqlite_repository", Mock(side_effect=RepositoryError("disk full"))
+    )
+    with pytest.raises(RepositoryError):
+        await app.run(Settings(TOKEN, frozenset({42})))
+    dispatcher.start_polling.assert_not_awaited()
     bot.session.close.assert_awaited_once()
 
 
