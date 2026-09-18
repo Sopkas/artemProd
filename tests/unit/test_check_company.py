@@ -65,3 +65,24 @@ async def test_limits_are_passed_to_the_provider():
     await check_company(VALID_INN, RecordingProvider(), limits=limits)
     assert seen[0].limits == limits
     assert seen[0].sections == tuple(Section)
+
+
+@pytest.mark.parametrize("variant", ["empty", "missing", "wrong_inn", "mixed_mode", "duplicate"])
+async def test_provider_contract_violation_is_rejected(variant):
+    from dataclasses import replace
+
+    class InvalidProvider:
+        async def fetch(self, request):
+            snapshots = await DemoCompanyDataProvider().fetch(request)
+            if variant == "empty":
+                return ()
+            if variant == "missing":
+                return snapshots[:1]
+            if variant == "wrong_inn":
+                return await DemoCompanyDataProvider().fetch(CompanyDataRequest(inn=ZERO_INN))
+            if variant == "mixed_mode":
+                return (replace(snapshots[0], mode=DataMode.LIVE), *snapshots[1:])
+            return (snapshots[0], snapshots[0], snapshots[2])
+
+    with pytest.raises(ValueError):
+        await check_company(VALID_INN, InvalidProvider())

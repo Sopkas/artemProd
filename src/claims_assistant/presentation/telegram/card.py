@@ -64,11 +64,15 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
             lines.append(f"  Причина: {snapshot.error.message}")
         for reason in snapshot.missing:
             lines.append(f"  Ограничение: {reason}")
+        lines.append(f"  Источник: {snapshot.source}, получено {_date(snapshot.fetched_at)}")
         return lines
     for fact in snapshot.facts:
         lines.append(f"  {_fact(fact)}")
     if not snapshot.facts and snapshot.section == Section.BANKRUPTCY:
-        lines.append("  За проверенный период сообщений не найдено.")
+        if snapshot.coverage == Coverage.COMPLETE:
+            lines.append("  За проверенный период сообщений не найдено.")
+        else:
+            lines.append("  В полученной части данных сообщений нет; проверка неполная.")
     if snapshot.covered_period is not None:
         lines.append(f"  Период: {_period(snapshot.covered_period)}")
     for reason in snapshot.missing:

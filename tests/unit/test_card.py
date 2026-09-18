@@ -163,3 +163,17 @@ def test_money_formatting_uses_russian_grouping_and_unit():
     text = format_card(CompanyCheck(INN, (snapshot,)))
     assert "1 234 567,50 ₽" in text
     assert "2024" in text
+
+
+async def test_partial_empty_bankruptcy_is_not_reported_as_complete_absence():
+    from claims_assistant.application.check_company import check_company
+    from claims_assistant.infrastructure.demo.company_data import (
+        DemoCompanyDataProvider,
+        DemoScenario,
+    )
+
+    check = await check_company(INN, DemoCompanyDataProvider(DemoScenario.INCOMPLETE))
+    text = format_card(check)
+    assert "проверка неполная" in text
+    assert "За проверенный период сообщений не найдено" not in text
+    assert text.count("Источник:") == 3
