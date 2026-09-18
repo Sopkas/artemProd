@@ -1,6 +1,7 @@
 from datetime import date
 
 from claims_assistant.domain.analysis import AnalysisRun, RunStatus
+from claims_assistant.domain.external import DataMode
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 
 START = (
@@ -140,7 +141,7 @@ def run_status(run: AnalysisRun) -> str:
     ]
     if run.failure:
         lines.append(f"Причина: {run.failure}")
-    if run.mode == "demo":
+    if run.mode is DataMode.DEMO:
         lines.append("Режим: демонстрационные данные.")
     return "\n".join(lines)
 

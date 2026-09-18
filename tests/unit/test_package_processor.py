@@ -70,3 +70,19 @@ async def test_run_without_counterparties_file_fails(tmp_path):
     files = LocalFileStorage(tmp_path / "uploads")
     outcome = await PackageProcessor(files, OpenpyxlSheetReader()).process(run)
     assert outcome.status == RunStatus.FAILED
+
+
+async def test_file_with_no_usable_rows_fails_with_its_own_reason(tmp_path):
+    from claims_assistant.application.package_processor import NO_USABLE_ROWS
+    from claims_assistant.domain.counterparties import CounterpartyRow
+
+    # Accepted with the matching cut-off date, then re-processed under a different one:
+    # every row now fails the cut-off rule, so nothing usable remains.
+    rows = (CounterpartyRow(inn="1234567894", debt=Decimal("5.00"), cutoff_date=DAY),)
+    run, files = await accepted(tmp_path, build_counterparties_template(rows))
+    from dataclasses import replace
+
+    shifted = replace(run, analysis_date=date(2026, 9, 2))
+    outcome = await PackageProcessor(files, OpenpyxlSheetReader()).process(shifted)
+    assert outcome.status == RunStatus.FAILED
+    assert outcome.failure == NO_USABLE_ROWS

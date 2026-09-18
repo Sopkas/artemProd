@@ -15,6 +15,7 @@ from .imports import SheetReader, import_counterparties
 
 NO_MAIN_FILE = "В пакете нет файла «Контрагенты»."
 FILE_UNREADABLE = "Файл пакета недоступен или повреждён; загрузите проверку заново."
+NO_USABLE_ROWS = "В файле не осталось пригодных строк; исправьте данные и загрузите заново."
 
 
 class PackageProcessor:
@@ -34,7 +35,7 @@ class PackageProcessor:
             import_counterparties, self._reader, data, analysis_date=run.analysis_date
         )
         if not result.rows:
-            return RunOutcome(RunStatus.FAILED, FILE_UNREADABLE)
+            return RunOutcome(RunStatus.FAILED, NO_USABLE_ROWS)
         errors = sum(1 for issue in result.issues if issue.severity is IssueSeverity.ERROR)
         if errors:
             return RunOutcome(
