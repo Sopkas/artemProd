@@ -17,12 +17,17 @@ from claims_assistant.domain.external import (
     ProviderError,
     Section,
 )
+from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.scoring import Priority, assess
 from claims_assistant.domain.serialization import (
     SCHEMA,
     PayloadError,
     assessment_from_dict,
     assessment_to_dict,
+    counterparty_row_from_dict,
+    counterparty_row_to_dict,
+    import_issue_from_dict,
+    import_issue_to_dict,
     snapshot_from_dict,
     snapshot_to_dict,
 )
@@ -188,3 +193,91 @@ def test_bool_is_not_accepted_as_a_number_or_an_int_as_a_bool():
     bad["base_complete"] = 1
     with pytest.raises(PayloadError):
         assessment_from_dict(bad)
+
+
+# --- import step: «Контрагенты» rows and import issues ---
+
+FULL = CounterpartyRow(
+    inn=INN,
+    name="ООО «Ромашка»",
+    cutoff_date=date(2026, 9, 1),
+    debt=Decimal("150000.50"),
+    overdue_days=45,
+    last_payment_date=date(2026, 7, 15),
+)
+ISSUE = ImportIssue(
+    code="debt_negative",
+    severity=IssueSeverity.ERROR,
+    sheet="Контрагенты",
+    reason="Сумма долга не может быть отрицательной.",
+    row=7,
+    column="D",
+)
+
+
+@pytest.mark.parametrize("row", [FULL, CounterpartyRow(inn=INN)], ids=["full", "inn-only"])
+def test_counterparty_row_round_trips_exactly(row):
+    assert counterparty_row_from_dict(through_json(counterparty_row_to_dict(row))) == row
+
+
+def test_import_issue_round_trips_exactly():
+    sheet_issue = ImportIssue("sheet_missing", IssueSeverity.ERROR, "Контрагенты", "Нет листа.")
+    for issue in (ISSUE, sheet_issue):
+        assert import_issue_from_dict(through_json(import_issue_to_dict(issue))) == issue
+
+
+def test_reads_the_shape_the_s3_01_import_step_already_stores():
+    # Literally what step_payloads wrote before the move: saved steps stay readable.
+    stored = {
+        "inn": INN,
+        "name": None,
+        "cutoff_date": "2026-09-01",
+        "debt": "100.00",
+        "overdue_days": 5,
+        "last_payment_date": None,
+    }
+    row = counterparty_row_from_dict(stored)
+    assert row.debt == Decimal("100.00") and isinstance(row.debt, Decimal)
+    assert counterparty_row_to_dict(row) == stored
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("inn", 1234567894),  # a number, not a string
+        ("inn", "1234567890"),  # ten digits, wrong control digit
+        ("debt", "abc"),  # InvalidOperation, not ValueError
+        ("debt", "NaN"),
+        ("debt", 100.5),  # a float: amounts are strings
+        ("debt", "-1.00"),  # the row forbids a negative debt
+        ("overdue_days", True),  # a bool is not an int
+        ("overdue_days", "5"),
+        ("cutoff_date", "01.09.2026"),
+        ("name", 42),
+    ],
+)
+def test_malformed_row_is_rejected_without_echoing_it(field, value):
+    data = counterparty_row_to_dict(FULL)
+    data[field] = value
+    with pytest.raises(PayloadError) as error:
+        counterparty_row_from_dict(data)
+    assert INN not in str(error.value) and "Ромашка" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("severity", "fatal"),
+        ("row", True),
+        ("row", "7"),
+        ("row", 0),  # the issue requires an Excel row from 1
+        ("column", 4),
+        ("code", "Not Snake"),
+        ("reason", None),
+    ],
+)
+def test_malformed_issue_is_rejected(field, value):
+    data = import_issue_to_dict(ISSUE)
+    data[field] = value
+    with pytest.raises(PayloadError):
+        import_issue_from_dict(data)
