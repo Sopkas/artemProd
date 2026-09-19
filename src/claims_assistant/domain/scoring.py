@@ -5,8 +5,9 @@ of one INN and, optionally, its «Контрагенты» row. Missing data is 
 indicator that cannot be checked goes to ``missing_data`` and, without any signal, the
 result is ``unknown`` («недостаточно данных»), not ``low``.
 
-Internal signals (overdue, payments, debt growth) arrive in S4-07 through
-``internal_signals``; the assembly already treats every signal the same way.
+Internal signals from the «Контрагенты» row (S4-07) are computed here: overdue buckets and
+the age of the last payment. Signals that need the payments file or the debt history
+(S4-05) arrive through ``internal_signals``; the assembly treats every signal alike.
 """
 
 from collections.abc import Iterable, Sequence
@@ -28,6 +29,15 @@ from claims_assistant.domain.external import (
 
 RULES_VERSION = "0.1"
 REVENUE_DROP_PERCENT = Decimal("30")
+# Thresholds are exclusive lower bounds: 60 days is still medium, 61 is high.
+OVERDUE_HIGH_AFTER_DAYS = 60
+OVERDUE_MEDIUM_AFTER_DAYS = 30
+NO_PAYMENTS_AFTER_DAYS = 60
+
+# IDs of the internal values in «Основания»; signals cite them like external fact IDs.
+INTERNAL_DEBT = "internal-debt"
+INTERNAL_OVERDUE = "internal-overdue"
+INTERNAL_LAST_PAYMENT = "internal-last-payment"
 
 
 class Priority(StrEnum):
@@ -198,6 +208,60 @@ def _finance_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
     return signals
 
 
+def payment_age_days(row: CounterpartyRow, analysis_date: date) -> int | None:
+    """Days from the last confirmed payment to the analysis date; None if unknown.
+
+    A payment dated after the analysis date is a contradiction, not an age of zero.
+    """
+    if row.last_payment_date is None:
+        return None
+    age = (analysis_date - row.last_payment_date).days
+    return age if age >= 0 else None
+
+
+def row_signals(row: CounterpartyRow, analysis_date: date | None) -> tuple[Signal, ...]:
+    """Overdue buckets and payment age from the row; unknown values never fire a rule."""
+    signals = []
+    days = row.overdue_days
+    # The overdue rules are mutually exclusive.
+    if days is not None and days > OVERDUE_HIGH_AFTER_DAYS:
+        signals.append(
+            Signal(
+                "overdue_60",
+                Priority.HIGH,
+                f"Просрочка {days} дн. — больше {OVERDUE_HIGH_AFTER_DAYS}.",
+                (INTERNAL_OVERDUE,),
+                value=str(days),
+                observed_on=row.cutoff_date,
+            )
+        )
+    elif days is not None and days > OVERDUE_MEDIUM_AFTER_DAYS:
+        signals.append(
+            Signal(
+                "overdue_30",
+                Priority.MEDIUM,
+                f"Просрочка {days} дн. — от {OVERDUE_MEDIUM_AFTER_DAYS + 1} "
+                f"до {OVERDUE_HIGH_AFTER_DAYS}.",
+                (INTERNAL_OVERDUE,),
+                value=str(days),
+                observed_on=row.cutoff_date,
+            )
+        )
+    age = payment_age_days(row, analysis_date) if analysis_date is not None else None
+    if age is not None and age > NO_PAYMENTS_AFTER_DAYS and row.debt is not None and row.debt > 0:
+        signals.append(
+            Signal(
+                "no_payments_60",
+                Priority.MEDIUM,
+                f"Последний подтверждённый платёж {age} дн. назад при положительном долге.",
+                (INTERNAL_LAST_PAYMENT, INTERNAL_DEBT),
+                value=str(age),
+                observed_on=row.last_payment_date,
+            )
+        )
+    return tuple(signals)
+
+
 def _external_gaps(
     snapshots: dict[Section, ExternalSnapshot],
 ) -> tuple[list[str], dict[str, Coverage], bool]:
@@ -245,8 +309,14 @@ def assess(
     snapshots: Iterable[ExternalSnapshot],
     row: CounterpartyRow | None = None,
     internal_signals: Sequence[Signal] = (),
+    analysis_date: date | None = None,
 ) -> Assessment:
-    """Apply the external rules and assemble one priority for the INN."""
+    """Apply the external and internal rules and assemble one priority for the INN.
+
+    Internal signals are computed from ``row``; the analysis date defaults to the row's
+    cut-off date, which the parser keeps equal to it. ``internal_signals`` adds signals
+    from other data (payments file, debt history).
+    """
     by_section: dict[Section, ExternalSnapshot] = {}
     for snapshot in snapshots:
         if snapshot.inn != inn:
@@ -257,6 +327,7 @@ def assess(
         *_company_signals(by_section.get(Section.COMPANY)),
         *_bankruptcy_signals(by_section.get(Section.BANKRUPTCY)),
         *_finance_signals(by_section.get(Section.FINANCES)),
+        *(row_signals(row, analysis_date or row.cutoff_date) if row is not None else ()),
         *internal_signals,
     ]
     external_missing, coverage, external_complete = _external_gaps(by_section)
