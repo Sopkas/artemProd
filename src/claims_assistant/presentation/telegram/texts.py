@@ -85,6 +85,8 @@ INTERACTIONS_FILE_PROMPT = (
     "Отправьте файл .xlsx с листом «Взаимодействия» (до 10 МБ). "
     "Шаблон — выше.\nЧтобы вернуться к пакету, нажмите «Отмена»."
 )
+PACKAGE_BLOCKED_TITLE = "Проверка не запущена"
+PACKAGE_REVIEW_TITLE = "Проверка пакета"
 LEDGER_CANCELLED = "Файл не добавлен, пакет сохранён. " + CHECK_CONFIRM
 FILE_KIND_LABELS = {
     FileKind.COUNTERPARTIES: "Контрагенты",
@@ -213,6 +215,26 @@ def ledger_summary(
         lines.append("Строки с ошибками в проверку не попадут.")
     lines.extend(_composition_block(composition))
     lines.append(CHECK_CONFIRM)
+    return "\n".join(lines)
+
+
+def package_conflict(reason: str) -> str:
+    return f"Файл не принят. {reason}"
+
+
+def package_blocked(issues: tuple[ImportIssue, ...]) -> str:
+    lines = [f"{PACKAGE_BLOCKED_TITLE}: пакет собран неверно."]
+    lines.extend(f"• {issue.reason}" for issue in issues[:_MAX_LISTED_ISSUES])
+    lines.append("Нажмите «Отмена» и соберите пакет заново.")
+    return "\n".join(lines)
+
+
+def package_review(issues: tuple[ImportIssue, ...]) -> str:
+    """Cross-file findings shown once at launch; per-file issues were shown on upload."""
+    lines = [f"{PACKAGE_REVIEW_TITLE}: замечаний {len(issues)}."]
+    lines.extend(_issue_line(issue) for issue in issues[:_MAX_LISTED_ISSUES])
+    if len(issues) > _MAX_LISTED_ISSUES:
+        lines.append(f"… и ещё {len(issues) - _MAX_LISTED_ISSUES}")
     return "\n".join(lines)
 
 

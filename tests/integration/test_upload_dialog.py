@@ -613,3 +613,60 @@ async def test_interactions_are_attached_and_counted(setup, bot, update_factory)
     run = (await repository.list_runs(OWNER))[0]
     assert [f.kind for f in run.files] == [FileKind.COUNTERPARTIES, FileKind.INTERACTIONS]
     assert run.files[1].coverage is None
+
+
+# --- S4-03: the package as a whole ---
+
+
+async def test_second_different_counterparties_file_is_refused_with_an_explanation(
+    setup, bot, update_factory
+):
+    from claims_assistant.application.check_package import MAIN_FILE_ALREADY_IN_PACKAGE
+    from claims_assistant.domain.counterparties import CounterpartyRow
+
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    other = build_counterparties_template(
+        (CounterpartyRow(inn=INN_1, cutoff_date=date(2026, 9, 1)),)
+    )
+    reply = await send_document(dispatcher, bot, update_factory, other, name="other.xlsx")
+    assert reply.text == texts.package_conflict(MAIN_FILE_ALREADY_IN_PACKAGE)
+    assert buttons(reply) == LAUNCH_MENU
+    assert len((await repository.list_runs(OWNER))[0].files) == 1
+
+
+async def test_launch_reports_cross_file_findings_once(setup, bot, update_factory):
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    same = [INN_1, "P-1", date(2026, 7, 15), 100.0]
+    for name in ("p1.xlsx", "p2.xlsx"):
+        await send(dispatcher, bot, update_factory, "Добавить платежи")
+        await send(dispatcher, bot, update_factory, "01.06.2026–31.08.2026")
+        rows = [same] if name == "p1.xlsx" else [same, [INN_1, "P-9", date(2026, 8, 1), 1.0]]
+        await send_document(dispatcher, bot, update_factory, payments_file(rows), name=name)
+    reply = await send(dispatcher, bot, update_factory, "Запустить проверку")
+    assert reply.text.startswith(texts.PACKAGE_REVIEW_TITLE)
+    assert "повторяется в другом файле пакета" in reply.text
+    assert texts.CHECK_QUEUED_PREFIX in reply.text
+    assert (await repository.list_runs(OWNER))[0].status == RunStatus.QUEUED
+
+
+async def test_launch_is_blocked_when_the_package_is_malformed(setup, bot, update_factory):
+    from claims_assistant.application.analysis_repository import NewFile
+    from claims_assistant.domain.analysis import FileKind
+
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    run = (await repository.list_runs(OWNER))[0]
+    await repository.add_file(
+        OWNER,
+        run.id,
+        NewFile(
+            kind=FileKind.COUNTERPARTIES,
+            checksum="c" * 64,
+            size_bytes=5,
+            stored_path=f"{run.id}/second.xlsx",
+        ),
+    )
+    reply = await send(dispatcher, bot, update_factory, "Запустить проверку")
+    assert reply.text.startswith(texts.PACKAGE_BLOCKED_TITLE)
+    assert "больше одного файла «Контрагенты»" in reply.text
+    assert buttons(reply) == LAUNCH_MENU
+    assert (await repository.list_runs(OWNER))[0].status == RunStatus.DRAFT

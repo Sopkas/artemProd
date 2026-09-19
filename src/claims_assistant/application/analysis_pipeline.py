@@ -33,7 +33,8 @@ from .analysis_queue import RunOutcome
 from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
 from .external_guard import BUDGET_EXHAUSTED, TRANSIENT_CODES, RunBudget
-from .imports import SheetReader, import_counterparties
+from .imports import SheetReader
+from .package_checks import PackageIntegrityError, review_package
 from .step_payloads import PayloadError, dump_import, dump_snapshots, load_import, load_snapshots
 from .step_store import ReportStore, StepStore
 
@@ -216,19 +217,22 @@ class AnalysisPipeline:
     async def _read_package(
         self, run: AnalysisRun
     ) -> tuple[tuple[CounterpartyRow, ...], tuple[ImportIssue, ...]]:
-        main = [file for file in run.files if file.kind == FileKind.COUNTERPARTIES]
-        if not main:
+        """The whole package (S4-03): every file is checked on its own and against the
+        others; the issues go to the report's «Качество данных»."""
+        if not any(file.kind == FileKind.COUNTERPARTIES for file in run.files):
             raise _Failed(NO_MAIN_FILE)
         try:
-            data = await asyncio.to_thread(self._files.read, main[0].stored_path)
+            review = await review_package(run, self._files, self._reader)
+        except PackageIntegrityError as error:
+            logger.error("package_integrity run_id=%s", run.id)
+            raise _Failed(str(error)) from None
         except StorageError:
             raise _Failed(FILE_UNREADABLE) from None
-        result = await asyncio.to_thread(
-            import_counterparties, self._reader, data, analysis_date=run.analysis_date
-        )
-        if not result.rows:
+        if review.blocking:
+            raise _Failed(review.blocking[0].reason)
+        if not review.counterparties:
             raise _Failed(NO_USABLE_ROWS)
-        return result.rows, result.issues
+        return review.counterparties, review.issues
 
     # --- external data ------------------------------------------------------------
 

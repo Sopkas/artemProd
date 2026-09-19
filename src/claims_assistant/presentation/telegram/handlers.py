@@ -17,6 +17,7 @@ from claims_assistant.application.check_package import (
     FileStorage,
     LedgerAccepted,
     PackageAccepted,
+    PackageConflict,
     accept_counterparties,
     accept_ledger,
     latest_run,
@@ -24,6 +25,11 @@ from claims_assistant.application.check_package import (
 )
 from claims_assistant.application.company_data import CompanyDataProvider
 from claims_assistant.application.imports import SheetReader
+from claims_assistant.application.package_checks import (
+    PACKAGE_SHEET,
+    PackageIntegrityError,
+    review_package,
+)
 from claims_assistant.application.report_delivery import (
     ReportUnavailable,
     confirm_delivery,
@@ -181,6 +187,9 @@ def create_dispatcher(
             logger.error("package_failed error_type=%s", type(exc).__name__)
             await state.clear()
             await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
+        if isinstance(result, PackageConflict):
+            await message.answer(texts.package_conflict(result.reason), reply_markup=launch_menu())
             return
         if not isinstance(result, PackageAccepted):
             await message.answer(texts.package_rejected(result.issues), reply_markup=cancel_menu())
@@ -396,6 +405,22 @@ def create_dispatcher(
     async def launch(message: Message, state: FSMContext) -> None:
         run_id = (await state.get_data())["run_id"]
         try:
+            draft = await repository.get_run(message.from_user.id, run_id)
+            review = await review_package(draft, files, reader)
+        except PackageIntegrityError:
+            logger.error("package_integrity run_id=%s", run_id)
+            await state.clear()
+            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
+        except Exception as exc:
+            logger.error("package_review_failed error_type=%s", type(exc).__name__)
+            await state.clear()
+            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
+        if review.blocking:
+            await message.answer(texts.package_blocked(review.blocking), reply_markup=launch_menu())
+            return
+        try:
             run = await launch_run(message.from_user.id, run_id, repository)
         except Exception as exc:
             logger.error("launch_failed error_type=%s", type(exc).__name__)
@@ -403,7 +428,15 @@ def create_dispatcher(
             await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
             return
         await state.clear()
-        await message.answer(texts.check_queued(run), reply_markup=main_menu())
+        cross_file = tuple(
+            issue
+            for issue in review.issues
+            if issue.sheet == PACKAGE_SHEET or issue.code.endswith("_across_files")
+        )
+        text = texts.check_queued(run)
+        if cross_file:
+            text = texts.package_review(cross_file) + "\n\n" + text
+        await message.answer(text, reply_markup=main_menu())
 
     @router.message(CheckDialog.confirming, F.text == ADD_PAYMENTS)
     async def add_payments(message: Message, state: FSMContext) -> None:
