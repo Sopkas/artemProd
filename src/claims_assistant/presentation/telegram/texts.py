@@ -18,6 +18,7 @@ HELP = (
     "/inn — проверить ИНН\n"
     "/check — новая проверка по файлу «Контрагенты»\n"
     "/status — состояние последней проверки\n"
+    "/report — отчёт по последней проверке\n"
     "/cancel — отменить ввод\n\n"
     "Можно также воспользоваться кнопками меню. "
     "Дополнительные файлы (платежи, взаимодействия, история долга) появятся позже."
@@ -62,6 +63,12 @@ CHECK_QUEUED_PREFIX = "Проверка поставлена в очередь"
 CHECK_CANCELLED = "Новая проверка отменена. Черновик, если он был создан, не запускается."
 STATUS_TITLE = "Последняя проверка"
 STATUS_EMPTY = "Проверок пока нет. Нажмите «Новая проверка», чтобы загрузить список."
+STATUS_REPORT_HINT = "Отчёт готов — нажмите «Отчёт» или /report, чтобы получить файл ещё раз."
+REPORT_EMPTY = "Готового отчёта пока нет. Он появится после завершения проверки."
+REPORT_UNAVAILABLE = (
+    "Файл отчёта не найден в хранилище. Запустите новую проверку или обратитесь к разработчику."
+)
+REPORT_SEND_FAILED = "Не удалось отправить файл. Попробуйте ещё раз: «Отчёт» или /report."
 
 _STATUS_LABELS = {
     RunStatus.DRAFT: "черновик, не запущена",
@@ -132,7 +139,14 @@ def check_queued(run: AnalysisRun) -> str:
     )
 
 
-def run_status(run: AnalysisRun) -> str:
+def report_caption(run: AnalysisRun) -> str:
+    caption = f"Отчёт по проверке: дата анализа {_date(run.analysis_date)}."
+    if run.mode is DataMode.DEMO:
+        caption += " Демонстрационные данные."
+    return caption
+
+
+def run_status(run: AnalysisRun, has_report: bool = False) -> str:
     lines = [
         f"{STATUS_TITLE}: {status_label(run.status)}",
         f"Дата анализа: {_date(run.analysis_date)}",
@@ -141,6 +155,8 @@ def run_status(run: AnalysisRun) -> str:
     ]
     if run.failure:
         lines.append(f"Причина: {run.failure}")
+    if has_report:
+        lines.append(STATUS_REPORT_HINT)
     if run.mode is DataMode.DEMO:
         lines.append("Режим: демонстрационные данные.")
     return "\n".join(lines)

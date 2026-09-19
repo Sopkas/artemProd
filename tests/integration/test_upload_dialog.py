@@ -14,7 +14,7 @@ from claims_assistant.presentation.telegram import texts
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 
 OWNER = 42
-MAIN_MENU = ["Проверить ИНН", "Новая проверка", "Статус", "О сервисе", "Помощь"]
+MAIN_MENU = ["Проверить ИНН", "Новая проверка", "Статус", "Отчёт", "О сервисе", "Помощь"]
 
 
 def buttons(reply) -> list[str]:
@@ -279,3 +279,129 @@ async def test_status_shows_the_failure_reason_after_processing(setup, bot, upda
     reply = await send(dispatcher, bot, update_factory, "/status")
     assert texts.status_label(RunStatus.PARTIAL) in reply.text
     assert "Строк с ошибками: 1" in reply.text
+
+
+# --- S3-03: a finished report is sent again without a new check ---
+
+
+async def _finished_run_with_report(setup, bot, update_factory, tmp_path):
+    dispatcher, repository = setup
+    await start_check(dispatcher, bot, update_factory)
+    await send_document(dispatcher, bot, update_factory, build_counterparties_template())
+    await send(dispatcher, bot, update_factory, "Запустить проверку")
+    run = await repository.claim_next()
+    from claims_assistant.application.analysis_queue import RunOutcome
+
+    await repository.finish(run.id, RunOutcome(RunStatus.COMPLETED))
+    stored_path = LocalFileStorage(tmp_path / "uploads").save(run.id, b"PK-report-bytes")
+    await repository.save_report(run.id, stored_path)
+    return dispatcher, repository, run
+
+
+@pytest.mark.parametrize("entry", ["/report", "Отчёт"])
+async def test_report_is_sent_and_delivery_recorded(setup, bot, update_factory, tmp_path, entry):
+    from claims_assistant.domain.steps import DeliveryStatus
+
+    dispatcher, repository, run = await _finished_run_with_report(
+        setup, bot, update_factory, tmp_path
+    )
+    calls_before = len(bot.session.calls)
+    await dispatcher.feed_update(bot, update_factory(entry, user_id=OWNER))
+    sent = [c for c in bot.session.calls[calls_before:] if isinstance(c, SendDocument)]
+    assert len(sent) == 1
+    assert sent[0].document.filename.endswith(".xlsx")
+    assert sent[0].document.data == b"PK-report-bytes"
+    report = await repository.get_report(OWNER, run.id)
+    assert report.delivery is DeliveryStatus.DELIVERED
+    # No new run was created or queued by resending.
+    assert len(await repository.list_runs(OWNER)) == 1
+    assert (await repository.get_run(OWNER, run.id)).status == RunStatus.COMPLETED
+    assert await repository.claim_next() is None
+
+
+async def test_report_of_the_previous_check_stays_available_after_a_new_one_starts(
+    setup, bot, update_factory, tmp_path
+):
+    """Review B on #23: a draft or queued check started later must not hide the report."""
+    dispatcher, repository, run = await _finished_run_with_report(
+        setup, bot, update_factory, tmp_path
+    )
+    await start_check(dispatcher, bot, update_factory)
+    await send_document(dispatcher, bot, update_factory, build_counterparties_template())
+    assert (await repository.list_runs(OWNER))[0].id != run.id  # the draft is newest now
+    calls_before = len(bot.session.calls)
+    await dispatcher.feed_update(bot, update_factory("/report", user_id=OWNER))
+    sent = [c for c in bot.session.calls[calls_before:] if isinstance(c, SendDocument)]
+    assert len(sent) == 1 and sent[0].document.data == b"PK-report-bytes"
+    assert sent[0].caption == texts.report_caption(run)
+    assert run.analysis_date.strftime("%d.%m.%Y") in sent[0].caption
+    # The draft is untouched: still a draft, still the newest run, nothing queued.
+    assert (await repository.list_runs(OWNER))[0].status == RunStatus.DRAFT
+    assert await repository.claim_next() is None
+
+
+async def test_send_failure_asks_to_retry_and_marks_delivery_failed(
+    setup, bot, update_factory, tmp_path, caplog
+):
+    from claims_assistant.domain.steps import DeliveryStatus
+
+    dispatcher, repository, run = await _finished_run_with_report(
+        setup, bot, update_factory, tmp_path
+    )
+    bot.session.fail_once = RuntimeError("telegram network error with private text")
+    reply = await send(dispatcher, bot, update_factory, "/report")
+    assert reply.text == texts.REPORT_SEND_FAILED
+    assert buttons(reply) == MAIN_MENU
+    assert (await repository.get_report(OWNER, run.id)).delivery is DeliveryStatus.FAILED
+    assert "report_delivery_failed" in caplog.text and "private text" not in caplog.text
+    # The file is intact: the next /report succeeds.
+    calls_before = len(bot.session.calls)
+    await dispatcher.feed_update(bot, update_factory("/report", user_id=OWNER))
+    assert any(isinstance(c, SendDocument) for c in bot.session.calls[calls_before:])
+    assert (await repository.get_report(OWNER, run.id)).delivery is DeliveryStatus.DELIVERED
+
+
+async def test_report_can_be_sent_twice(setup, bot, update_factory, tmp_path):
+    dispatcher, repository, run = await _finished_run_with_report(
+        setup, bot, update_factory, tmp_path
+    )
+    await dispatcher.feed_update(bot, update_factory("/report", user_id=OWNER))
+    await dispatcher.feed_update(bot, update_factory("/report", user_id=OWNER))
+    assert len([c for c in bot.session.calls if isinstance(c, SendDocument)]) >= 3  # template + 2
+
+
+async def test_report_without_a_finished_run_explains(setup, bot, update_factory):
+    dispatcher, _ = setup
+    reply = await send(dispatcher, bot, update_factory, "/report")
+    assert reply.text == texts.REPORT_EMPTY
+    assert buttons(reply) == MAIN_MENU
+
+
+async def test_report_is_owner_scoped(setup, bot, update_factory, tmp_path):
+    dispatcher, repository, run = await _finished_run_with_report(
+        setup, bot, update_factory, tmp_path
+    )
+    reply = await send(dispatcher, bot, update_factory, "/report", user_id=43)
+    assert reply.text == texts.REPORT_EMPTY
+
+
+async def test_missing_report_file_marks_delivery_failed(setup, bot, update_factory, tmp_path):
+    from claims_assistant.domain.steps import DeliveryStatus
+
+    dispatcher, repository, run = await _finished_run_with_report(
+        setup, bot, update_factory, tmp_path
+    )
+    report = await repository.get_report(OWNER, run.id)
+    LocalFileStorage(tmp_path / "uploads").remove(report.stored_path)
+    reply = await send(dispatcher, bot, update_factory, "/report")
+    assert reply.text == texts.REPORT_UNAVAILABLE
+    assert (await repository.get_report(OWNER, run.id)).delivery is DeliveryStatus.FAILED
+    assert (await repository.get_run(OWNER, run.id)).status == RunStatus.COMPLETED
+
+
+async def test_status_mentions_the_report_when_it_exists(setup, bot, update_factory, tmp_path):
+    dispatcher, repository, run = await _finished_run_with_report(
+        setup, bot, update_factory, tmp_path
+    )
+    reply = await send(dispatcher, bot, update_factory, "/status")
+    assert texts.STATUS_REPORT_HINT in reply.text

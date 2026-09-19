@@ -92,6 +92,7 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
             "inn",
             "check",
             "status",
+            "report",
             "cancel",
         ]
         assert bot.set_my_commands.call_args.kwargs["scope"].type == "all_private_chats"
@@ -196,8 +197,18 @@ async def test_worker_runs_alongside_polling_and_stops_with_it(monkeypatch):
             self.stopped = True
             seen.append("stopped")
 
+    processors = []
+    real_processor = app.PackageProcessor
+
+    def capture_processor(*args, **kwargs):
+        processors.append((args, kwargs))
+        return real_processor(*args, **kwargs)
+
+    monkeypatch.setattr(app, "PackageProcessor", capture_processor)
     monkeypatch.setattr(app, "RunWorker", Worker)
     await asyncio.wait_for(app.run(Settings(TOKEN, frozenset({42}))), timeout=2)
     assert seen[:2] == ["worker", "polling"] or seen[:2] == ["polling", "worker"]
     assert seen[-1] == "stopped"
     repository.close.assert_called_once()
+    # The processor gets the repository as its step store, so resumed runs skip saved steps.
+    assert processors and processors[0][1]["steps"] is repository
