@@ -28,7 +28,13 @@ from claims_assistant.domain.external import (
 )
 from claims_assistant.domain.imports import IssueSeverity
 from claims_assistant.domain.report import DEMO_SCORE_NOTE, AnalysisReport, ReportRow
-from claims_assistant.domain.scoring import Priority, report_order_key
+from claims_assistant.domain.scoring import (
+    INTERNAL_DEBT,
+    INTERNAL_LAST_PAYMENT,
+    INTERNAL_OVERDUE,
+    Priority,
+    report_order_key,
+)
 
 SHEETS = ("Приоритеты", "Основания", "Качество данных", "О проверке")
 _MAX_CELL = 32_767  # Excel's limit for one cell
@@ -241,15 +247,13 @@ def _internal_grounds(row: ReportRow) -> list[tuple[object, ...]]:
     where = "лист «Контрагенты»"
     rows = []
     if line.debt is not None:
-        rows.append(("internal-debt", line.inn, "Сумма долга", _money(line.debt), cutoff))
+        rows.append((INTERNAL_DEBT, line.inn, "Сумма долга", _money(line.debt), cutoff))
     if line.overdue_days is not None:
-        rows.append(
-            ("internal-overdue", line.inn, "Дней просрочки", str(line.overdue_days), cutoff)
-        )
+        rows.append((INTERNAL_OVERDUE, line.inn, "Дней просрочки", str(line.overdue_days), cutoff))
     if line.last_payment_date is not None:
         rows.append(
             (
-                "internal-last-payment",
+                INTERNAL_LAST_PAYMENT,
                 line.inn,
                 "Дата последнего платежа",
                 _day(line.last_payment_date),

@@ -18,6 +18,7 @@ from claims_assistant.domain.external import (
     Fact,
     FactKind,
     FetchStatus,
+    Period,
     ProviderError,
     Section,
 )
@@ -300,3 +301,64 @@ def test_report_order_is_rank_then_debt_then_overdue_then_inn():
         "1000000008",  # unknown
         "1000000009",  # low last
     ]
+
+
+# --- review A on #19 ---
+
+
+def finances_snapshot(facts, covered=None):
+    evidence = Evidence("finances", "test", "x")
+    return ExternalSnapshot(
+        inn=INN,
+        section=Section.FINANCES,
+        source="test",
+        mode=DataMode.LIVE,
+        fetched_at=NOW,
+        status=FetchStatus.OK,
+        coverage=Coverage.COMPLETE,
+        facts=tuple(facts),
+        evidence=(evidence,),
+        covered_period=covered,
+    )
+
+
+def revenue(year, amount, start=None, end=None, unit="RUB"):
+    return Fact(
+        f"revenue-{year}-{start}",
+        INN,
+        FactKind.REVENUE,
+        Decimal(amount),
+        ("finances",),
+        period=Period(start or date(year, 1, 1), end or date(year, 12, 31)),
+        unit=unit,
+    )
+
+
+def test_one_year_with_a_declared_covered_period_is_not_a_complete_base_set():
+    # A provider may declare a two-year covered period yet deliver one year of figures.
+    one_year = finances_snapshot(
+        [revenue(2025, "100")], covered=Period(date(2024, 1, 1), date(2025, 12, 31))
+    )
+    result = assess(INN, [company(), efrsb(), one_year], FULL_ROW)
+    assert result.base_complete is False
+    assert result.priority is Priority.UNKNOWN
+
+
+def test_a_quarter_is_not_compared_with_a_year():
+    quarter = revenue(2025, "10", start=date(2025, 10, 1), end=date(2025, 12, 31))
+    snapshot = finances_snapshot([revenue(2024, "1000"), quarter])
+    result = assess(INN, [company(), efrsb(), snapshot], FULL_ROW)
+    assert "revenue_drop_30" not in {s.code for s in result.signals}
+    assert result.base_complete is False
+
+
+def test_years_in_different_units_are_not_comparable():
+    snapshot = finances_snapshot([revenue(2024, "1000"), revenue(2025, "1100", unit="USD")])
+    assert assess(INN, [company(), efrsb(), snapshot], FULL_ROW).base_complete is False
+
+
+def test_coverage_is_read_only_and_the_assessment_is_hashable():
+    result = assess(INN, clean_external(), FULL_ROW)
+    with pytest.raises(TypeError):
+        result.coverage["internal"] = Coverage.UNAVAILABLE
+    assert hash(result) == hash(assess(INN, clean_external(), FULL_ROW))

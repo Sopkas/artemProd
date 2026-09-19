@@ -226,3 +226,12 @@ def test_row_and_report_reject_mixed_or_duplicate_inns():
     meta = ReportMeta("r", DAY, DataMode.DEMO, NOW)
     with pytest.raises(ValueError):
         AnalysisReport(meta, (row, row))
+
+
+def test_internal_signal_reasons_cite_ids_present_in_grounds():
+    workbook = open_report(live_report([live_row(INN_B, Decimal("500.00"), 90)]))
+    (priority,) = data_rows(workbook["Приоритеты"])
+    assert priority[4] == PRIORITY_LABELS[Priority.HIGH]
+    assert "internal-overdue" in priority[6]
+    grounds = {row[0] for row in data_rows(workbook["Основания"])}
+    assert "internal-overdue" in grounds
