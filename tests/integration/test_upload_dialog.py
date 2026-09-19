@@ -17,6 +17,9 @@ OWNER = 42
 MAIN_MENU = ["Проверить ИНН", "Новая проверка", "Статус", "Отчёт", "О сервисе", "Помощь"]
 
 
+LAUNCH_MENU = ["Запустить проверку", "Добавить платежи", "Добавить историю долга", "Отмена"]
+
+
 def buttons(reply) -> list[str]:
     return [button.text for row in reply.reply_markup.keyboard for button in row]
 
@@ -126,7 +129,7 @@ async def test_valid_file_gives_a_summary_with_launch_button(setup, bot, update_
     assert texts.CHECK_SUMMARY_TITLE in reply.text
     assert "Организаций: 2" in reply.text
     assert "01.09.2026" in reply.text
-    assert buttons(reply) == ["Запустить проверку", "Отмена"]
+    assert buttons(reply) == LAUNCH_MENU
     run = (await repository.list_runs(OWNER))[0]
     assert run.status == RunStatus.DRAFT and len(run.files) == 1
 
@@ -405,3 +408,167 @@ async def test_status_mentions_the_report_when_it_exists(setup, bot, update_fact
     )
     reply = await send(dispatcher, bot, update_factory, "/status")
     assert texts.STATUS_REPORT_HINT in reply.text
+
+
+# --- S4-01: optional files of the package ---
+
+
+def payments_file(rows):
+    from claims_assistant.infrastructure.excel.ledgers import build_payments_workbook
+
+    return build_payments_workbook(rows)
+
+
+def history_file(rows):
+    from claims_assistant.infrastructure.excel.ledgers import build_debt_history_workbook
+
+    return build_debt_history_workbook(rows)
+
+
+INN_1, INN_2 = "7707083893", "7710140679"  # the two INNs of the counterparties template
+
+
+async def package_ready(setup, bot, update_factory):
+    dispatcher, repository = setup
+    await start_check(dispatcher, bot, update_factory)
+    reply = await send_document(dispatcher, bot, update_factory, build_counterparties_template())
+    assert "Состав пакета:" in reply.text and "• Контрагенты: 2 организаций" in reply.text
+    return dispatcher, repository
+
+
+async def test_payments_need_a_period_then_a_file_and_show_the_composition(
+    setup, bot, update_factory
+):
+    from claims_assistant.domain.analysis import FileKind
+    from claims_assistant.domain.external import Period
+
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    reply = await send(dispatcher, bot, update_factory, "Добавить платежи")
+    assert reply.text == texts.PAYMENTS_PERIOD_PROMPT and buttons(reply) == ["Отмена"]
+
+    documents_before = len([c for c in bot.session.calls if isinstance(c, SendDocument)])
+    reply = await send(dispatcher, bot, update_factory, "01.06.2026 – 31.08.2026")
+    assert reply.text == texts.PAYMENTS_FILE_PROMPT
+    sent = [c for c in bot.session.calls if isinstance(c, SendDocument)]
+    assert len(sent) == documents_before + 1 and sent[-1].document.filename == "platezhi.xlsx"
+
+    data = payments_file(
+        [[INN_1, "P-1", date(2026, 7, 15), 100.0], [INN_2, "P-2", date(2026, 8, 1), 5.0]]
+    )
+    reply = await send_document(dispatcher, bot, update_factory, data, name="pay.xlsx")
+    assert "Файл «Платежи» принят" in reply.text
+    assert "Строк принято: 2" in reply.text
+    assert "• Платежи: 2 строк, период 01.06.2026–31.08.2026" in reply.text
+    assert "• Контрагенты: 2 организаций" in reply.text
+    assert buttons(reply) == LAUNCH_MENU
+
+    run = (await repository.list_runs(OWNER))[0]
+    assert [file.kind for file in run.files] == [FileKind.COUNTERPARTIES, FileKind.PAYMENTS]
+    assert run.files[1].coverage == Period(date(2026, 6, 1), date(2026, 8, 31))
+    assert run.status == RunStatus.DRAFT
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "01.06.2026",
+        "31.08.2026–01.06.2026",
+        "01.06.2026–02.09.2026",
+        "вчера–сегодня",
+        "01.06.2026–31.08.2026–01.09.2026",
+    ],
+)
+async def test_bad_period_is_asked_again(setup, bot, update_factory, text):
+    dispatcher, _ = await package_ready(setup, bot, update_factory)
+    await send(dispatcher, bot, update_factory, "Добавить платежи")
+    reply = await send(dispatcher, bot, update_factory, text)
+    assert reply.text == texts.PAYMENTS_PERIOD_INVALID
+
+
+async def test_debt_history_is_attached_without_a_period(setup, bot, update_factory):
+    from claims_assistant.domain.analysis import FileKind
+
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    reply = await send(dispatcher, bot, update_factory, "Добавить историю долга")
+    assert reply.text == texts.HISTORY_FILE_PROMPT
+    last_document = [c for c in bot.session.calls if isinstance(c, SendDocument)][-1]
+    assert last_document.document.filename == "istoriya-dolga.xlsx"
+    data = history_file([[INN_1, date(2026, 8, 1), 100.0], [INN_1, date(2026, 9, 1), 120.0]])
+    reply = await send_document(dispatcher, bot, update_factory, data, name="hist.xlsx")
+    assert "Файл «История долга» принят" in reply.text
+    assert "• История долга: 2 строк\n" in reply.text + "\n"
+    run = (await repository.list_runs(OWNER))[0]
+    assert [f.kind for f in run.files] == [FileKind.COUNTERPARTIES, FileKind.DEBT_HISTORY]
+    assert run.files[1].coverage is None
+
+
+async def test_ledger_with_only_foreign_inns_is_rejected_and_not_stored(setup, bot, update_factory):
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    await send(dispatcher, bot, update_factory, "Добавить историю долга")
+    data = history_file([["1234567894", date(2026, 8, 1), 100.0]])
+    reply = await send_document(dispatcher, bot, update_factory, data, name="hist.xlsx")
+    assert "не принят" in reply.text and "нет в файле «Контрагенты»" in reply.text
+    assert buttons(reply) == ["Отмена"]
+    assert len((await repository.list_runs(OWNER))[0].files) == 1
+    # The user can still cancel back to the package and launch it.
+    reply = await send(dispatcher, bot, update_factory, "Отмена")
+    assert reply.text == texts.LEDGER_CANCELLED and buttons(reply) == LAUNCH_MENU
+    reply = await send(dispatcher, bot, update_factory, "Запустить проверку")
+    assert reply.text.startswith(texts.CHECK_QUEUED_PREFIX)
+    assert (await repository.list_runs(OWNER))[0].status == RunStatus.QUEUED
+
+
+async def test_cancel_during_the_period_keeps_the_package(setup, bot, update_factory):
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    await send(dispatcher, bot, update_factory, "Добавить платежи")
+    reply = await send(dispatcher, bot, update_factory, "/cancel")
+    assert reply.text == texts.LEDGER_CANCELLED
+    reply = await send(dispatcher, bot, update_factory, "Отмена")
+    assert reply.text == texts.CHECK_CANCELLED  # cancelling from the package drops the dialog
+    assert (await repository.list_runs(OWNER))[0].status == RunStatus.DRAFT
+
+
+async def test_same_ledger_twice_is_reported_not_duplicated(setup, bot, update_factory):
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    data = history_file([[INN_1, date(2026, 8, 1), 100.0]])
+    for _ in range(2):
+        await send(dispatcher, bot, update_factory, "Добавить историю долга")
+        reply = await send_document(dispatcher, bot, update_factory, data, name="hist.xlsx")
+    assert texts.CHECK_DUPLICATE in reply.text
+    assert len((await repository.list_runs(OWNER))[0].files) == 2
+
+
+async def test_launch_with_a_full_package_queues_all_files(setup, bot, update_factory):
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    await send(dispatcher, bot, update_factory, "Добавить платежи")
+    await send(dispatcher, bot, update_factory, "01.06.2026–31.08.2026")
+    payments = payments_file([[INN_1, "P-1", date(2026, 7, 15), 100.0]])
+    await send_document(dispatcher, bot, update_factory, payments, name="p.xlsx")
+    await send(dispatcher, bot, update_factory, "Добавить историю долга")
+    history = history_file([[INN_1, date(2026, 8, 1), 100.0]])
+    await send_document(dispatcher, bot, update_factory, history, name="h.xlsx")
+    reply = await send(dispatcher, bot, update_factory, "Запустить проверку")
+    assert "файлов 3" in reply.text
+    assert (await repository.list_runs(OWNER))[0].status == RunStatus.QUEUED
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("01.06.2026–31.08.2026", (date(2026, 6, 1), date(2026, 8, 31))),
+        ("01.06.2026 - 31.08.2026", (date(2026, 6, 1), date(2026, 8, 31))),
+        ("01.06.2026-31.08.2026", (date(2026, 6, 1), date(2026, 8, 31))),
+        ("2026-06-01 2026-09-01", (date(2026, 6, 1), date(2026, 9, 1))),
+        ("01.06.2026 — 01.06.2026", (date(2026, 6, 1), date(2026, 6, 1))),
+        ("01.06.2026", None),
+        ("02.09.2026–03.09.2026", None),  # after the analysis date
+        ("31.08.2026–01.06.2026", None),
+        ("сегодня–сегодня", None),  # «Сегодня» is not accepted inside a period
+    ],
+)
+def test_parse_period(text, expected):
+    from claims_assistant.domain.external import Period
+    from claims_assistant.presentation.telegram.handlers import parse_period
+
+    period = parse_period(text, date(2026, 9, 1))
+    assert period == (None if expected is None else Period(*expected))

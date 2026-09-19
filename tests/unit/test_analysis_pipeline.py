@@ -521,3 +521,42 @@ async def test_package_line_counts_rows_with_errors_and_usable_rows(tmp_path):
     about = sheet_rows(files.read(artifact.stored_path), "О проверке")
     text = " ".join(str(cell) for row in about for cell in row if cell is not None)
     assert "Контрагенты: 3 строк, пригодных 2" in text
+
+
+async def test_report_names_the_optional_files_of_the_package(tmp_path):
+    from claims_assistant.application.check_package import accept_ledger
+    from claims_assistant.domain.analysis import FileKind
+    from claims_assistant.domain.external import Period
+    from claims_assistant.infrastructure.excel.ledgers import build_payments_workbook
+
+    repository = InMemoryAnalysisRepository()
+    files = LocalFileStorage(tmp_path / "uploads")
+    reader = OpenpyxlSheetReader()
+    accepted_run = await accept_counterparties(
+        OWNER,
+        DAY,
+        DataMode.DEMO,
+        build_counterparties_template(ROWS),
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    payments = build_payments_workbook([["1234567894", "P-1", date(2026, 7, 15), 100.0]])
+    await accept_ledger(
+        OWNER,
+        accepted_run.run.id,
+        FileKind.PAYMENTS,
+        payments,
+        coverage=Period(date(2026, 6, 1), date(2026, 8, 31)),
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    await repository.transition(OWNER, accepted_run.run.id, RunStatus.QUEUED)
+    run = await repository.claim_next()
+    await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
+    artifact = await repository.get_report(OWNER, run.id)
+    about = sheet_rows(files.read(artifact.stored_path), "О проверке")
+    text = " ".join(str(cell) for row in about for cell in row if cell is not None)
+    assert "Контрагенты: 2 строк, пригодных 2" in text
+    assert "Платежи за 01.06.2026–31.08.2026: загружен, в показатели пока не входит" in text
