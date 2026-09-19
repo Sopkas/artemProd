@@ -26,7 +26,7 @@ from claims_assistant.domain.external import (
     Fact,
     FactKind,
 )
-from claims_assistant.domain.imports import IssueSeverity
+from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.report import DEMO_SCORE_NOTE, AnalysisReport, ReportRow
 from claims_assistant.domain.scoring import (
     INTERNAL_DEBT,
@@ -274,8 +274,17 @@ def _grounds(report: AnalysisReport) -> list[tuple[object, ...]]:
 
 def _quality(report: AnalysisReport) -> list[tuple[object, ...]]:
     rows: list[tuple[object, ...]] = []
-    for issue in sorted(report.import_issues, key=lambda i: (i.row or 0, i.column or "")):
+    labels = dict(report.meta.files)
+    # Package-level issues first, then file by file in upload order, then by cell.
+    order = {file_id: index for index, (file_id, _) in enumerate(report.meta.files)}
+
+    def key(issue: ImportIssue) -> tuple[int, int, str]:
+        return order.get(issue.file_id, -1), issue.row or 0, issue.column or ""
+
+    for issue in sorted(report.import_issues, key=key):
         where = [f"лист «{issue.sheet}»"]
+        if issue.file_id in labels:
+            where.insert(0, f"файл «{labels[issue.file_id]}»")
         if issue.row is not None:
             where.append(f"строка {issue.row}")
         if issue.column is not None:

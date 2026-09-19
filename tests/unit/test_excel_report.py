@@ -3,12 +3,14 @@
 import io
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from hashlib import sha256
 
 import pytest
 from openpyxl import load_workbook
 
+from claims_assistant.domain.analysis import FileKind, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow
-from claims_assistant.domain.external import DataMode
+from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.report import (
     DEMO_SCORE_NOTE,
@@ -16,6 +18,7 @@ from claims_assistant.domain.report import (
     ReportMeta,
     ReportRow,
     demo_assessment,
+    file_labels,
 )
 from claims_assistant.domain.scoring import Priority, assess
 from claims_assistant.infrastructure.checko import bankruptcy, finances
@@ -151,6 +154,66 @@ def test_quality_lists_import_issues_without_inn_and_data_gaps_per_inn():
     )
     gaps = [row for row in rows if row[0] == "Пропуск или ограничение данных"]
     assert gaps and all(row[1] == INN_B for row in gaps)
+
+
+def test_file_labels_name_kind_period_and_number_of_repeated_kinds():
+    def upload(file_id, kind, coverage=None):
+        return UploadedFile(
+            id=file_id,
+            run_id="run-1",
+            kind=kind,
+            checksum=sha256(file_id.encode()).hexdigest(),
+            size_bytes=1,
+            stored_path=f"run-1/{file_id}.xlsx",
+            uploaded_at=NOW,
+            coverage=coverage,
+        )
+
+    june = Period(date(2026, 6, 1), date(2026, 6, 30))
+    files = [
+        upload("a", FileKind.COUNTERPARTIES),
+        upload("b", FileKind.DEBT_HISTORY),
+        upload("c", FileKind.PAYMENTS, june),
+        upload("d", FileKind.DEBT_HISTORY),
+    ]
+    assert file_labels(files) == (
+        ("a", "Контрагенты"),
+        ("b", "История долга, файл 1"),
+        ("c", "Платежи за 01.06.2026–30.06.2026"),
+        ("d", "История долга, файл 2"),
+    )
+
+
+def test_quality_names_the_file_of_each_issue_in_upload_order():
+    files = (("f-main", "Контрагенты"), ("f-pay-1", "Платежи за 01.06.2026–30.06.2026, файл 1"))
+    files += (("f-pay-2", "Платежи за 01.07.2026–31.08.2026, файл 2"),)
+    meta = ReportMeta("run-1", DAY, DataMode.LIVE, NOW, CHECKED, files=files)
+
+    def issue(file_id, row, sheet="Платежи"):
+        return ImportIssue(
+            code="x",
+            severity=IssueSeverity.WARNING,
+            sheet=sheet,
+            reason="Причина.",
+            file_id=file_id,
+            row=row,
+        )
+
+    issues = (
+        issue("f-pay-2", 3),
+        issue("f-pay-1", 9),
+        issue(None, None, sheet="Пакет"),
+        issue("f-main", 4, sheet="Контрагенты"),
+        issue("unknown-file", 2),
+    )
+    rows = data_rows(open_report(AnalysisReport(meta, (), issues))["Качество данных"])
+    assert [row[2] for row in rows] == [
+        "лист «Пакет»",
+        "лист «Платежи», строка 2",  # an id the report does not know stays unnamed
+        "файл «Контрагенты», лист «Контрагенты», строка 4",
+        "файл «Платежи за 01.06.2026–30.06.2026, файл 1», лист «Платежи», строка 9",
+        "файл «Платежи за 01.07.2026–31.08.2026, файл 2», лист «Платежи», строка 3",
+    ]
 
 
 def test_about_sheet_names_run_mode_rules_and_limits():
