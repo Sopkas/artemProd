@@ -18,6 +18,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import (
     CompanyStatus,
     Coverage,
@@ -31,6 +32,8 @@ from claims_assistant.domain.external import (
     ProviderError,
     Section,
 )
+from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.inn import InvalidInn, validate_legal_inn
 from claims_assistant.domain.scoring import Assessment, Priority, Signal
 
 SCHEMA = 1
@@ -328,3 +331,82 @@ def assessment_from_dict(data: Any) -> Assessment:
         rules_version=_field(data, "rules_version", str),
     )
     return _built(lambda: Assessment(**fields))
+
+
+# --- import step: «Контрагенты» rows and import issues ---
+# The JSON shape is the one the S3-01 import step already stores (no "schema" per item: the
+# step payload carries it), so saved steps stay readable without a new step version.
+
+
+def _optional_str(value: Any, key: str) -> str | None:
+    return None if value is None else _field({key: value}, key, str)
+
+
+def _optional_int(value: Any, key: str) -> int | None:
+    return None if value is None else _field({key: value}, key, int)
+
+
+def _money_from_text(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    text = _field({"debt": value}, "debt", str)
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        raise PayloadError("Unreadable decimal value") from None
+    if not amount.is_finite():
+        raise PayloadError("Unreadable decimal value")
+    return amount
+
+
+def counterparty_row_to_dict(row: CounterpartyRow) -> dict[str, Any]:
+    return {
+        "inn": row.inn,
+        "name": row.name,
+        "cutoff_date": row.cutoff_date.isoformat() if row.cutoff_date else None,
+        "debt": None if row.debt is None else str(row.debt),
+        "overdue_days": row.overdue_days,
+        "last_payment_date": (row.last_payment_date.isoformat() if row.last_payment_date else None),
+    }
+
+
+def counterparty_row_from_dict(data: Any) -> CounterpartyRow:
+    raw_inn = _field(data, "inn", str)
+    try:
+        inn = validate_legal_inn(raw_inn)
+    except InvalidInn:
+        raise PayloadError("Stored INN is not a valid legal-entity INN") from None
+    fields = dict(
+        inn=inn,
+        name=_optional_str(data.get("name"), "name"),
+        cutoff_date=_optional(data, "cutoff_date", _day),
+        debt=_money_from_text(data.get("debt")),
+        overdue_days=_optional_int(data.get("overdue_days"), "overdue_days"),
+        last_payment_date=_optional(data, "last_payment_date", _day),
+    )
+    return _built(lambda: CounterpartyRow(**fields))
+
+
+def import_issue_to_dict(issue: ImportIssue) -> dict[str, Any]:
+    return {
+        "code": issue.code,
+        "severity": issue.severity.value,
+        "sheet": issue.sheet,
+        "reason": issue.reason,
+        "file_id": issue.file_id,
+        "row": issue.row,
+        "column": issue.column,
+    }
+
+
+def import_issue_from_dict(data: Any) -> ImportIssue:
+    fields = dict(
+        code=_field(data, "code", str),
+        severity=_enum(IssueSeverity, _field(data, "severity", str), "severity"),
+        sheet=_field(data, "sheet", str),
+        reason=_field(data, "reason", str),
+        file_id=_optional_str(data.get("file_id"), "file_id"),
+        row=_optional_int(data.get("row"), "row"),
+        column=_optional_str(data.get("column"), "column"),
+    )
+    return _built(lambda: ImportIssue(**fields))

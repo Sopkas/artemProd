@@ -78,6 +78,7 @@
 | Шаг | Запись | Чтение |
 | --- | --- | --- |
 | `external_fetch` (все разделы одного ИНН, один шаг на ИНН) | `step_payloads.dump_snapshots(snapshots)` — список `snapshot_to_dict(...)` | `step_payloads.load_snapshots(payload)` — `snapshot_from_dict` по каждому |
+| `import` (строки «Контрагенты» и замечания импорта) | `step_payloads.dump_import` — `counterparty_row_to_dict` / `import_issue_to_dict` в конверте `{"schema", "rows", "issues"}` | `step_payloads.load_import` — `counterparty_row_from_dict` / `import_issue_from_dict`, ИНН проверяется общим валидатором |
 | `scoring` (один ИНН; конвейер S3-01 пока не сохраняет — оценка считается в памяти, версия правил в ключе шага `report`) | `json.dumps(assessment_to_dict(assessment), ensure_ascii=False)` | `assessment_from_dict(json.loads(payload))` |
 
 - В каждом payload есть `"schema": 1`; другое значение отклоняется (`PayloadError`), поэтому старый формат после изменения не читается молча. Смена формата = новая схема и новая `version` шага.
