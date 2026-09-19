@@ -60,6 +60,19 @@ class LedgerAccepted:
 
 
 @dataclass(frozen=True, slots=True)
+class PackageConflict:
+    """The file cannot join this draft; the reason is safe to show."""
+
+    reason: str
+
+
+MAIN_FILE_ALREADY_IN_PACKAGE = (
+    "Файл «Контрагенты» уже есть в пакете, а этот отличается. Чтобы заменить список, "
+    "нажмите «Отмена» и начните новую проверку."
+)
+
+
+@dataclass(frozen=True, slots=True)
 class PackageRejected:
     issues: tuple[ImportIssue, ...]
 
@@ -75,11 +88,13 @@ async def accept_counterparties(
     reader: SheetReader,
     limits: ImportLimits = ImportLimits(),
     run_id: str | None = None,
-) -> PackageAccepted | PackageRejected:
+) -> PackageAccepted | PackageRejected | PackageConflict:
     """Parse first: a file without usable rows never creates a run or touches the disk.
 
     Row-level errors are reported alongside the accepted rows; whether to launch with
-    them is the user's decision, shown in the summary.
+    them is the user's decision, shown in the summary. A draft holds one «Контрагенты»
+    file: the same file again is a duplicate, a different one is a conflict (S4-03) —
+    the optional files were checked against the first list.
     """
     result = await asyncio.to_thread(import_counterparties, reader, data, limits, analysis_date)
     if not result.rows:
@@ -89,6 +104,10 @@ async def accept_counterparties(
         run = await repository.create_run(owner_id, analysis_date, mode)
     else:
         run = await repository.get_run(owner_id, run_id)
+        checksum = sha256(data).hexdigest()
+        for file in run.files:
+            if file.kind is FileKind.COUNTERPARTIES and file.checksum != checksum:
+                return PackageConflict(MAIN_FILE_ALREADY_IN_PACKAGE)
 
     stored, duplicate = await _store(
         owner_id, run, FileKind.COUNTERPARTIES, data, None, repository, files

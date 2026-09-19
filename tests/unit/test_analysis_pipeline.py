@@ -560,3 +560,55 @@ async def test_report_names_the_optional_files_of_the_package(tmp_path):
     text = " ".join(str(cell) for row in about for cell in row if cell is not None)
     assert "Контрагенты: 2 строк, пригодных 2" in text
     assert "Платежи за 01.06.2026–31.08.2026: загружен, в показатели пока не входит" in text
+
+
+async def test_pipeline_refuses_a_package_with_a_foreign_file(tmp_path):
+    """S4-03: a file recorded under another run's directory is never read."""
+    from claims_assistant.application.package_checks import FOREIGN_FILE
+
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    foreign = replace(run.files[0], stored_path="other-run/file.xlsx")
+    tampered = replace(run, files=(foreign,))
+    provider = CountingProvider(DemoCompanyDataProvider())
+    outcome = await pipeline(files, repository, guard(provider)).process(tampered)
+    assert outcome.status == RunStatus.FAILED and outcome.failure == FOREIGN_FILE
+    assert provider.calls == []
+
+
+async def test_cross_file_findings_reach_the_report_quality_sheet(tmp_path):
+    from claims_assistant.application.check_package import accept_ledger
+    from claims_assistant.domain.analysis import FileKind
+    from claims_assistant.infrastructure.excel.ledgers import build_debt_history_workbook
+
+    repository = InMemoryAnalysisRepository()
+    files = LocalFileStorage(tmp_path / "uploads")
+    reader = OpenpyxlSheetReader()
+    accepted_run = await accept_counterparties(
+        OWNER,
+        DAY,
+        DataMode.DEMO,
+        build_counterparties_template(ROWS),
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    # 1234567894 owes 100.00 in the main file; the history says 120.00 on the same day.
+    history = build_debt_history_workbook([["1234567894", DAY, 120.0]])
+    await accept_ledger(
+        OWNER,
+        accepted_run.run.id,
+        FileKind.DEBT_HISTORY,
+        history,
+        coverage=None,
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    await repository.transition(OWNER, accepted_run.run.id, RunStatus.QUEUED)
+    run = await repository.claim_next()
+    outcome = await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
+    assert outcome.status == RunStatus.COMPLETED  # a warning does not make the run partial
+    artifact = await repository.get_report(OWNER, run.id)
+    quality = sheet_rows(files.read(artifact.stored_path), "Качество данных")
+    text = " ".join(str(cell) for row in quality for cell in row if cell is not None)
+    assert "расходится с файлом «Контрагенты»" in text
