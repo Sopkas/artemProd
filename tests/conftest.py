@@ -1,3 +1,4 @@
+import socket
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +16,42 @@ def pytest_make_parametrize_id(config, val, argname):
     # variable at 32767 chars, so a huge repr aborts the whole session with ValueError.
     text = repr(val)
     return None if len(text) <= 60 else f"{argname}<{len(text)} chars>"
+
+
+_LOCAL_HOSTS = {None, "", "localhost", "127.0.0.1", "::1"}
+
+
+def _host(value: object) -> object:
+    return value.decode() if isinstance(value, bytes) else value
+
+
+@pytest.fixture(autouse=True)
+def no_external_network(monkeypatch):
+    """Tests are offline: a DNS lookup or connection beyond loopback fails the test.
+
+    Loopback stays allowed because asyncio builds its internal socket pair through it on
+    Windows. Attempts are also recorded, so a leak fails even if an adapter swallowed it.
+    """
+    attempts: list[object] = []
+    real_getaddrinfo = socket.getaddrinfo
+    real_connect = socket.socket.connect
+
+    def guarded_getaddrinfo(host, *args, **kwargs):
+        if _host(host) not in _LOCAL_HOSTS:
+            attempts.append(_host(host))
+            raise RuntimeError(f"Network access in tests: {_host(host)!r}")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def guarded_connect(self, address):
+        if isinstance(address, tuple) and _host(address[0]) not in _LOCAL_HOSTS:
+            attempts.append(_host(address[0]))
+            raise RuntimeError(f"Network access in tests: {_host(address[0])!r}")
+        return real_connect(self, address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    yield
+    assert not attempts, f"Tests must not use the network: {attempts}"
 
 
 TEST_TOKEN = "123456789:synthetic_token_for_offline_tests_only"
