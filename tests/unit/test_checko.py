@@ -287,7 +287,7 @@ async def test_extract_dated_today_in_moscow_is_not_rejected_near_utc_midnight()
     payload = deepcopy(PAYLOAD)
     payload["data"]["ДатаВып"] = "2026-09-19"
     live = checko.CheckoCompanyDataProvider(KEY, Transport(payload=payload), lambda: late_utc)
-    snapshot = (await live.fetch(CompanyDataRequest(INN)))[0]
+    snapshot = (await live.fetch(COMPANY_ONLY))[0]
     assert snapshot.status == FetchStatus.OK
     assert snapshot.facts[0].observed_on.isoformat() == "2026-09-19"
 
@@ -298,5 +298,5 @@ async def test_extract_after_the_moscow_day_is_still_rejected():
     payload = deepcopy(PAYLOAD)
     payload["data"]["ДатаВып"] = "2026-09-20"
     live = checko.CheckoCompanyDataProvider(KEY, Transport(payload=payload), lambda: late_utc)
-    snapshot = (await live.fetch(CompanyDataRequest(INN)))[0]
+    snapshot = (await live.fetch(COMPANY_ONLY))[0]
     assert snapshot.status == FetchStatus.INVALID_RESPONSE

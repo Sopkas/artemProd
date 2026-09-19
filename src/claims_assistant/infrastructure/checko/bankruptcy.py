@@ -100,9 +100,12 @@ def read_page(payload: object, inn: str) -> tuple[list[dict], int, int]:
         not isinstance(records, list)
         or type(total_pages) is not int
         or type(current_page) is not int
-        or total_pages < 1
-        or current_page < 1
     ):
+        raise InvalidResponse()
+    # An empty result may come as zero pages; accept it only when the envelope agrees with
+    # itself, otherwise a clean company would turn "unavailable" instead of "no messages".
+    empty = total_pages == 0 and not records and data.get("ЗапВсего") == 0
+    if not empty and (total_pages < 1 or current_page < 1):
         raise InvalidResponse()
     return records, total_pages, current_page
 
