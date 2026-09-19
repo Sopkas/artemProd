@@ -6,14 +6,35 @@ reported as ``domain.imports.ImportIssue`` — one list with a stable code, a se
 and a coordinate; a reason never echoes the raw INN, which may hold private data.
 """
 
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import date
+from decimal import Decimal
 
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
-from claims_assistant.domain.inn import InvalidInn, validate_legal_inn
+from claims_assistant.domain.sheet_rules import (
+    Cell,
+    FormulaCell,
+    map_header,
+    parse_amount,
+)
+from claims_assistant.domain.sheet_rules import CellError as _CellError
+from claims_assistant.domain.sheet_rules import column_letter as _column_letter
+from claims_assistant.domain.sheet_rules import is_blank as _is_blank
+from claims_assistant.domain.sheet_rules import parse_date as _parse_date
+from claims_assistant.domain.sheet_rules import parse_inn as _inn
+from claims_assistant.domain.sheet_rules import reject_formula as _reject_formula
+
+__all__ = [
+    "COLUMN_TITLES",
+    "SHEET_NAME",
+    "Cell",
+    "CounterpartiesImport",
+    "CounterpartyRow",
+    "FormulaCell",
+    "ImportLimits",
+    "parse_counterparties",
+]
 
 SHEET_NAME = "Контрагенты"
 
@@ -34,19 +55,6 @@ _FIELDS = {
     "Дней просрочки": "overdue_days",
     "Дата последнего платежа": "last_payment_date",
 }
-
-
-class FormulaCell:
-    """Marker for a source cell holding a formula; values must replace formulas."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:  # pragma: no cover - debug aid only
-        return "FormulaCell()"
-
-
-# A raw cell as produced by the sheet reader before contract normalization.
-Cell = str | int | float | Decimal | date | datetime | bool | FormulaCell | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,15 +97,6 @@ class CounterpartiesImport:
         )
 
 
-class _CellError(Exception):
-    """Internal: one cell failed a contract rule; carries a stable code and safe reason."""
-
-    def __init__(self, code: str, reason: str) -> None:
-        super().__init__(reason)
-        self.code = code
-        self.reason = reason
-
-
 def _issue(
     code: str,
     severity: IssueSeverity,
@@ -110,55 +109,6 @@ def _issue(
     )
 
 
-def _column_letter(index: int) -> str:
-    """1-based column number to its Excel letter (1 -> A, 27 -> AA)."""
-    letters = ""
-    while index > 0:
-        index, remainder = divmod(index - 1, 26)
-        letters = chr(ord("A") + remainder) + letters
-    return letters
-
-
-def _is_blank(cell: Cell) -> bool:
-    if isinstance(cell, FormulaCell):
-        return False
-    return cell is None or (isinstance(cell, str) and not cell.strip())
-
-
-def _reject_formula(cell: Cell) -> None:
-    if isinstance(cell, FormulaCell):
-        raise _CellError(
-            "formula_forbidden", "Замените формулу на значение; формулы не вычисляются."
-        )
-
-
-def _digits_from_number(value: int | float | Decimal) -> str:
-    """Exact integer recovery only; lost digits or fractions are never guessed."""
-    dec = Decimal(str(value)) if isinstance(value, float) else Decimal(value)
-    if not dec.is_finite() or dec != dec.to_integral_value():
-        raise _CellError("inn_invalid", "ИНН должен быть целым числом без дробной части.")
-    return str(int(dec))
-
-
-def _inn(cell: Cell) -> str:
-    _reject_formula(cell)
-    if isinstance(cell, bool):
-        raise _CellError("inn_invalid", "ИНН должен быть числом или строкой из цифр.")
-    if cell is None or (isinstance(cell, str) and not cell.strip()):
-        raise _CellError("inn_missing", "ИНН обязателен.")
-    if isinstance(cell, str):
-        text = cell.strip()
-    elif isinstance(cell, (int, float, Decimal)):
-        text = _digits_from_number(cell)
-    else:
-        raise _CellError("inn_invalid", "ИНН должен быть числом или строкой из цифр.")
-    try:
-        return validate_legal_inn(text)
-    except InvalidInn as error:
-        # The validator message is already safe and never repeats the raw value.
-        raise _CellError("inn_invalid", str(error)) from None
-
-
 def _name(cell: Cell) -> str | None:
     _reject_formula(cell)
     if cell is None:
@@ -169,32 +119,12 @@ def _name(cell: Cell) -> str | None:
 
 
 def _money(cell: Cell) -> Decimal | None:
-    _reject_formula(cell)
-    if cell is None or (isinstance(cell, str) and not cell.strip()):
-        return None
-    if isinstance(cell, bool):
-        raise _CellError("debt_not_number", "Сумма долга должна быть числом.")
-    if isinstance(cell, int):
-        dec = Decimal(cell)
-    elif isinstance(cell, float):
-        dec = Decimal(str(cell))
-    elif isinstance(cell, Decimal):
-        dec = cell
-    elif isinstance(cell, str):
-        text = cell.strip().replace(" ", "").replace(" ", "").replace(",", ".")
-        try:
-            dec = Decimal(text)
-        except InvalidOperation:
-            raise _CellError("debt_not_number", "Сумма долга не распознана как число.") from None
-    else:
-        raise _CellError("debt_not_number", "Сумма долга должна быть числом.")
-    if not dec.is_finite():
-        raise _CellError("debt_not_finite", "Сумма долга должна быть конечным числом.")
-    if dec < 0:
-        raise _CellError("debt_negative", "Сумма долга не может быть отрицательной.")
-    if dec.as_tuple().exponent < -2:
-        raise _CellError("debt_precision", "Сумма долга указывается с точностью до копеек.")
-    return dec
+    return parse_amount(cell, prefix="debt", label="Сумма долга")
+
+
+def _map_header(header: tuple[Cell, ...], issues: list[ImportIssue]) -> dict[str, int] | None:
+    """Map contract fields to column indexes, or return None if the header is unusable."""
+    return map_header(header, _FIELDS, frozenset({"inn"}), SHEET_NAME, issues)
 
 
 def _overdue_days(cell: Cell) -> int | None:
@@ -222,39 +152,6 @@ def _overdue_days(cell: Cell) -> int | None:
     return value
 
 
-_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_RU_DATE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
-
-
-def _parse_date(cell: Cell) -> date | None:
-    _reject_formula(cell)
-    if cell is None or (isinstance(cell, str) and not cell.strip()):
-        return None
-    if isinstance(cell, bool):
-        raise _CellError("date_invalid", "Дата не распознана.")
-    if isinstance(cell, datetime):
-        return cell.date()
-    if isinstance(cell, date):
-        return cell
-    if isinstance(cell, str):
-        text = cell.strip()
-        if _ISO_DATE.fullmatch(text):
-            try:
-                return date.fromisoformat(text)
-            except ValueError:
-                raise _CellError("date_invalid", "Дата не распознана.") from None
-        match = _RU_DATE.fullmatch(text)
-        if match:
-            day, month, year = (int(part) for part in match.groups())
-            try:
-                return date(year, month, day)
-            except ValueError:
-                raise _CellError("date_invalid", "Дата не распознана.") from None
-        # Anything ambiguous (e.g. 01/02/2026) is rejected rather than guessed.
-        raise _CellError("date_invalid", "Дата должна быть в формате ДД.ММ.ГГГГ или ГГГГ-ММ-ДД.")
-    raise _CellError("date_invalid", "Дата не распознана.")
-
-
 _NORMALIZERS = {
     "name": _name,
     "cutoff_date": _parse_date,
@@ -262,62 +159,6 @@ _NORMALIZERS = {
     "overdue_days": _overdue_days,
     "last_payment_date": _parse_date,
 }
-
-
-def _map_header(header: tuple[Cell, ...], issues: list[ImportIssue]) -> dict[str, int] | None:
-    """Map contract fields to column indexes, or return None if the header is unusable."""
-    fields: dict[str, int] = {}
-    fatal = False
-    for index, cell in enumerate(header):
-        column = _column_letter(index + 1)
-        if isinstance(cell, FormulaCell):
-            issues.append(
-                _issue(
-                    "header_formula",
-                    IssueSeverity.ERROR,
-                    "Заголовок не может быть формулой.",
-                    1,
-                    column,
-                )
-            )
-            fatal = True
-            continue
-        title = cell.strip() if isinstance(cell, str) else ("" if cell is None else str(cell))
-        if not title:
-            continue
-        if title not in _FIELDS:
-            issues.append(
-                _issue(
-                    "unknown_column",
-                    IssueSeverity.WARNING,
-                    f"Неизвестная колонка «{title}» игнорируется.",
-                    1,
-                    column,
-                )
-            )
-            continue
-        field = _FIELDS[title]
-        if field in fields:
-            issues.append(
-                _issue(
-                    "duplicate_column",
-                    IssueSeverity.ERROR,
-                    f"Колонка «{title}» указана несколько раз.",
-                    1,
-                    column,
-                )
-            )
-            fatal = True
-            continue
-        fields[field] = index
-    if "inn" not in fields:
-        issues.append(
-            _issue(
-                "inn_column_missing", IssueSeverity.ERROR, "Обязательная колонка «ИНН» отсутствует."
-            )
-        )
-        return None
-    return None if fatal else fields
 
 
 def _parse_row(
