@@ -448,3 +448,76 @@ async def test_pipeline_resumes_from_sqlite_after_a_process_restart(tmp_path):
         assert await second.get_report(OWNER, run.id) is not None
     finally:
         second.close()
+
+
+async def test_transient_source_failure_is_not_saved_so_a_resumed_run_retries_it(tmp_path):
+    """Review B on #25: after a crash the temporary failure is often gone."""
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    provider = CountingProvider(DemoCompanyDataProvider(), failing={"7707083893"})
+    # The process died right after the fetches, before the report.
+    await pipeline(files, repository, guard(provider))._fetch_all(run, ROWS)
+    assert provider.calls == ["1234567894", "7707083893"]
+    # http_error is transient: after the guard's retries the step stays open.
+    assert await repository.get_step(run.id, "7707083893", FETCH_STEP, FETCH_VERSION) is None
+    assert await repository.get_step(run.id, "1234567894", FETCH_STEP, FETCH_VERSION) is not None
+
+    provider.failing.clear()
+    await repository.recover_interrupted()
+    resumed = await repository.claim_next()
+    outcome = await pipeline(files, repository, guard(provider)).process(resumed)
+    assert outcome.status == RunStatus.COMPLETED  # the source answered this time
+    assert provider.calls == ["1234567894", "7707083893", "7707083893"]
+
+
+async def test_final_source_answers_are_saved(tmp_path):
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+
+    class NotFound:
+        async def fetch(self, request):
+            return tuple(
+                ExternalSnapshot(
+                    inn=request.inn,
+                    section=section,
+                    source="checko",
+                    mode=DataMode.DEMO,
+                    fetched_at=NOW,
+                    status=FetchStatus.NOT_FOUND,
+                    coverage=Coverage.UNAVAILABLE,
+                    missing=("Организация не найдена.",),
+                    error=ProviderError("not_found", "Организация не найдена."),
+                )
+                for section in request.sections
+            )
+
+    outcome = await pipeline(files, repository, guard(NotFound())).process(run)
+    assert outcome.status == RunStatus.PARTIAL
+    for row in ROWS:
+        assert await repository.get_step(run.id, row.inn, FETCH_STEP, FETCH_VERSION) is not None
+
+
+async def test_report_built_before_a_crash_is_replaced_not_orphaned(tmp_path):
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    provider = guard(DemoCompanyDataProvider())
+    # The process died between save_report and the report step.
+    stale = files.save(run.id, b"stale-report")
+    await repository.save_report(run.id, stale)
+    outcome = await pipeline(files, repository, provider).process(run)
+    assert outcome.status == RunStatus.COMPLETED
+    artifact = await repository.get_report(OWNER, run.id)
+    assert artifact.stored_path != stale
+    with pytest.raises(StorageError):
+        files.read(stale)
+
+
+async def test_package_line_counts_rows_with_errors_and_usable_rows(tmp_path):
+    rows = (
+        CounterpartyRow(inn="1234567894"),
+        CounterpartyRow(inn="1234567894", debt=Decimal("5.00"), cutoff_date=DAY),
+        CounterpartyRow(inn="7707083893", debt=Decimal("1.00"), cutoff_date=DAY),
+    )
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(rows))
+    await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
+    artifact = await repository.get_report(OWNER, run.id)
+    about = sheet_rows(files.read(artifact.stored_path), "О проверке")
+    text = " ".join(str(cell) for row in about for cell in row if cell is not None)
+    assert "Контрагенты: 3 строк, пригодных 2" in text

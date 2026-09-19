@@ -133,3 +133,34 @@ def test_unreadable_snapshot_payloads_raise_one_error_type(payload):
 def test_payload_is_readable_json_without_escaped_cyrillic():
     rows = (CounterpartyRow(inn=INN, name="Ромашка"),)
     assert "Ромашка" in dump_import(rows, ())
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("debt", "abc"),  # Decimal raises InvalidOperation, an ArithmeticError
+        ("overdue_days", True),  # bool is not an int
+        ("inn", 1234567894),  # a number, not a string
+        ("inn", "123"),  # not a 10-digit INN
+        ("cutoff_date", 20260901),
+        ("name", 5),
+    ],
+)
+def test_import_payload_with_a_wrong_field_type_is_rejected(field, value):
+    import json
+
+    payload = json.loads(dump_import((CounterpartyRow(inn=INN),), ()))
+    payload["rows"][0][field] = value
+    with pytest.raises(PayloadError):
+        load_import(json.dumps(payload))
+
+
+@pytest.mark.parametrize("field, value", [("row", True), ("row", "4"), ("column", 3)])
+def test_import_issue_with_a_wrong_field_type_is_rejected(field, value):
+    import json
+
+    issue = ImportIssue("empty_cell", IssueSeverity.WARNING, "Контрагенты", "Пусто", row=4)
+    payload = json.loads(dump_import((), (issue,)))
+    payload["issues"][0][field] = value
+    with pytest.raises(PayloadError):
+        load_import(json.dumps(payload))

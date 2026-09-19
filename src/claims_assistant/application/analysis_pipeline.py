@@ -32,7 +32,7 @@ from claims_assistant.domain.steps import RUN_SCOPE, StepResult, StepStatus
 from .analysis_queue import RunOutcome
 from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
-from .external_guard import BUDGET_EXHAUSTED, RunBudget
+from .external_guard import BUDGET_EXHAUSTED, TRANSIENT_CODES, RunBudget
 from .imports import SheetReader, import_counterparties
 from .step_payloads import PayloadError, dump_import, dump_snapshots, load_import, load_snapshots
 from .step_store import ReportStore, StepStore
@@ -52,6 +52,10 @@ FETCH_STEP = "external_fetch"
 FETCH_VERSION = "sections-v1"
 REPORT_STEP = "report"
 REPORT_VERSION = f"xlsx-v1-rules-{RULES_VERSION}"
+
+
+class PipelineRepository(StepStore, ReportStore, Protocol):
+    """Step results and the report artifact of one storage."""
 
 
 class ReportBuilder(Protocol):
@@ -151,7 +155,7 @@ class AnalysisPipeline:
         files: FileStorage,
         reader: SheetReader,
         provider: ScopedProviderFactory,
-        repository: StepStore | ReportStore,
+        repository: PipelineRepository,
         *,
         mode: DataMode,
         build_report: ReportBuilder,
@@ -244,8 +248,9 @@ class AnalysisPipeline:
             request = CompanyDataRequest(inn=row.inn, sections=self._sections)
             snapshots = await provider.fetch(request)
             result[row.inn] = snapshots
-            # A budget placeholder is not a result: left unsaved, a resumed run retries it.
-            if not any(_hit_budget(snapshot) for snapshot in snapshots):
+            # A budget placeholder or a transient failure (after the guard's retries) is
+            # not a final result: left unsaved, a resumed run asks the source again.
+            if not any(_is_open(snapshot) for snapshot in snapshots):
                 await self._save(
                     run, row.inn, FETCH_STEP, FETCH_VERSION, payload=dump_snapshots(snapshots)
                 )
@@ -270,6 +275,8 @@ class AnalysisPipeline:
             )
             for row in rows
         )
+        # The oldest answer among the sections: cached snapshots keep their own
+        # fetched_at, so every external fact in the report is at least this fresh.
         fetched = [
             s.fetched_at for group in snapshots.values() for s in group if not _hit_budget(s)
         ]
@@ -278,17 +285,24 @@ class AnalysisPipeline:
             analysis_date=run.analysis_date,
             mode=run.mode,
             created_at=self._clock(),
-            checked_at=max(fetched) if fetched else None,
-            package=(f"Контрагенты: {len(rows)} строк",),
+            checked_at=min(fetched) if fetched else None,
+            package=(_package_line(rows, issues),),
         )
         report = AnalysisReport(meta=meta, rows=report_rows, import_issues=issues)
         data = await asyncio.to_thread(self._build_report, report)
+        previous = await self._repository.get_report(run.owner_id, run.id)
         try:
             stored_path = await asyncio.to_thread(self._files.save, run.id, data)
         except StorageError:
             logger.error("report_write_failed run_id=%s", run.id)
             raise _Failed(REPORT_WRITE_FAILED) from None
         await self._repository.save_report(run.id, stored_path)
+        if previous is not None and previous.stored_path != stored_path:
+            # A report built just before a crash is replaced, not left behind as an orphan.
+            try:
+                await asyncio.to_thread(self._files.remove, previous.stored_path)
+            except StorageError:
+                logger.warning("report_orphan run_id=%s", run.id)
         summary = _summarize(report_rows, issues)
         await self._save(run, RUN_SCOPE, REPORT_STEP, REPORT_VERSION, payload=summary.to_payload())
         return summary
@@ -319,6 +333,22 @@ class AnalysisPipeline:
 
 def _hit_budget(snapshot: ExternalSnapshot) -> bool:
     return snapshot.error is not None and snapshot.error.code == BUDGET_EXHAUSTED
+
+
+def _is_open(snapshot: ExternalSnapshot) -> bool:
+    """Not a final answer: the budget placeholder or a transient source failure."""
+    if _hit_budget(snapshot) or snapshot.status is FetchStatus.RATE_LIMITED:
+        return True
+    return snapshot.error is not None and snapshot.error.code in TRANSIENT_CODES
+
+
+def _package_line(rows: tuple[CounterpartyRow, ...], issues: tuple[ImportIssue, ...]) -> str:
+    bad_rows = {
+        issue.row
+        for issue in issues
+        if issue.severity is IssueSeverity.ERROR and issue.row is not None
+    }
+    return f"Контрагенты: {len(rows) + len(bad_rows)} строк, пригодных {len(rows)}"
 
 
 def _summarize(rows: tuple[ReportRow, ...], issues: tuple[ImportIssue, ...]) -> RunSummary:

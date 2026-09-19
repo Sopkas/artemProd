@@ -9,6 +9,7 @@ yielding a half-valid object, and errors never echo the payload.
 """
 
 import json
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -31,20 +32,34 @@ __all__ = [
 ]
 
 
+_INN = re.compile(r"[0-9]{10}")
+
+
+def _typed(value: object, kind: type) -> object:
+    # Exact types: JSON `true` must not pass as the int 1, a number not as a string.
+    if type(value) is not kind:
+        raise PayloadError(f"expected {kind.__name__}")
+    return value
+
+
+def _optional(value: object, kind: type) -> object:
+    return None if value is None else _typed(value, kind)
+
+
 def _day(value: date | None) -> str | None:
     return None if value is None else value.isoformat()
 
 
-def _load_day(value: str | None) -> date | None:
-    return None if value is None else date.fromisoformat(value)
+def _load_day(value: object) -> date | None:
+    return None if value is None else date.fromisoformat(_typed(value, str))
 
 
 def _decimal(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
 
 
-def _load_decimal(value: str | None) -> Decimal | None:
-    return None if value is None else Decimal(value)
+def _load_decimal(value: object) -> Decimal | None:
+    return None if value is None else Decimal(_typed(value, str))
 
 
 # --- import step -------------------------------------------------------------------
@@ -62,12 +77,15 @@ def _row(row: CounterpartyRow) -> dict:
 
 
 def _load_row(data: dict) -> CounterpartyRow:
+    inn = _typed(data["inn"], str)
+    if not _INN.fullmatch(inn):
+        raise PayloadError("row INN must be 10 digits")
     return CounterpartyRow(
-        inn=data["inn"],
-        name=data.get("name"),
+        inn=inn,
+        name=_optional(data.get("name"), str),
         cutoff_date=_load_day(data.get("cutoff_date")),
         debt=_load_decimal(data.get("debt")),
-        overdue_days=data.get("overdue_days"),
+        overdue_days=_optional(data.get("overdue_days"), int),
         last_payment_date=_load_day(data.get("last_payment_date")),
     )
 
@@ -86,13 +104,13 @@ def _issue(issue: ImportIssue) -> dict:
 
 def _load_issue(data: dict) -> ImportIssue:
     return ImportIssue(
-        code=data["code"],
-        severity=IssueSeverity(data["severity"]),
-        sheet=data["sheet"],
-        reason=data["reason"],
-        file_id=data.get("file_id"),
-        row=data.get("row"),
-        column=data.get("column"),
+        code=_typed(data["code"], str),
+        severity=IssueSeverity(_typed(data["severity"], str)),
+        sheet=_typed(data["sheet"], str),
+        reason=_typed(data["reason"], str),
+        file_id=_optional(data.get("file_id"), str),
+        row=_optional(data.get("row"), int),
+        column=_optional(data.get("column"), str),
     )
 
 
@@ -116,7 +134,8 @@ def load_import(payload: str) -> tuple[tuple[CounterpartyRow, ...], tuple[Import
         issues = tuple(_load_issue(item) for item in data["issues"])
     except PayloadError:
         raise
-    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+    except (ValueError, ArithmeticError, KeyError, TypeError, AttributeError) as exc:
+        # ArithmeticError: Decimal("abc") raises InvalidOperation, not ValueError.
         raise PayloadError("import payload is not readable") from exc
     return rows, issues
 
