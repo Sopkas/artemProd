@@ -113,9 +113,9 @@ async def test_restore_brings_back_runs_and_files_after_a_loss(tmp_path):
         file.unlink()
     (uploads / "junk").mkdir()
 
-    check = restore_backup(snapshot.path, database, uploads)
+    check = restore_backup(snapshot.path, database, uploads, now=T0)
     assert check.ok
-    assert (uploads.with_name("uploads.before-restore") / "junk").exists()
+    assert (uploads.with_name("uploads.before-restore-20260919T100000Z") / "junk").exists()
     repository = open_sqlite_repository(database)  # migrations run and find the schema
     try:
         run = await repository.get_run(OWNER, run_id)
@@ -175,3 +175,44 @@ def test_ops_commands_round_trip(tmp_path):
     out = io.StringIO()
     assert ops_run(["backup"], settings_for(tmp_path / "empty"), out) == 1
     assert "Ошибка" in out.getvalue()
+
+
+async def test_restore_moves_a_hot_journal_aside_so_it_is_not_replayed(tmp_path):
+    """Review B on #33: a journal left by a crash must not be applied to the restored copy."""
+    database, uploads, run_id = await populate(tmp_path)
+    snapshot = create_backup(database, uploads, tmp_path / "backups", now=T0)
+    journal = database.with_name(database.name + "-journal")
+    journal.write_bytes(bytes(range(256)) * 16)  # garbage, not a valid journal
+    wal = database.with_name(database.name + "-wal")
+    wal.write_bytes(b"garbage")
+    check = restore_backup(snapshot.path, database, uploads, now=T0)
+    assert check.ok
+    assert not journal.exists() and not wal.exists()
+    assert journal.with_name(journal.name + ".before-restore-20260919T100000Z").exists()
+    assert verify_backup(snapshot.path).integrity == "ok"
+    repository = open_sqlite_repository(database)
+    try:
+        assert (await repository.get_run(OWNER, run_id)).status == RunStatus.COMPLETED
+    finally:
+        repository.close()
+    from contextlib import closing
+
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+async def test_second_restore_keeps_what_the_first_set_aside(tmp_path):
+    """Review B on #33: nothing set aside is ever deleted by a later restore."""
+    database, uploads, run_id = await populate(tmp_path)
+    snapshot = create_backup(database, uploads, tmp_path / "backups", now=T0)
+    restore_backup(snapshot.path, database, uploads, now=T0)
+    restore_backup(snapshot.path, database, uploads, now=T0 + timedelta(minutes=1))
+    aside = sorted(p.name for p in database.parent.iterdir() if "before-restore" in p.name)
+    assert aside == [
+        "claims.sqlite3.before-restore-20260919T100000Z",
+        "claims.sqlite3.before-restore-20260919T100100Z",
+        "uploads.before-restore-20260919T100000Z",
+        "uploads.before-restore-20260919T100100Z",
+    ]
+    with pytest.raises(BackupError):
+        restore_backup(snapshot.path, database, uploads, now=T0)  # same stamp: refuse

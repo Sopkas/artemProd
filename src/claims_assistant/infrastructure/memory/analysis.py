@@ -173,9 +173,16 @@ class InMemoryAnalysisRepository:
         ]
         return tuple(sorted(expired, key=lambda run: (run.updated_at, self._sequence[run.id])))
 
-    async def delete_run(self, run_id: str) -> None:
+    async def is_expired(self, run_id: str, before: datetime) -> bool:
+        run = self._runs.get(run_id)
+        return run is not None and run.status in EXPIRABLE_STATUSES and run.updated_at < before
+
+    async def delete_run(self, run_id: str, before: datetime) -> bool:
+        if not await self.is_expired(run_id, before):
+            return False
         self._runs.pop(run_id, None)
         self._sequence.pop(run_id, None)
         self._reports.pop(run_id, None)
         for key in [key for key in self._steps if key[0] == run_id]:
             del self._steps[key]
+        return True

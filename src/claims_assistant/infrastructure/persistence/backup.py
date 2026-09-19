@@ -23,6 +23,9 @@ DATABASE_NAME = "claims.sqlite3"
 UPLOADS_NAME = "uploads"
 MANIFEST_NAME = "manifest.json"
 _STAMP = "%Y%m%dT%H%M%SZ"
+# SQLite's own companions of a database file: a hot journal or WAL left by a crash would
+# be replayed into whatever file sits at the database path — including a restored copy.
+_SIDECARS = ("-journal", "-wal", "-shm")
 
 
 class BackupError(RuntimeError):
@@ -159,21 +162,27 @@ def verify_backup(snapshot: Path) -> Verification:
     return Verification(integrity=integrity, runs=runs, files=files, missing_files=missing)
 
 
-def restore_backup(snapshot: Path, database: Path, uploads: Path) -> Verification:
+def restore_backup(
+    snapshot: Path, database: Path, uploads: Path, *, now: datetime | None = None
+) -> Verification:
     """Replace the live database and uploads with the snapshot's; verify first.
 
     The bot must be stopped: SQLite would otherwise keep writing to the replaced file.
-    The current live data is moved aside as ``<name>.before-restore`` so a mistaken
-    restore can be undone by hand.
+    The current live data — the database with its journal/WAL companions and the
+    uploads — is moved aside as ``<name>.before-restore-<UTC time>``; nothing is ever
+    deleted here, so a second restore cannot destroy what the first one set aside.
     """
     snapshot, database, uploads = Path(snapshot), Path(database), Path(uploads)
     verification = verify_backup(snapshot)
     if verification.integrity != "ok":
         raise BackupError("Копия повреждена; восстановление отменено.")
+    stamp = (now or _now()).astimezone(UTC).strftime(_STAMP)
     try:
         database.parent.mkdir(parents=True, exist_ok=True)
-        _move_aside(database)
-        _move_aside(uploads)
+        _move_aside(database, stamp)
+        for suffix in _SIDECARS:
+            _move_aside(database.with_name(database.name + suffix), stamp)
+        _move_aside(uploads, stamp)
         shutil.copy2(snapshot / DATABASE_NAME, database)
         shutil.copytree(snapshot / UPLOADS_NAME, uploads)
     except OSError as error:
@@ -181,12 +190,10 @@ def restore_backup(snapshot: Path, database: Path, uploads: Path) -> Verificatio
     return verification
 
 
-def _move_aside(path: Path) -> None:
+def _move_aside(path: Path, stamp: str) -> None:
     if not path.exists():
         return
-    aside = path.with_name(path.name + ".before-restore")
-    if aside.is_dir():
-        shutil.rmtree(aside)
-    elif aside.exists():
-        aside.unlink()
+    aside = path.with_name(f"{path.name}.before-restore-{stamp}")
+    if aside.exists():
+        raise BackupError("Отложенная копия с этой отметкой времени уже существует.")
     path.rename(aside)

@@ -32,8 +32,14 @@ class MaintenanceStore(Protocol):
         """Runs in an expirable state whose last change is before the moment, oldest first."""
         ...
 
-    async def delete_run(self, run_id: str) -> None:
-        """Remove the run with its files, steps and report record; unknown id is a no-op."""
+    async def is_expired(self, run_id: str, before: datetime) -> bool:
+        """Whether the run is still in an expirable state and unchanged since ``before``."""
+        ...
+
+    async def delete_run(self, run_id: str, before: datetime) -> bool:
+        """Remove the run with its files, steps and report record — only if it is still
+        expired as of ``before`` (the same condition as ``list_expired``). False when the
+        run changed meanwhile or does not exist."""
         ...
 
 
@@ -62,10 +68,15 @@ async def purge_expired(
     """Delete every run older than the retention period; files first, records second."""
     if retention <= timedelta(0):
         raise ValueError("Retention must be a positive period")
-    expired = await repository.list_expired(now - retention)
+    before = now - retention
+    expired = await repository.list_expired(before)
     removed = failed = 0
     for run in expired:
         if dry_run:
+            continue
+        # A draft launched (or a failed run relaunched) between the listing and now is
+        # live again: leave it alone, files included.
+        if not await repository.is_expired(run.id, before):
             continue
         try:
             await asyncio.to_thread(files.remove_run, run.id)
@@ -74,9 +85,9 @@ async def purge_expired(
             logger.error("purge_files_failed run_id=%s", run.id)
             failed += 1
             continue
-        await repository.delete_run(run.id)
-        removed += 1
-        logger.info("run_purged run_id=%s status=%s", run.id, run.status)
+        if await repository.delete_run(run.id, before):
+            removed += 1
+            logger.info("run_purged run_id=%s status=%s", run.id, run.status)
     return PurgeSummary(expired=len(expired), removed=removed, failed=failed, dry_run=dry_run)
 
 

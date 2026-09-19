@@ -173,3 +173,32 @@ async def test_sweeper_survives_a_storage_failure(storage, caplog):
     sweeper.stop()
     await asyncio.wait_for(task, timeout=1)
     assert "retention_sweep_failed" in caplog.text and "secret path" not in caplog.text
+
+
+async def test_run_relaunched_after_the_listing_is_not_purged(storage):
+    """Review B on #33: the delete carries the same condition as the listing."""
+    repository, files, clock = storage
+    old = await make_run(repository, files, status=RunStatus.DRAFT)
+    clock.now += timedelta(days=31)
+    before = clock.now - RETENTION
+
+    class Racing:
+        """Lists the draft as expired, then the user launches it before the sweep acts."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def list_expired(self, before):
+            expired = await self.inner.list_expired(before)
+            await self.inner.transition(OWNER, old.id, RunStatus.QUEUED)
+            return expired
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    summary = await purge_expired(Racing(repository), files, retention=RETENTION, now=clock.now)
+    assert summary == PurgeSummary(expired=1, removed=0, failed=0)
+    run = await repository.get_run(OWNER, old.id)
+    assert run.status == RunStatus.QUEUED and len(run.files) == 1
+    assert files.read(run.files[0].stored_path)
+    assert await repository.delete_run(old.id, before) is False

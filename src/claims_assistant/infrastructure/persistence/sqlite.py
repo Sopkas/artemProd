@@ -134,8 +134,11 @@ class SqliteAnalysisRepository:
     async def list_expired(self, before: datetime) -> tuple[AnalysisRun, ...]:
         return await self._run(self._list_expired, before)
 
-    async def delete_run(self, run_id: str) -> None:
-        await self._run(self._delete_run, run_id)
+    async def is_expired(self, run_id: str, before: datetime) -> bool:
+        return await self._run(self._is_expired, run_id, before)
+
+    async def delete_run(self, run_id: str, before: datetime) -> bool:
+        return await self._run(self._delete_run, run_id, before)
 
     async def mark_delivery(
         self, run_id: str, status: DeliveryStatus, error: str | None = None
@@ -335,11 +338,33 @@ class SqliteAnalysisRepository:
             ).all()
             return tuple(self._to_run(connection, row) for row in rows)
 
-    def _delete_run(self, run_id: str) -> None:
+    @staticmethod
+    def _expired_condition(run_id: str, before: datetime):
+        statuses = [status.value for status in EXPIRABLE_STATUSES]
+        return (
+            (analysis_runs.c.id == run_id)
+            & analysis_runs.c.status.in_(statuses)
+            & (analysis_runs.c.updated_at < _stamp(before))
+        )
+
+    def _is_expired(self, run_id: str, before: datetime) -> bool:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(analysis_runs.c.id).where(self._expired_condition(run_id, before))
+            ).first()
+        return row is not None
+
+    def _delete_run(self, run_id: str, before: datetime) -> bool:
         with self._engine.begin() as connection:
+            # The same condition as the listing, inside the transaction: a run that came
+            # back to life between the sweep's listing and now is not deleted.
+            condition = self._expired_condition(run_id, before)
+            if connection.execute(select(analysis_runs.c.id).where(condition)).first() is None:
+                return False
             for table in (report_artifacts, run_steps, uploaded_files):
                 connection.execute(table.delete().where(table.c.run_id == run_id))
-            connection.execute(analysis_runs.delete().where(analysis_runs.c.id == run_id))
+            gone = connection.execute(analysis_runs.delete().where(condition)).rowcount
+        return bool(gone)
 
     # --- steps and reports ---
 
