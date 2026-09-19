@@ -5,16 +5,22 @@ from hashlib import sha256
 
 import pytest
 
-from claims_assistant.application.analysis_repository import InvalidTransition, RunNotFound
+from claims_assistant.application.analysis_repository import (
+    InvalidTransition,
+    RunLocked,
+    RunNotFound,
+)
 from claims_assistant.application.check_package import (
+    LedgerAccepted,
     PackageAccepted,
     PackageRejected,
     accept_counterparties,
+    accept_ledger,
     latest_run,
     launch_run,
 )
 from claims_assistant.domain.analysis import FileKind, RunStatus
-from claims_assistant.domain.external import DataMode
+from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.memory.analysis import InMemoryAnalysisRepository
@@ -115,3 +121,86 @@ async def test_latest_run_returns_the_newest_or_none(deps):
     assert first.run.id != second.run.id
     assert (await latest_run(OWNER, deps["repository"])).id == second.run.id
     assert await latest_run(99, deps["repository"]) is None
+
+
+# --- S4-01: optional «Платежи» and «История долга» files of the draft ---
+
+
+async def draft(deps):
+    from claims_assistant.application.check_package import accept_counterparties
+
+    result = await accept_counterparties(
+        OWNER, DAY, DataMode.DEMO, build_counterparties_template(), **deps
+    )
+    return result.run
+
+
+def payments(rows):
+    from claims_assistant.infrastructure.excel.ledgers import build_payments_workbook
+
+    return build_payments_workbook(rows)
+
+
+def history(rows):
+    from claims_assistant.infrastructure.excel.ledgers import build_debt_history_workbook
+
+    return build_debt_history_workbook(rows)
+
+
+INN_1 = "7707083893"  # first sample row of the counterparties template
+PERIOD = Period(date(2026, 6, 1), date(2026, 8, 31))
+
+
+async def test_payments_are_parsed_against_the_package_and_stored_with_their_period(deps):
+    run = await draft(deps)
+    data = payments(
+        [[INN_1, "P-1", date(2026, 7, 15), 100.0], ["1234567894", "P-2", date(2026, 7, 16), 1.0]]
+    )
+    result = await accept_ledger(OWNER, run.id, FileKind.PAYMENTS, data, coverage=PERIOD, **deps)
+    assert isinstance(result, LedgerAccepted)
+    assert result.rows == 1 and not result.duplicate
+    assert [issue.code for issue in result.issues] == ["inn_not_in_package"]
+    assert result.file.kind is FileKind.PAYMENTS and result.file.coverage == PERIOD
+    assert result.file.checksum == sha256(data).hexdigest()
+    assert [file.kind for file in result.run.files] == [FileKind.COUNTERPARTIES, FileKind.PAYMENTS]
+    assert deps["files"].read(result.file.stored_path) == data
+
+
+async def test_ledger_without_usable_rows_is_rejected_and_nothing_is_stored(deps, tmp_path):
+    run = await draft(deps)
+    data = history([["1234567894", date(2026, 8, 1), 100.0]])
+    result = await accept_ledger(OWNER, run.id, FileKind.DEBT_HISTORY, data, coverage=None, **deps)
+    assert isinstance(result, PackageRejected)
+    assert [issue.code for issue in result.issues] == ["inn_not_in_package"]
+    assert len((await deps["repository"].get_run(OWNER, run.id)).files) == 1
+    stored = list((tmp_path / "uploads").rglob("*"))
+    assert len([p for p in stored if p.is_file()]) == 1
+
+
+async def test_same_ledger_twice_keeps_one_copy(deps, tmp_path):
+    run = await draft(deps)
+    data = history([[INN_1, date(2026, 8, 1), 100.0]])
+    first = await accept_ledger(OWNER, run.id, FileKind.DEBT_HISTORY, data, coverage=None, **deps)
+    second = await accept_ledger(OWNER, run.id, FileKind.DEBT_HISTORY, data, coverage=None, **deps)
+    assert not first.duplicate and second.duplicate
+    assert second.file == first.file
+    assert len([p for p in (tmp_path / "uploads").rglob("*") if p.is_file()]) == 2
+
+
+async def test_payments_require_a_period_and_only_ledger_kinds_are_accepted(deps):
+    run = await draft(deps)
+    data = payments([[INN_1, "P-1", date(2026, 7, 15), 100.0]])
+    with pytest.raises(ValueError):
+        await accept_ledger(OWNER, run.id, FileKind.PAYMENTS, data, coverage=None, **deps)
+    with pytest.raises(ValueError):
+        await accept_ledger(OWNER, run.id, FileKind.COUNTERPARTIES, data, coverage=PERIOD, **deps)
+
+
+async def test_ledger_is_owner_scoped_and_needs_a_draft(deps):
+    run = await draft(deps)
+    data = history([[INN_1, date(2026, 8, 1), 100.0]])
+    with pytest.raises(RunNotFound):
+        await accept_ledger(99, run.id, FileKind.DEBT_HISTORY, data, coverage=None, **deps)
+    await launch_run(OWNER, run.id, deps["repository"])
+    with pytest.raises(RunLocked):
+        await accept_ledger(OWNER, run.id, FileKind.DEBT_HISTORY, data, coverage=None, **deps)

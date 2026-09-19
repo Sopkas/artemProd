@@ -7,6 +7,7 @@ malformed sheets.
 
 import io
 from collections.abc import Sequence
+from datetime import date
 
 from openpyxl import Workbook
 
@@ -48,3 +49,18 @@ def build_debt_history_workbook(
     rows: Sequence[Sequence[Cell]], titles: Sequence[str] = debt_history.COLUMN_TITLES
 ) -> bytes:
     return _workbook(debt_history.SHEET_NAME, titles, rows)
+
+
+# --- templates sent from the check dialog (S4-01): one synthetic row each ---
+
+_SAMPLE_INN = "7707083893"  # the first sample row of the «Контрагенты» template
+
+
+def build_payments_template() -> bytes:
+    return build_payments_workbook([[_SAMPLE_INN, "PAY-0001", date(2026, 7, 15), 50000.00]])
+
+
+def build_debt_history_template() -> bytes:
+    return build_debt_history_workbook(
+        [[_SAMPLE_INN, date(2026, 8, 1), 150000.00], [_SAMPLE_INN, date(2026, 9, 1), 150000.00]]
+    )

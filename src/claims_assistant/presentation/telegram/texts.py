@@ -1,8 +1,8 @@
 from datetime import date
 
 from claims_assistant.application.analysis_pipeline import RunSummary
-from claims_assistant.domain.analysis import AnalysisRun, RunStatus
-from claims_assistant.domain.external import DataMode
+from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
+from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.scoring import Priority
 
@@ -60,7 +60,34 @@ FILE_TOO_LARGE = "Файл больше 10 МБ. Уменьшите выгруз
 CHECK_REJECTED_TITLE = "Файл не принят"
 CHECK_SUMMARY_TITLE = "Пакет принят"
 CHECK_DUPLICATE = "Этот файл уже есть в пакете; повторно не добавлен."
-CHECK_CONFIRM = "Нажмите «Запустить проверку» или «Отмена»."
+CHECK_CONFIRM = (
+    "Нажмите «Запустить проверку». Дополнительно можно добавить файлы «Платежи» "
+    "и «История долга» или нажать «Отмена»."
+)
+PAYMENTS_PERIOD_PROMPT = (
+    "Укажите период, за который выгрузка платежей полная: ДД.ММ.ГГГГ–ДД.ММ.ГГГГ "
+    "(например, 01.06.2026–31.08.2026).\n"
+    "Указывая период, вы подтверждаете, что в выгрузке есть все поступления за него."
+)
+PAYMENTS_PERIOD_INVALID = (
+    "Период не распознан. Введите две даты ДД.ММ.ГГГГ через дефис, "
+    "начало не позже конца, конец не позже даты анализа."
+)
+PAYMENTS_FILE_PROMPT = (
+    "Отправьте файл .xlsx с листом «Платежи» (до 10 МБ). "
+    "Шаблон — выше.\nЧтобы вернуться к пакету, нажмите «Отмена»."
+)
+HISTORY_FILE_PROMPT = (
+    "Отправьте файл .xlsx с листом «История долга» (до 10 МБ). "
+    "Шаблон — выше.\nЧтобы вернуться к пакету, нажмите «Отмена»."
+)
+LEDGER_CANCELLED = "Файл не добавлен, пакет сохранён. " + CHECK_CONFIRM
+FILE_KIND_LABELS = {
+    FileKind.COUNTERPARTIES: "Контрагенты",
+    FileKind.PAYMENTS: "Платежи",
+    FileKind.DEBT_HISTORY: "История долга",
+    FileKind.INTERACTIONS: "Взаимодействия",
+}
 CHECK_QUEUED_PREFIX = "Проверка поставлена в очередь"
 CHECK_CANCELLED = "Новая проверка отменена. Черновик, если он был создан, не запускается."
 STATUS_TITLE = "Последняя проверка"
@@ -127,8 +154,25 @@ def package_rejected(issues: tuple[ImportIssue, ...]) -> str:
     return "\n".join(lines)
 
 
+def period_text(period: Period) -> str:
+    return f"{_date(period.start)}–{_date(period.end)}"
+
+
+def composition_line(kind: FileKind, rows: int, coverage: Period | None) -> str:
+    label = FILE_KIND_LABELS[kind]
+    unit = "организаций" if kind is FileKind.COUNTERPARTIES else "строк"
+    text = f"{label} — {unit}: {rows}"
+    if coverage is not None:
+        text += f", период {period_text(coverage)}"
+    return text
+
+
 def package_summary(
-    analysis_date: date, rows: int, issues: tuple[ImportIssue, ...], duplicate: bool
+    analysis_date: date,
+    rows: int,
+    issues: tuple[ImportIssue, ...],
+    duplicate: bool,
+    composition: tuple[str, ...] = (),
 ) -> str:
     lines = [CHECK_SUMMARY_TITLE]
     if duplicate:
@@ -138,7 +182,40 @@ def package_summary(
     lines.extend(_issues_block(issues))
     if any(issue.severity is IssueSeverity.ERROR for issue in issues):
         lines.append("Строки с ошибками в проверку не попадут.")
+    lines.extend(_composition_block(composition))
     lines.append(CHECK_CONFIRM)
+    return "\n".join(lines)
+
+
+def _composition_block(composition: tuple[str, ...]) -> list[str]:
+    if not composition:
+        return []
+    return ["Состав пакета:"] + [f"• {line}" for line in composition]
+
+
+def ledger_summary(
+    kind: FileKind,
+    rows: int,
+    issues: tuple[ImportIssue, ...],
+    duplicate: bool,
+    composition: tuple[str, ...],
+) -> str:
+    lines = [f"Файл «{FILE_KIND_LABELS[kind]}» принят"]
+    if duplicate:
+        lines.append(CHECK_DUPLICATE)
+    lines.append(f"Строк принято: {rows}")
+    lines.extend(_issues_block(issues))
+    if any(issue.severity is IssueSeverity.ERROR for issue in issues):
+        lines.append("Строки с ошибками в проверку не попадут.")
+    lines.extend(_composition_block(composition))
+    lines.append(CHECK_CONFIRM)
+    return "\n".join(lines)
+
+
+def ledger_rejected(kind: FileKind, issues: tuple[ImportIssue, ...]) -> str:
+    lines = [f"Файл «{FILE_KIND_LABELS[kind]}» не принят: пригодных строк нет."]
+    lines.extend(_issues_block(issues))
+    lines.append("Исправьте файл и отправьте снова или нажмите «Отмена».")
     return "\n".join(lines)
 
 

@@ -15,8 +15,10 @@ from claims_assistant.application.analysis_repository import AnalysisRepository,
 from claims_assistant.application.check_company import check_company
 from claims_assistant.application.check_package import (
     FileStorage,
+    LedgerAccepted,
     PackageAccepted,
     accept_counterparties,
+    accept_ledger,
     latest_run,
     launch_run,
 )
@@ -27,10 +29,15 @@ from claims_assistant.application.report_delivery import (
     confirm_delivery,
     fetch_report,
 )
-from claims_assistant.domain.external import DataMode
+from claims_assistant.domain.analysis import FileKind
+from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.domain.inn import InvalidInn
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
+from claims_assistant.infrastructure.excel.ledgers import (
+    build_debt_history_template,
+    build_payments_template,
+)
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.memory.analysis import InMemoryAnalysisRepository
 from claims_assistant.infrastructure.storage.local import LocalFileStorage
@@ -39,6 +46,8 @@ from . import texts
 from .access import AccessMiddleware
 from .card import format_card
 from .menu import (
+    ADD_HISTORY,
+    ADD_PAYMENTS,
     CANCEL,
     CHECK_INN,
     LAUNCH,
@@ -65,6 +74,26 @@ class CheckDialog(StatesGroup):
     waiting_for_date = State()
     waiting_for_file = State()
     confirming = State()
+    # S4-01: optional files are added from the confirmation step and return to it.
+    waiting_for_payments_period = State()
+    waiting_for_payments_file = State()
+    waiting_for_history_file = State()
+
+
+# A dash or whitespace between the dates; a bare hyphen only after a ДД.ММ.ГГГГ date,
+# so ISO dates (2026-06-01) keep their own hyphens.
+_PERIOD_SPLIT = re.compile(r"\s*[–—]\s*|\s+-\s+|\s+|(?<=\.\d{4})-(?=\d{2}\.)")
+
+
+def parse_period(text: str, analysis_date: date) -> Period | None:
+    """Two dates «start–end»; the end never passes the analysis date."""
+    parts = [part for part in _PERIOD_SPLIT.split(text.strip()) if part]
+    if len(parts) != 2:
+        return None
+    start, end = (parse_user_date(part) for part in parts)
+    if start is None or end is None or start > end or end > analysis_date:
+        return None
+    return Period(start, end)
 
 
 def parse_user_date(text: str, utc_offset_hours: int = 3) -> date | None:
@@ -86,6 +115,13 @@ def parse_user_date(text: str, utc_offset_hours: int = 3) -> date | None:
     except ValueError:
         return None
     return None
+
+
+def _composition(run, rows: dict) -> tuple[str, ...]:
+    """One line per package file, in upload order; row counts come from the dialog state."""
+    return tuple(
+        texts.composition_line(file.kind, rows.get(file.id, 0), file.coverage) for file in run.files
+    )
 
 
 def create_dispatcher(
@@ -146,12 +182,74 @@ def create_dispatcher(
         if not isinstance(result, PackageAccepted):
             await message.answer(texts.package_rejected(result.issues), reply_markup=cancel_menu())
             return
-        await state.update_data(run_id=result.run.id)
+        rows = dict(data.get("rows", {}))
+        rows[result.file.id] = len(result.rows)
+        composition = _composition(result.run, rows)
+        await state.update_data(run_id=result.run.id, rows=rows)
         await state.set_state(CheckDialog.confirming)
         await message.answer(
             texts.package_summary(
-                result.run.analysis_date, len(result.rows), result.issues, result.duplicate
+                result.run.analysis_date,
+                len(result.rows),
+                result.issues,
+                result.duplicate,
+                composition,
             ),
+            reply_markup=launch_menu(),
+        )
+
+    ledger_states = {
+        CheckDialog.waiting_for_payments_file: FileKind.PAYMENTS,
+        CheckDialog.waiting_for_history_file: FileKind.DEBT_HISTORY,
+    }
+
+    @router.message(StateFilter(*ledger_states), F.document)
+    async def receive_ledger(message: Message, state: FSMContext, bot: Bot) -> None:
+        kind = ledger_states[await state.get_state()]
+        document = message.document
+        name = (document.file_name or "").lower()
+        if not name.endswith(".xlsx"):
+            await message.answer(texts.FILE_NOT_XLSX, reply_markup=cancel_menu())
+            return
+        if document.file_size is None or document.file_size > texts.MAX_UPLOAD_BYTES:
+            await message.answer(texts.FILE_TOO_LARGE, reply_markup=cancel_menu())
+            return
+        data = await state.get_data()
+        coverage = None
+        if kind is FileKind.PAYMENTS:
+            coverage = Period(
+                date.fromisoformat(data["period_start"]), date.fromisoformat(data["period_end"])
+            )
+        buffer = BytesIO()
+        await bot.download(document, destination=buffer)
+        try:
+            result = await accept_ledger(
+                message.from_user.id,
+                data["run_id"],
+                kind,
+                buffer.getvalue(),
+                coverage=coverage,
+                repository=repository,
+                files=files,
+                reader=reader,
+            )
+        except Exception as exc:
+            logger.error("ledger_failed error_type=%s", type(exc).__name__)
+            await state.clear()
+            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
+        if not isinstance(result, LedgerAccepted):
+            await message.answer(
+                texts.ledger_rejected(kind, result.issues), reply_markup=cancel_menu()
+            )
+            return
+        rows = dict(data.get("rows", {}))
+        rows[result.file.id] = result.rows
+        await state.update_data(rows=rows)
+        await state.set_state(CheckDialog.confirming)
+        composition = _composition(result.run, rows)
+        await message.answer(
+            texts.ledger_summary(kind, result.rows, result.issues, result.duplicate, composition),
             reply_markup=launch_menu(),
         )
 
@@ -258,6 +356,19 @@ def create_dispatcher(
         await state.set_state(CheckDialog.waiting_for_date)
         await message.answer(texts.CHECK_DATE_PROMPT, reply_markup=date_menu())
 
+    optional_steps = StateFilter(
+        CheckDialog.waiting_for_payments_period,
+        CheckDialog.waiting_for_payments_file,
+        CheckDialog.waiting_for_history_file,
+    )
+
+    @router.message(optional_steps, Command("cancel"))
+    @router.message(optional_steps, F.text == CANCEL)
+    async def cancel_ledger(message: Message, state: FSMContext) -> None:
+        # Only the optional file is dropped; the draft package stays for confirmation.
+        await state.set_state(CheckDialog.confirming)
+        await message.answer(texts.LEDGER_CANCELLED, reply_markup=launch_menu())
+
     @router.message(StateFilter(CheckDialog), Command("cancel"))
     @router.message(StateFilter(CheckDialog), F.text == CANCEL)
     async def cancel_check(message: Message, state: FSMContext) -> None:
@@ -289,9 +400,45 @@ def create_dispatcher(
         await state.clear()
         await message.answer(texts.check_queued(run), reply_markup=main_menu())
 
+    @router.message(CheckDialog.confirming, F.text == ADD_PAYMENTS)
+    async def add_payments(message: Message, state: FSMContext) -> None:
+        await state.set_state(CheckDialog.waiting_for_payments_period)
+        await message.answer(texts.PAYMENTS_PERIOD_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_payments_period, F.text)
+    async def receive_period(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        analysis_date = date.fromisoformat(data["analysis_date"])
+        period = parse_period(message.text or "", analysis_date)
+        if period is None:
+            await message.answer(texts.PAYMENTS_PERIOD_INVALID, reply_markup=cancel_menu())
+            return
+        await state.update_data(
+            period_start=period.start.isoformat(), period_end=period.end.isoformat()
+        )
+        await state.set_state(CheckDialog.waiting_for_payments_file)
+        template = BufferedInputFile(build_payments_template(), filename="platezhi.xlsx")
+        await message.answer_document(template)
+        await message.answer(texts.PAYMENTS_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.confirming, F.text == ADD_HISTORY)
+    async def add_history(message: Message, state: FSMContext) -> None:
+        await state.set_state(CheckDialog.waiting_for_history_file)
+        template = BufferedInputFile(build_debt_history_template(), filename="istoriya-dolga.xlsx")
+        await message.answer_document(template)
+        await message.answer(texts.HISTORY_FILE_PROMPT, reply_markup=cancel_menu())
+
     @router.message(CheckDialog.waiting_for_file, F.text)
     async def remind_file(message: Message) -> None:
         await message.answer(texts.CHECK_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_payments_file, F.text)
+    async def remind_payments_file(message: Message) -> None:
+        await message.answer(texts.PAYMENTS_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_history_file, F.text)
+    async def remind_history_file(message: Message) -> None:
+        await message.answer(texts.HISTORY_FILE_PROMPT, reply_markup=cancel_menu())
 
     @router.message(CheckDialog.confirming, F.text)
     async def remind_launch(message: Message) -> None:

@@ -7,6 +7,8 @@ REPORT = "Отчёт"
 CANCEL = "Отмена"
 TODAY = "Сегодня"
 LAUNCH = "Запустить проверку"
+ADD_PAYMENTS = "Добавить платежи"
+ADD_HISTORY = "Добавить историю долга"
 
 
 def _keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
@@ -30,7 +32,8 @@ def date_menu() -> ReplyKeyboardMarkup:
 
 
 def launch_menu() -> ReplyKeyboardMarkup:
-    return _keyboard([[LAUNCH, CANCEL]])
+    """Package confirmation: launch, or add the optional files first (S4-01)."""
+    return _keyboard([[LAUNCH], [ADD_PAYMENTS, ADD_HISTORY], [CANCEL]])
 
 
 def bot_commands() -> list[BotCommand]:

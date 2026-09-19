@@ -286,7 +286,7 @@ class AnalysisPipeline:
             mode=run.mode,
             created_at=self._clock(),
             checked_at=min(fetched) if fetched else None,
-            package=(_package_line(rows, issues),),
+            package=_package_lines(run, rows, issues),
         )
         report = AnalysisReport(meta=meta, rows=report_rows, import_issues=issues)
         data = await asyncio.to_thread(self._build_report, report)
@@ -342,13 +342,34 @@ def _is_open(snapshot: ExternalSnapshot) -> bool:
     return snapshot.error is not None and snapshot.error.code in TRANSIENT_CODES
 
 
-def _package_line(rows: tuple[CounterpartyRow, ...], issues: tuple[ImportIssue, ...]) -> str:
+_EXTRA_FILE_LABELS = {
+    FileKind.PAYMENTS: "Платежи",
+    FileKind.DEBT_HISTORY: "История долга",
+    FileKind.INTERACTIONS: "Взаимодействия",
+}
+
+
+def _package_lines(
+    run: AnalysisRun, rows: tuple[CounterpartyRow, ...], issues: tuple[ImportIssue, ...]
+) -> tuple[str, ...]:
+    """The package as the report states it; optional files are named honestly:
+    they are stored with the check but enter the indicators only from S4-04 on."""
     bad_rows = {
         issue.row
         for issue in issues
         if issue.severity is IssueSeverity.ERROR and issue.row is not None
     }
-    return f"Контрагенты: {len(rows) + len(bad_rows)} строк, пригодных {len(rows)}"
+    lines = [f"Контрагенты: {len(rows) + len(bad_rows)} строк, пригодных {len(rows)}"]
+    for file in run.files:
+        if file.kind is FileKind.COUNTERPARTIES:
+            continue
+        label = _EXTRA_FILE_LABELS.get(file.kind, file.kind.value)
+        period = ""
+        if file.coverage is not None:
+            start, end = file.coverage.start, file.coverage.end
+            period = f" за {start.strftime('%d.%m.%Y')}–{end.strftime('%d.%m.%Y')}"
+        lines.append(f"{label}{period}: загружен, в показатели пока не входит")
+    return tuple(lines)
 
 
 def _summarize(rows: tuple[ReportRow, ...], issues: tuple[ImportIssue, ...]) -> RunSummary:
