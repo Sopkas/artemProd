@@ -24,6 +24,7 @@ from claims_assistant.application.analysis_repository import (
     RunLocked,
     RunNotFound,
 )
+from claims_assistant.application.retention import EXPIRABLE_STATUSES
 from claims_assistant.domain.analysis import (
     AnalysisRun,
     FileKind,
@@ -129,6 +130,12 @@ class SqliteAnalysisRepository:
 
     async def get_report(self, owner_id: int, run_id: str) -> ReportArtifact | None:
         return await self._run(self._get_report, owner_id, run_id)
+
+    async def list_expired(self, before: datetime) -> tuple[AnalysisRun, ...]:
+        return await self._run(self._list_expired, before)
+
+    async def delete_run(self, run_id: str) -> None:
+        await self._run(self._delete_run, run_id)
 
     async def mark_delivery(
         self, run_id: str, status: DeliveryStatus, error: str | None = None
@@ -314,6 +321,25 @@ class SqliteAnalysisRepository:
                 )
                 recovered.append(self._to_run(connection, self._row_by_id(connection, row.id)))
         return tuple(recovered)
+
+    # --- maintenance (S6-02) ---
+
+    def _list_expired(self, before: datetime) -> tuple[AnalysisRun, ...]:
+        statuses = [status.value for status in EXPIRABLE_STATUSES]
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                select(analysis_runs)
+                .where(analysis_runs.c.status.in_(statuses))
+                .where(analysis_runs.c.updated_at < _stamp(before))
+                .order_by(analysis_runs.c.updated_at, analysis_runs.c.sequence)
+            ).all()
+            return tuple(self._to_run(connection, row) for row in rows)
+
+    def _delete_run(self, run_id: str) -> None:
+        with self._engine.begin() as connection:
+            for table in (report_artifacts, run_steps, uploaded_files):
+                connection.execute(table.delete().where(table.c.run_id == run_id))
+            connection.execute(analysis_runs.delete().where(analysis_runs.c.id == run_id))
 
     # --- steps and reports ---
 
