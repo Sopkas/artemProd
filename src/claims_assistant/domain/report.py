@@ -10,15 +10,48 @@ A demo report may carry predefined demo priorities (control package, S2-06) inst
 rule results; ``ReportMeta.demo_scores`` marks that, and it is only allowed in demo mode.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from claims_assistant.domain.analysis import FileKind, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import DataMode, ExternalSnapshot
 from claims_assistant.domain.imports import ImportIssue
 from claims_assistant.domain.scoring import RULES_VERSION, Assessment, Priority
 
 DEMO_SCORE_NOTE = "Демонстрационная оценка задана заранее; правила не применялись."
+
+FILE_KIND_TITLES = {
+    FileKind.COUNTERPARTIES: "Контрагенты",
+    FileKind.PAYMENTS: "Платежи",
+    FileKind.DEBT_HISTORY: "История долга",
+    FileKind.INTERACTIONS: "Взаимодействия",
+}
+
+
+def file_labels(files: Sequence[UploadedFile]) -> tuple[tuple[str, str], ...]:
+    """(file id, label) in upload order: the kind, the payments period and, when a kind
+    repeats, the file's number — «Платежи за 01.06.2026–30.06.2026, файл 2».
+
+    The label names what the user chose and typed, never the file's contents; the upload
+    time is left out, as it would need the user's time zone.
+    """
+    total: dict[FileKind, int] = {}
+    for file in files:
+        total[file.kind] = total.get(file.kind, 0) + 1
+    seen: dict[FileKind, int] = {}
+    labels = []
+    for file in files:
+        seen[file.kind] = seen.get(file.kind, 0) + 1
+        label = FILE_KIND_TITLES.get(file.kind, file.kind.value)
+        if file.coverage is not None:
+            start, end = file.coverage.start, file.coverage.end
+            label += f" за {start.strftime('%d.%m.%Y')}–{end.strftime('%d.%m.%Y')}"
+        if total[file.kind] > 1:
+            label += f", файл {seen[file.kind]}"
+        labels.append((file.id, label))
+    return tuple(labels)
 
 
 def _aware(value: datetime | None, name: str) -> None:
@@ -38,6 +71,9 @@ class ReportMeta:
     rules_version: str = RULES_VERSION
     ai_version: str | None = None  # no AI explanations yet (sprint 5)
     package: tuple[str, ...] = ()  # human-readable composition, e.g. "Контрагенты: 50 строк"
+    # (file id, label) of the package files, so «Качество данных» names the file of an
+    # issue (``ImportIssue.file_id``); see ``file_labels``.
+    files: tuple[tuple[str, str], ...] = ()
     demo_scores: bool = False
 
     def __post_init__(self) -> None:

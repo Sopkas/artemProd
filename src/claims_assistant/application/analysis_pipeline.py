@@ -25,7 +25,7 @@ from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import DataMode, ExternalSnapshot, FetchStatus, Section
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
-from claims_assistant.domain.report import AnalysisReport, ReportMeta, ReportRow
+from claims_assistant.domain.report import AnalysisReport, ReportMeta, ReportRow, file_labels
 from claims_assistant.domain.scoring import RULES_VERSION, Priority, assess
 from claims_assistant.domain.steps import RUN_SCOPE, StepResult, StepStatus
 
@@ -291,6 +291,7 @@ class AnalysisPipeline:
             created_at=self._clock(),
             checked_at=min(fetched) if fetched else None,
             package=_package_lines(run, rows, issues),
+            files=file_labels(run.files),
         )
         report = AnalysisReport(meta=meta, rows=report_rows, import_issues=issues)
         data = await asyncio.to_thread(self._build_report, report)
