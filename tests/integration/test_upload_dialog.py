@@ -496,7 +496,7 @@ async def test_debt_history_is_attached_without_a_period(setup, bot, update_fact
     data = history_file([[INN_1, date(2026, 8, 1), 100.0], [INN_1, date(2026, 9, 1), 120.0]])
     reply = await send_document(dispatcher, bot, update_factory, data, name="hist.xlsx")
     assert "Файл «История долга» принят" in reply.text
-    assert "• История долга: 2 строк\n" in reply.text + "\n"
+    assert "• История долга — строк: 2\n" in reply.text + "\n"
     run = (await repository.list_runs(OWNER))[0]
     assert [f.kind for f in run.files] == [FileKind.COUNTERPARTIES, FileKind.DEBT_HISTORY]
     assert run.files[1].coverage is None
