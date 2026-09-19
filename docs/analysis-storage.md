@@ -71,9 +71,23 @@
 
 Смена версии (`version`) правил или адаптера означает новый ключ: старые результаты остаются в истории, шаг выполняется заново.
 
+### Payload шагов `external_fetch` и `scoring` (B)
+
+Сериализация доменных типов — `domain/serialization.py`; хранилище payload не разбирает.
+
+| Шаг | Запись | Чтение |
+| --- | --- | --- |
+| `external_fetch` (один раздел одного ИНН) | `json.dumps(snapshot_to_dict(snapshot), ensure_ascii=False)` | `snapshot_from_dict(json.loads(payload))` |
+| `scoring` (один ИНН) | `json.dumps(assessment_to_dict(assessment), ensure_ascii=False)` | `assessment_from_dict(json.loads(payload))` |
+
+- В каждом payload есть `"schema": 1`; другое значение отклоняется (`PayloadError`), поэтому старый формат после изменения не читается молча. Смена формата = новая схема и новая `version` шага.
+- Значения фактов хранятся с типом (`decimal` — строкой, `date` — ISO, `bool`, `int`, `str`, `company_status`, `none`): `Decimal` не становится `float`, `True` — `1`. Время — ISO с часовым поясом.
+- Чтение идёт через обычные конструкторы, все проверки доменных типов срабатывают повторно; нарушение даёт `PayloadError`. Сообщения ошибок не содержат payload (там могут быть ИНН и тексты источника).
+- Шаг `report` хранит файл через `ReportStore`, модель отчёта в payload не кладётся.
+
 ### Использование в конвейере (S3-01, S3-03)
 
-- `application/analysis_pipeline.py` — `AnalysisPipeline(files, reader, provider, repository, mode=, build_report=, limits=, sections=, clock=)`, реализует `RunProcessor`. Шаги и ключи: `("", "import", "counterparties-v2")` — строки и замечания импорта; `(inn, "external_fetch", "sections-v1")` — снимки разделов по ИНН; `("", "report", "xlsx-v1-rules-<RULES_VERSION>")` — сводка (`RunSummary`: организаций, проверено полностью, ошибок строк, приоритеты, исчерпан ли бюджет) после `save_report`. Перед каждым шагом — `get_step`; сохранённый `ok` не выполняется заново, сохранённый `failed` импорта даёт `failed` проверки. Снимок-заглушка guard'а «бюджет исчерпан» **не сохраняется** как шаг — новая попытка запросит организацию снова. Payload'ы — `application/step_payloads.py` (`dump_/load_import`, `dump_/load_snapshots`; типы значений фактов сохраняются точно: `Decimal`, `date`, `CompanyStatus`); нечитаемый payload → `failed` с безопасной причиной.
+- `application/analysis_pipeline.py` — `AnalysisPipeline(files, reader, provider, repository, mode=, build_report=, limits=, sections=, clock=)`, реализует `RunProcessor`. Шаги и ключи: `("", "import", "counterparties-v2")` — строки и замечания импорта; `(inn, "external_fetch", "sections-v1")` — снимки разделов по ИНН; `("", "report", "xlsx-v1-rules-<RULES_VERSION>")` — сводка (`RunSummary`: организаций, проверено полностью, ошибок строк, приоритеты, исчерпан ли бюджет) после `save_report`. Перед каждым шагом — `get_step`; сохранённый `ok` не выполняется заново, сохранённый `failed` импорта даёт `failed` проверки. Снимок-заглушка guard'а «бюджет исчерпан» **не сохраняется** как шаг — новая попытка запросит организацию снова. Payload'ы — `application/step_payloads.py`: `dump_/load_import` (строки и замечания, `"schema": 1`) и `dump_/load_snapshots` — список разделов одного ИНН, каждый в формате `domain/serialization.snapshot_to_dict`; нечитаемый payload → `failed` с безопасной причиной.
 - `presentation/telegram/notifier.py` — `TelegramRunNotifier(bot, repository, files)`: после `finish` обработчик зовёт `notify(run)`; владельцу уходит сводка и файл отчёта, доставка фиксируется через `report_delivery`; ошибка отправки логируется типом исключения и не меняет статус проверки.
 - `application/report_delivery.py`: `fetch_report(owner, repository, files)` — отчёт последней проверки владельца (`get_report` → `FileStorage.read`), `confirm_delivery` — `mark_delivery`. Отсутствующий файл фиксируется как `failed` доставка, проверка не трогается. Команда `/report` в Telegram ничего не ставит в очередь.
 

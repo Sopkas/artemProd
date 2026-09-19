@@ -1,4 +1,7 @@
-"""Step payloads round-trip through JSON with exact domain types."""
+"""Step payloads round-trip through JSON with exact domain types.
+
+Snapshots go through B's domain/serialization (tested there); here the pipeline's
+per-INN list and the import payload are checked end to end."""
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -112,13 +115,19 @@ def test_snapshot_round_trip_keeps_every_value_type_and_the_error():
     assert [type(v) for v in values] == [str, CompanyStatus, Decimal, int, bool, date, type(None)]
 
 
-@pytest.mark.parametrize("payload", ["{not json", "[]", '{"rows": 1}', '[{"inn": "1"}]'])
-def test_unreadable_payloads_raise_one_error_type(payload):
+@pytest.mark.parametrize(
+    "payload",
+    ["{not json", "[]", '{"rows": 1}', '[{"inn": "1"}]', '{"schema": 2, "rows": [], "issues": []}'],
+)
+def test_unreadable_import_payloads_raise_one_error_type(payload):
     with pytest.raises(PayloadError):
         load_import(payload)
-    if payload != "[]":
-        with pytest.raises(PayloadError):
-            load_snapshots(payload)
+
+
+@pytest.mark.parametrize("payload", ["{not json", "{}", '[{"inn": "1"}]', '[{"schema": 2}]'])
+def test_unreadable_snapshot_payloads_raise_one_error_type(payload):
+    with pytest.raises(PayloadError):
+        load_snapshots(payload)
 
 
 def test_payload_is_readable_json_without_escaped_cyrillic():
