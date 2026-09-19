@@ -96,7 +96,7 @@ async def run(settings: Settings) -> None:
                 business_utc_offset_hours=settings.business_utc_offset_hours,
             )
             # One worker in this process; runs left "running" by a crash go back to the queue.
-            worker = RunWorker(repository, PackageProcessor(files, reader))
+            worker = RunWorker(repository, PackageProcessor(files, reader, steps=repository))
             await worker.recover()
             worker_task = asyncio.create_task(worker.run_forever(), name="run-worker")
             logger.info("bot_started")
