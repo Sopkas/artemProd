@@ -69,6 +69,7 @@ async def test_summary_then_file_and_delivery_is_recorded(bot, tmp_path):
     assert "недостаточно данных — 1" in message.text
     assert "демонстрационные" in message.text
     assert isinstance(document, SendDocument) and document.chat_id == OWNER
+    assert document.caption == texts.report_caption(run)
     assert document.document.filename == f"otchet-{DAY.isoformat()}.xlsx"
     artifact = await repository.get_report(OWNER, run.id)
     assert artifact.delivery is DeliveryStatus.DELIVERED

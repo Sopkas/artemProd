@@ -63,3 +63,20 @@ async def test_other_owner_sees_nothing(storage):
     run = await repository.create_run(OWNER, DAY, DataMode.DEMO)
     await repository.save_report(run.id, storage.save(run.id, b"x"))
     assert await fetch_report(99, repository, storage) is None
+
+
+async def test_newest_report_wins_over_newer_runs_without_one(storage):
+    from claims_assistant.application.analysis_queue import RunOutcome
+
+    repository = InMemoryAnalysisRepository()
+    older = await repository.create_run(OWNER, date(2026, 9, 1), DataMode.DEMO)
+    await repository.transition(OWNER, older.id, RunStatus.QUEUED)
+    await repository.claim_next()
+    await repository.finish(older.id, RunOutcome(RunStatus.COMPLETED))
+    await repository.save_report(older.id, storage.save(older.id, b"old-report"))
+    # A newer check exists (draft, then queued) but has no report yet.
+    newer = await repository.create_run(OWNER, DAY, DataMode.DEMO)
+    report = await fetch_report(OWNER, repository, storage)
+    assert report is not None and report.run.id == older.id and report.data == b"old-report"
+    await repository.transition(OWNER, newer.id, RunStatus.QUEUED)
+    assert (await fetch_report(OWNER, repository, storage)).run.id == older.id

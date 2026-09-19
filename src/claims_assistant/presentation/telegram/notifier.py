@@ -12,7 +12,7 @@ from aiogram import Bot
 from aiogram.types import BufferedInputFile
 
 from claims_assistant.application.analysis_pipeline import load_summary
-from claims_assistant.application.analysis_repository import AnalysisRepository
+from claims_assistant.application.analysis_repository import AnalysisRepository, RepositoryError
 from claims_assistant.application.check_package import FileStorage
 from claims_assistant.application.report_delivery import (
     ReportUnavailable,
@@ -47,11 +47,22 @@ class TelegramRunNotifier:
             return
         document = BufferedInputFile(report.data, filename=report.filename)
         try:
-            await self._bot.send_document(run.owner_id, document, reply_markup=main_menu())
+            await self._bot.send_document(
+                run.owner_id,
+                document,
+                caption=texts.report_caption(run),
+                reply_markup=main_menu(),
+            )
         except Exception as exc:
             logger.error(
                 "report_delivery_failed run_id=%s error_type=%s", run.id, type(exc).__name__
             )
             await confirm_delivery(report, self._repository, error="Не удалось отправить файл.")
             raise
-        await confirm_delivery(report, self._repository)
+        try:
+            await confirm_delivery(report, self._repository)
+        except RepositoryError as exc:
+            # The owner already has the file; a bookkeeping failure only gets logged.
+            logger.error(
+                "report_delivery_unrecorded run_id=%s error_type=%s", run.id, type(exc).__name__
+            )

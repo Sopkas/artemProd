@@ -319,6 +319,48 @@ async def test_report_is_sent_and_delivery_recorded(setup, bot, update_factory, 
     assert await repository.claim_next() is None
 
 
+async def test_report_of_the_previous_check_stays_available_after_a_new_one_starts(
+    setup, bot, update_factory, tmp_path
+):
+    """Review B on #23: a draft or queued check started later must not hide the report."""
+    dispatcher, repository, run = await _finished_run_with_report(
+        setup, bot, update_factory, tmp_path
+    )
+    await start_check(dispatcher, bot, update_factory)
+    await send_document(dispatcher, bot, update_factory, build_counterparties_template())
+    assert (await repository.list_runs(OWNER))[0].id != run.id  # the draft is newest now
+    calls_before = len(bot.session.calls)
+    await dispatcher.feed_update(bot, update_factory("/report", user_id=OWNER))
+    sent = [c for c in bot.session.calls[calls_before:] if isinstance(c, SendDocument)]
+    assert len(sent) == 1 and sent[0].document.data == b"PK-report-bytes"
+    assert sent[0].caption == texts.report_caption(run)
+    assert run.analysis_date.strftime("%d.%m.%Y") in sent[0].caption
+    # The draft is untouched: still a draft, still the newest run, nothing queued.
+    assert (await repository.list_runs(OWNER))[0].status == RunStatus.DRAFT
+    assert await repository.claim_next() is None
+
+
+async def test_send_failure_asks_to_retry_and_marks_delivery_failed(
+    setup, bot, update_factory, tmp_path, caplog
+):
+    from claims_assistant.domain.steps import DeliveryStatus
+
+    dispatcher, repository, run = await _finished_run_with_report(
+        setup, bot, update_factory, tmp_path
+    )
+    bot.session.fail_once = RuntimeError("telegram network error with private text")
+    reply = await send(dispatcher, bot, update_factory, "/report")
+    assert reply.text == texts.REPORT_SEND_FAILED
+    assert buttons(reply) == MAIN_MENU
+    assert (await repository.get_report(OWNER, run.id)).delivery is DeliveryStatus.FAILED
+    assert "report_delivery_failed" in caplog.text and "private text" not in caplog.text
+    # The file is intact: the next /report succeeds.
+    calls_before = len(bot.session.calls)
+    await dispatcher.feed_update(bot, update_factory("/report", user_id=OWNER))
+    assert any(isinstance(c, SendDocument) for c in bot.session.calls[calls_before:])
+    assert (await repository.get_report(OWNER, run.id)).delivery is DeliveryStatus.DELIVERED
+
+
 async def test_report_can_be_sent_twice(setup, bot, update_factory, tmp_path):
     dispatcher, repository, run = await _finished_run_with_report(
         setup, bot, update_factory, tmp_path
