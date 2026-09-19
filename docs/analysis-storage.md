@@ -55,6 +55,22 @@
 
 `application/worker.py` — `RunWorker(queue, processor, poll_interval)`: `recover()` при старте, затем `run_forever()` как задача asyncio рядом с опросом Telegram; `process_one()` берёт одну проверку, вызывает `RunProcessor.process(run) -> RunOutcome`, исключение процессора превращается в `failed` с общим текстом (тип ошибки — только в журнал), сбой хранилища — пауза и повтор цикла. `application/package_processor.py` — тело шага спринта 2: перечитать файл «Контрагенты» из хранилища и записать `completed` / `partial` (число строк с ошибками) / `failed` (файл отсутствует или непригоден). S3-01 заменяет процессор конвейером импорт → провайдер → скоринг → отчёт.
 
+## Шаги и артефакт отчёта — контракт S3-03
+
+Архитектура: «результат шага сохраняется по ключу `(run_id, inn, step, version)`; завершённые сохранённые шаги повторно не выполняются; состояние доставки отчёта хранится отдельно от результата анализа». Типы — `domain/steps.py`, интерфейсы — `application/step_store.py`, реализуют те же репозитории (`memory`, `sqlite`, миграция `0003`).
+
+| Тип / метод | Правила |
+| --- | --- |
+| `StepResult(run_id, inn, step, version, status, completed_at, payload, error)` | `inn` — 10 цифр или `RUN_SCOPE` (`""`) для шагов уровня проверки (отчёт); `step` — стабильное snake_case-имя (`external_fetch`, `scoring`, `explanation`, `report`); `version` — версия правил/адаптера/инструкции; `payload` — строка (JSON шага), непрозрачная для хранилища; `status ∈ {ok, failed}`, у `failed` — безопасный `error` и нет `payload` |
+| `save_step(result)` | Идемпотентно: существующий результат с тем же ключом сохраняется и возвращается, новый не перезаписывает его — так «ровно один вызов» не гарантируется, но повторный дорогой шаг не переписывает уже сохранённый. `RunNotFound` для неизвестной проверки |
+| `get_step(run_id, inn, step, version)` / `list_steps(run_id)` | Чтение по ключу и весь список в порядке сохранения; системные вызовы (без владельца) |
+| `ReportArtifact(run_id, stored_path, created_at, delivery, delivered_at, delivery_error)` | Один артефакт на проверку; `delivery ∈ {pending, delivered, failed}`, время доставки только у `delivered`, ошибка только у `failed` |
+| `save_report(run_id, stored_path)` | Новый отчёт заменяет прежний и снова `pending` |
+| `get_report(owner_id, run_id)` | Owner-scoped: чужая проверка → `RunNotFound`; нет отчёта → `None` |
+| `mark_delivery(run_id, status, error)` | Фиксирует результат отправки, не трогая статус проверки; повторная выдача готового отчёта не ставит проверку в очередь |
+
+Смена версии (`version`) правил или адаптера означает новый ключ: старые результаты остаются в истории, шаг выполняется заново.
+
 ## Реализация на SQLite — шаг 2
 
 `infrastructure/persistence/sqlite.py`: `open_sqlite_repository(path)` создаёт каталог и файл, применяет миграции Alembic до `head` и возвращает `SqliteAnalysisRepository`. Блокирующая работа с БД выполняется в рабочем потоке (`asyncio.to_thread`), поэтому цикл Telegram не блокируется; сетевых вызовов внутри транзакций нет.
