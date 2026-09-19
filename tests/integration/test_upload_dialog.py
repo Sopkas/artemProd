@@ -432,7 +432,7 @@ async def package_ready(setup, bot, update_factory):
     dispatcher, repository = setup
     await start_check(dispatcher, bot, update_factory)
     reply = await send_document(dispatcher, bot, update_factory, build_counterparties_template())
-    assert "Состав пакета:" in reply.text and "• Контрагенты: 2 организаций" in reply.text
+    assert "Состав пакета:" in reply.text and "• Контрагенты — организаций: 2" in reply.text
     return dispatcher, repository
 
 
@@ -458,8 +458,8 @@ async def test_payments_need_a_period_then_a_file_and_show_the_composition(
     reply = await send_document(dispatcher, bot, update_factory, data, name="pay.xlsx")
     assert "Файл «Платежи» принят" in reply.text
     assert "Строк принято: 2" in reply.text
-    assert "• Платежи: 2 строк, период 01.06.2026–31.08.2026" in reply.text
-    assert "• Контрагенты: 2 организаций" in reply.text
+    assert "• Платежи — строк: 2, период 01.06.2026–31.08.2026" in reply.text
+    assert "• Контрагенты — организаций: 2" in reply.text
     assert buttons(reply) == LAUNCH_MENU
 
     run = (await repository.list_runs(OWNER))[0]

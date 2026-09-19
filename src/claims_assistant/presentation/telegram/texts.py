@@ -161,7 +161,7 @@ def period_text(period: Period) -> str:
 def composition_line(kind: FileKind, rows: int, coverage: Period | None) -> str:
     label = FILE_KIND_LABELS[kind]
     unit = "организаций" if kind is FileKind.COUNTERPARTIES else "строк"
-    text = f"{label}: {rows} {unit}"
+    text = f"{label} — {unit}: {rows}"
     if coverage is not None:
         text += f", период {period_text(coverage)}"
     return text
