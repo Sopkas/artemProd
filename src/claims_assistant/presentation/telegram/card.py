@@ -4,6 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from claims_assistant.application.check_company import CompanyCheck
+from claims_assistant.application.internal_context import InternalContext
 from claims_assistant.domain.external import (
     CompanyStatus,
     Coverage,
@@ -13,6 +14,12 @@ from claims_assistant.domain.external import (
     FetchStatus,
     Period,
     Section,
+)
+from claims_assistant.domain.indicators import (
+    DebtDynamics,
+    DebtTrend,
+    PaymentRecency,
+    PaymentStatus,
 )
 
 DEMO_BANNER = "ДЕМО: синтетические данные, не сведения о реальной организации."
@@ -42,7 +49,10 @@ _COVERAGE_LABELS = {
 _UNIT_SUFFIX = {"RUB": " ₽"}
 
 
-def format_card(check: CompanyCheck) -> str:
+_MAX_INTERACTIONS = 5
+
+
+def format_card(check: CompanyCheck, internal: InternalContext | None = None) -> str:
     lines: list[str] = []
     if check.mode == "demo":
         lines.append(DEMO_BANNER)
@@ -51,9 +61,93 @@ def format_card(check: CompanyCheck) -> str:
     for snapshot in check.snapshots:
         lines.append("")
         lines.extend(_section(snapshot))
+    if internal is not None:
+        lines.append("")
+        lines.extend(_internal(internal))
     lines.append("")
     lines.append("Карточка показывает полученные факты и полноту проверки без оценки очерёдности.")
     return "\n".join(lines)
+
+
+def _internal(context: InternalContext) -> list[str]:
+    """The owner's own data on this company (S4-04): which files, what they give, what
+    is missing. Amounts and comments are the owner's; nothing here is sent anywhere."""
+    run = context.run
+    row = _row_of(context)
+    lines = [f"Внутренние данные — проверка от {_date(run.analysis_date)}"]
+    lines.append("  Файлы: " + "; ".join(context.files))
+    if row is not None:
+        if row.debt is not None:
+            when = f" на {_date(row.cutoff_date)}" if row.cutoff_date else ""
+            lines.append(f"  Долг: {_money(row.debt, 'RUB')}{when}")
+        if row.overdue_days is not None:
+            lines.append(f"  Просрочка: {row.overdue_days} дн.")
+    lines.append("  Давность платежа: " + _payment_line(context.indicators.payment))
+    lines.append("  Долг за месяц: " + _debt_line(context.indicators.debt))
+    revenue = context.indicators.revenue
+    if revenue is not None:
+        sign = "+" if revenue.percent >= 0 else "−"
+        lines.append(
+            f"  Выручка за {revenue.year}: {sign}{abs(revenue.percent):.0f} % к предыдущему году"
+        )
+    if context.interactions:
+        shown = context.interactions[-_MAX_INTERACTIONS:]
+        lines.append(f"  Взаимодействия: {len(context.interactions)}, последние:")
+        for item in shown:
+            channel = f" ({item.channel})" if item.channel else ""
+            lines.append(f"    {_date(item.happened_on)}{channel}: {item.comment}")
+    else:
+        lines.append("  Взаимодействия: файл не загружен.")
+    for note in context.indicators.missing:
+        lines.append(f"  Не хватает: {note}")
+    return lines
+
+
+def _row_of(context: InternalContext):
+    return context.row
+
+
+def _payment_line(recency: PaymentRecency) -> str:
+    if recency.status is PaymentStatus.CONFIRMED:
+        return (
+            f"последний платёж {_date(recency.last_payment)}, {recency.age_days} дн. назад "
+            "(подтверждено)"
+        )
+    if recency.status is PaymentStatus.NONE_SINCE:
+        return (
+            f"поступлений нет с {_date(recency.no_payments_since)} — {recency.age_days} дн. "
+            "(выгрузка полная)"
+        )
+    if recency.status is PaymentStatus.IN_PERIOD:
+        last = (
+            f"последний платёж в выгрузке {_date(recency.period_last)}; "
+            if recency.period_last
+            else ""
+        )
+        return (
+            last + "давность не подтверждена" + (f" — {recency.reason}" if recency.reason else "")
+        )
+    if recency.status is PaymentStatus.CONFLICT:
+        return "неизвестна до исправления — файлы противоречат друг другу"
+    return "неизвестна" + (f" — {recency.reason}" if recency.reason else "")
+
+
+def _debt_line(dynamics: DebtDynamics) -> str:
+    if dynamics.trend is DebtTrend.COMPUTED:
+        ratio = f"×{dynamics.ratio:.2f}".replace(".", ",")
+        return (
+            f"{_money(dynamics.previous, 'RUB')} ({_date(dynamics.previous_on)}) → "
+            f"{_money(dynamics.current, 'RUB')} ({_date(dynamics.current_on)}), {ratio}"
+        )
+    if dynamics.trend is DebtTrend.APPEARED:
+        return f"долг появился: {_money(dynamics.current, 'RUB')} ({_date(dynamics.current_on)})"
+    if dynamics.trend is DebtTrend.NO_DEBT:
+        return "долга нет ни сейчас, ни месяц назад"
+    if dynamics.trend is DebtTrend.NO_BASE:
+        return "нет среза месяц назад" + (f" — {dynamics.reason}" if dynamics.reason else "")
+    if dynamics.trend is DebtTrend.CONFLICT:
+        return "неизвестна до исправления — файлы противоречат друг другу"
+    return "неизвестна" + (f" — {dynamics.reason}" if dynamics.reason else "")
 
 
 def _section(snapshot: ExternalSnapshot) -> list[str]:
