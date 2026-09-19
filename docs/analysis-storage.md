@@ -53,7 +53,7 @@
 
 ### Обработчик
 
-`application/worker.py` — `RunWorker(queue, processor, poll_interval)`: `recover()` при старте, затем `run_forever()` как задача asyncio рядом с опросом Telegram; `process_one()` берёт одну проверку, вызывает `RunProcessor.process(run) -> RunOutcome`, исключение процессора превращается в `failed` с общим текстом (тип ошибки — только в журнал), сбой хранилища — пауза и повтор цикла. `application/package_processor.py` — тело шага спринта 2: перечитать файл «Контрагенты» из хранилища и записать `completed` / `partial` (число строк с ошибками) / `failed` (файл отсутствует или непригоден). S3-01 заменяет процессор конвейером импорт → провайдер → скоринг → отчёт.
+`application/worker.py` — `RunWorker(queue, processor, poll_interval, notifier=None)`: `recover()` при старте, затем `run_forever()` как задача asyncio рядом с опросом Telegram; `process_one()` берёт одну проверку, вызывает `RunProcessor.process(run) -> RunOutcome`, исключение процессора превращается в `failed` с общим текстом (тип ошибки — только в журнал), сбой хранилища — пауза и повтор цикла. `application/package_processor.py` — тело шага спринта 2: перечитать файл «Контрагенты» из хранилища и записать `completed` / `partial` (число строк с ошибками) / `failed` (файл отсутствует или непригоден). S3-01 заменяет процессор конвейером импорт → провайдер → скоринг → отчёт.
 
 ## Шаги и артефакт отчёта — контракт S3-03
 
@@ -71,9 +71,10 @@
 
 Смена версии (`version`) правил или адаптера означает новый ключ: старые результаты остаются в истории, шаг выполняется заново.
 
-### Использование (S3-03, шаг 2)
+### Использование в конвейере (S3-01, S3-03)
 
-- `application/package_processor.py`: перед импортом — `get_step(run, RUN_SCOPE, "import", "counterparties-v1")`; если результат уже сохранён, файл не разбирается заново, итог берётся из шага; после импорта — `save_step` (`ok` с `{"rows", "errors"}` или `failed` с причиной). Прерванная и возобновлённая проверка (recover → повторный захват) не повторяет выполненные шаги.
+- `application/analysis_pipeline.py` — `AnalysisPipeline(files, reader, provider, repository, mode=, build_report=, limits=, sections=, clock=)`, реализует `RunProcessor`. Шаги и ключи: `("", "import", "counterparties-v2")` — строки и замечания импорта; `(inn, "external_fetch", "sections-v1")` — снимки разделов по ИНН; `("", "report", "xlsx-v1-rules-<RULES_VERSION>")` — сводка (`RunSummary`: организаций, проверено полностью, ошибок строк, приоритеты, исчерпан ли бюджет) после `save_report`. Перед каждым шагом — `get_step`; сохранённый `ok` не выполняется заново, сохранённый `failed` импорта даёт `failed` проверки. Снимок-заглушка guard'а «бюджет исчерпан» **не сохраняется** как шаг — новая попытка запросит организацию снова. Payload'ы — `application/step_payloads.py` (`dump_/load_import`, `dump_/load_snapshots`; типы значений фактов сохраняются точно: `Decimal`, `date`, `CompanyStatus`); нечитаемый payload → `failed` с безопасной причиной.
+- `presentation/telegram/notifier.py` — `TelegramRunNotifier(bot, repository, files)`: после `finish` обработчик зовёт `notify(run)`; владельцу уходит сводка и файл отчёта, доставка фиксируется через `report_delivery`; ошибка отправки логируется типом исключения и не меняет статус проверки.
 - `application/report_delivery.py`: `fetch_report(owner, repository, files)` — отчёт последней проверки владельца (`get_report` → `FileStorage.read`), `confirm_delivery` — `mark_delivery`. Отсутствующий файл фиксируется как `failed` доставка, проверка не трогается. Команда `/report` в Telegram ничего не ставит в очередь.
 
 ## Реализация на SQLite — шаг 2

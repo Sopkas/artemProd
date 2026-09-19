@@ -197,18 +197,30 @@ async def test_worker_runs_alongside_polling_and_stops_with_it(monkeypatch):
             self.stopped = True
             seen.append("stopped")
 
-    processors = []
-    real_processor = app.PackageProcessor
+    pipelines = []
+    real_pipeline = app.AnalysisPipeline
 
-    def capture_processor(*args, **kwargs):
-        processors.append((args, kwargs))
-        return real_processor(*args, **kwargs)
+    def capture_pipeline(*args, **kwargs):
+        pipelines.append((args, kwargs))
+        return real_pipeline(*args, **kwargs)
 
-    monkeypatch.setattr(app, "PackageProcessor", capture_processor)
-    monkeypatch.setattr(app, "RunWorker", Worker)
+    workers = []
+
+    def capture_worker(*args, **kwargs):
+        workers.append((args, kwargs))
+        return Worker()
+
+    monkeypatch.setattr(app, "AnalysisPipeline", capture_pipeline)
+    monkeypatch.setattr(app, "RunWorker", capture_worker)
     await asyncio.wait_for(app.run(Settings(TOKEN, frozenset({42}))), timeout=2)
     assert seen[:2] == ["worker", "polling"] or seen[:2] == ["polling", "worker"]
     assert seen[-1] == "stopped"
     repository.close.assert_called_once()
-    # The processor gets the repository as its step store, so resumed runs skip saved steps.
-    assert processors and processors[0][1]["steps"] is repository
+    # The pipeline stores steps in the repository, serves the service mode explicitly and
+    # takes the run budget from settings; the worker notifies the owner through Telegram.
+    (files, reader, provider, steps), options = pipelines[0]
+    assert steps is repository
+    assert isinstance(provider, app.GuardedCompanyDataProvider)
+    assert options["mode"] is app.DataMode.DEMO
+    assert options["limits"] == app.RunLimits(max_requests=1500, max_seconds=900.0)
+    assert isinstance(workers[0][1]["notifier"], app.TelegramRunNotifier)

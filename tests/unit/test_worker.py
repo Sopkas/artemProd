@@ -145,3 +145,42 @@ def test_processor_protocol_is_satisfied_by_the_scripted_one():
 async def _until_status(repository, run_id: str, status: RunStatus) -> None:
     while (await repository.get_run(OWNER, run_id)).status != status:
         await asyncio.sleep(0.01)
+
+
+# --- S3-01: the owner is told when the run is recorded ---
+
+
+class ScriptedNotifier:
+    def __init__(self, fail: bool = False) -> None:
+        self.runs: list[AnalysisRun] = []
+        self.fail = fail
+
+    async def notify(self, run: AnalysisRun) -> None:
+        self.runs.append(run)
+        if self.fail:
+            raise RuntimeError("telegram down; message text with secret token")
+
+
+async def test_notifier_gets_the_recorded_run_after_finish():
+    repository = InMemoryAnalysisRepository()
+    processor = ScriptedProcessor()
+    notifier = ScriptedNotifier()
+    run = await queued(repository)
+    processor.outcomes[run.id] = RunOutcome(RunStatus.PARTIAL, "Часть данных недоступна.")
+    await run_once(RunWorker(repository, processor, notifier=notifier))
+    assert [(r.id, r.status, r.failure) for r in notifier.runs] == [
+        (run.id, RunStatus.PARTIAL, "Часть данных недоступна.")
+    ]
+
+
+async def test_notifier_failure_is_logged_safely_and_the_run_stays_finished(caplog):
+    repository = InMemoryAnalysisRepository()
+    processor = ScriptedProcessor()
+    run = await queued(repository)
+    worker = RunWorker(repository, processor, notifier=ScriptedNotifier(fail=True))
+    with caplog.at_level(logging.ERROR):
+        assert await run_once(worker) is True
+    stored = await repository.get_run(OWNER, run.id)
+    assert stored.status == RunStatus.COMPLETED
+    assert "run_notify_failed" in caplog.text
+    assert "secret token" not in caplog.text
