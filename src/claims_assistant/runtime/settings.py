@@ -24,6 +24,8 @@ class Settings:
     database_path: Path = Path("data/claims.sqlite3")
     # Directory for uploaded .xlsx packages; created on first upload.
     storage_path: Path = Path("data/uploads")
+    # Calendar date for «Сегодня» and other business dates; Moscow (UTC+3) by default.
+    business_utc_offset_hours: int = 3
 
     data_provider: str = "demo"
     checko_api_key: str = field(default="", repr=False)
@@ -75,6 +77,15 @@ class Settings:
             values, "DATABASE_PATH", "data/claims.sqlite3", "файлу базы данных"
         )
         storage_path = _path_setting(values, "STORAGE_PATH", "data/uploads", "каталогу загрузок")
+        raw_offset = (values.get("BUSINESS_UTC_OFFSET_HOURS") or "").strip() or "3"
+        try:
+            offset = int(raw_offset)
+        except ValueError:
+            raise ConfigurationError(
+                "BUSINESS_UTC_OFFSET_HOURS: нужно целое число часов."
+            ) from None
+        if not -12 <= offset <= 14:
+            raise ConfigurationError("BUSINESS_UTC_OFFSET_HOURS: допустимы значения от -12 до 14.")
         return cls(
             token=token,
             allowed_ids=allowed_ids,
@@ -84,6 +95,7 @@ class Settings:
             checko_api_key=checko_key,
             database_path=database_path,
             storage_path=storage_path,
+            business_utc_offset_hours=offset,
         )
 
 
