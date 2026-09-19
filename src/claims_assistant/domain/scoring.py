@@ -9,11 +9,12 @@ Internal signals (overdue, payments, debt growth) arrive in S4-07 through
 ``internal_signals``; the assembly already treats every signal the same way.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from types import MappingProxyType
 
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import (
@@ -78,9 +79,26 @@ class Assessment:
     priority: Priority
     signals: tuple[Signal, ...]
     missing_data: tuple[str, ...]
-    coverage: dict[str, Coverage]
+    coverage: Mapping[str, Coverage]
     base_complete: bool
     rules_version: str = RULES_VERSION
+
+    def __post_init__(self) -> None:
+        # A read-only copy: the assessment is a snapshot and must not change afterwards.
+        object.__setattr__(self, "coverage", MappingProxyType(dict(self.coverage)))
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.inn,
+                self.priority,
+                self.signals,
+                self.missing_data,
+                tuple(sorted(self.coverage.items())),
+                self.base_complete,
+                self.rules_version,
+            )
+        )
 
     @property
     def next_step(self) -> str:
@@ -154,7 +172,24 @@ def _bankruptcy_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
 
 
 def _by_year(facts: Iterable[Fact]) -> dict[int, Fact]:
-    return {f.period.end.year: f for f in facts if f.period is not None}
+    """Known values of full calendar years only: a quarter is not compared with a year."""
+    return {
+        f.period.end.year: f
+        for f in facts
+        if f.period is not None
+        and isinstance(f.value, Decimal)
+        and f.period.start == date(f.period.end.year, 1, 1)
+        and f.period.end == date(f.period.end.year, 12, 31)
+    }
+
+
+def _two_consecutive_years(snapshot: ExternalSnapshot | None) -> bool:
+    """The base-set condition: one indicator known for two consecutive comparable years."""
+    for kind in (FactKind.REVENUE, FactKind.NET_PROFIT):
+        years = _by_year(_facts(snapshot, kind))
+        if any(y - 1 in years and years[y - 1].unit == years[y].unit for y in years):
+            return True
+    return False
 
 
 def _finance_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
@@ -221,8 +256,8 @@ def _external_gaps(
     )
     bankruptcy = snapshots.get(Section.BANKRUPTCY)
     efrsb_full = bankruptcy is not None and bankruptcy.coverage is Coverage.COMPLETE
-    finances = snapshots.get(Section.FINANCES)
-    two_years = finances is not None and finances.covered_period is not None
+    # Checked on the facts, like the finance signals, not on the declared covered period.
+    two_years = _two_consecutive_years(snapshots.get(Section.FINANCES))
     return missing, coverage, company_ok and efrsb_full and two_years
 
 
