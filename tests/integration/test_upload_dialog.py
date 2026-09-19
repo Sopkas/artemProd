@@ -17,7 +17,13 @@ OWNER = 42
 MAIN_MENU = ["Проверить ИНН", "Новая проверка", "Статус", "Отчёт", "О сервисе", "Помощь"]
 
 
-LAUNCH_MENU = ["Запустить проверку", "Добавить платежи", "Добавить историю долга", "Отмена"]
+LAUNCH_MENU = [
+    "Запустить проверку",
+    "Добавить платежи",
+    "Добавить историю долга",
+    "Добавить взаимодействия",
+    "Отмена",
+]
 
 
 def buttons(reply) -> list[str]:
@@ -572,3 +578,38 @@ def test_parse_period(text, expected):
 
     period = parse_period(text, date(2026, 9, 1))
     assert period == (None if expected is None else Period(*expected))
+
+
+# --- S4-02: interactions ---
+
+
+def interactions_file(rows):
+    from claims_assistant.infrastructure.excel.ledgers import build_interactions_workbook
+
+    return build_interactions_workbook(rows)
+
+
+async def test_interactions_are_attached_and_counted(setup, bot, update_factory):
+    from claims_assistant.domain.analysis import FileKind
+
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    reply = await send(dispatcher, bot, update_factory, "Добавить взаимодействия")
+    assert reply.text == texts.INTERACTIONS_FILE_PROMPT
+    last_document = [c for c in bot.session.calls if isinstance(c, SendDocument)][-1]
+    assert last_document.document.filename == "vzaimodeystviya.xlsx"
+    data = interactions_file(
+        [
+            [INN_1, "I-2", date(2026, 8, 20), "Обещали оплатить до конца месяца.", "телефон"],
+            [INN_1, "I-1", date(2026, 8, 1), "Направлена претензия.", None],
+            ["1234567894", "I-9", date(2026, 8, 1), "Чужой контрагент.", None],
+        ]
+    )
+    reply = await send_document(dispatcher, bot, update_factory, data, name="int.xlsx")
+    assert "Файл «Взаимодействия» принят" in reply.text
+    assert "Строк принято: 2" in reply.text and "Ошибок: 1" in reply.text
+    assert "• Взаимодействия — строк: 2" in reply.text
+    # Comments never come back in the chat.
+    assert "претензия" not in reply.text and "Чужой" not in reply.text
+    run = (await repository.list_runs(OWNER))[0]
+    assert [f.kind for f in run.files] == [FileKind.COUNTERPARTIES, FileKind.INTERACTIONS]
+    assert run.files[1].coverage is None

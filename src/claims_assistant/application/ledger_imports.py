@@ -1,4 +1,4 @@
-"""S4-05: import the optional «Платежи» and «История долга» sheets of a package.
+"""S4-05/S4-02: import the optional «Платежи», «История долга» and «Взаимодействия» sheets.
 
 Same boundary as ``imports.import_counterparties``: reader failures become one file-level
 issue instead of an exception, so an unreadable upload yields no rows. The INNs of the
@@ -8,10 +8,11 @@ issue instead of an exception, so an unreadable upload yields no rows. The INNs 
 from collections.abc import Collection
 from datetime import date
 
-from claims_assistant.domain import debt_history, payments
+from claims_assistant.domain import debt_history, interactions, payments
 from claims_assistant.domain.counterparties import ImportLimits
 from claims_assistant.domain.debt_history import DebtHistoryImport
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.interactions import InteractionsImport
 from claims_assistant.domain.payments import PaymentsImport
 
 from .imports import Sheet, SheetReader, WorkbookError
@@ -58,5 +59,22 @@ def import_debt_history(
         return DebtHistoryImport(issues=(sheet,))
     header, rows = sheet
     return debt_history.parse_debt_history(
+        header, rows, known_inns=known_inns, analysis_date=analysis_date, limits=limits
+    )
+
+
+def import_interactions(
+    reader: SheetReader,
+    source: object,
+    *,
+    known_inns: Collection[str] | None,
+    analysis_date: date | None,
+    limits: ImportLimits = ImportLimits(),
+) -> InteractionsImport:
+    sheet = _read(reader, source, interactions.SHEET_NAME, limits)
+    if isinstance(sheet, ImportIssue):
+        return InteractionsImport(issues=(sheet,))
+    header, rows = sheet
+    return interactions.parse_interactions(
         header, rows, known_inns=known_inns, analysis_date=analysis_date, limits=limits
     )
