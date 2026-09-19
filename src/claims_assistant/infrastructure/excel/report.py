@@ -308,8 +308,8 @@ def _about(report: AnalysisReport) -> list[tuple[object, ...]]:
             else f"по правилам версии {meta.rules_version}",
         ),
         (
-            "Время внешней проверки",
-            _moment(meta.checked_at) if meta.checked_at else "не выполнялась",
+            "Внешние данные не старее",
+            _moment(meta.checked_at) if meta.checked_at else "внешние источники не запрашивались",
         ),
         ("Версия правил", meta.rules_version),
         ("Версия ИИ", meta.ai_version or "ИИ-пояснения не используются"),

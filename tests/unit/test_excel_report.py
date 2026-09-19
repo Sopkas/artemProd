@@ -158,7 +158,7 @@ def test_about_sheet_names_run_mode_rules_and_limits():
     assert rows["ID проверки"] == "run-1"
     assert rows["Режим"] == "Реальные данные"
     assert rows["Оценки приоритета"].startswith("по правилам версии")
-    assert rows["Время внешней проверки"] == "18.09.2026 12:00 UTC"
+    assert rows["Внешние данные не старее"] == "18.09.2026 12:00 UTC"
     assert rows["Версия ИИ"] == "ИИ-пояснения не используются"
 
 
@@ -235,3 +235,9 @@ def test_internal_signal_reasons_cite_ids_present_in_grounds():
     assert "internal-overdue" in priority[6]
     grounds = {row[0] for row in data_rows(workbook["Основания"])}
     assert "internal-overdue" in grounds
+
+
+def test_about_sheet_says_when_no_source_was_queried():
+    meta = ReportMeta("run-2", DAY, DataMode.DEMO, NOW)  # checked_at is None
+    rows = dict(data_rows(open_report(AnalysisReport(meta))["О проверке"])[:10])
+    assert rows["Внешние данные не старее"] == "внешние источники не запрашивались"
