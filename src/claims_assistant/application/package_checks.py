@@ -12,14 +12,17 @@ looks at the package as a whole, right before launch and again inside the pipeli
   from the row's debt, a «last payment» in the main file that the covered payments
   export does not contain, or a later payment inside the covered period.
 
-Cross-file issues carry ``file_id`` so the report's «Качество данных» sheet names the
-file; reasons never quote comments, amounts or INNs.
+Cross-file issues carry ``file_id`` (the report will name the file by it, B's part);
+reasons never quote comments, amounts or INNs. Date conflicts are also returned per INN
+in ``PackageReview.conflicts`` so the indicators (S4-06) can mark exactly those companies
+as «неизвестно» instead of the whole package.
 """
 
 import asyncio
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import date
+from pathlib import PurePosixPath
 from typing import TypeVar
 
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, UploadedFile
@@ -36,6 +39,8 @@ from .ledger_imports import import_debt_history, import_interactions, import_pay
 PACKAGE_SHEET = "Пакет"
 FOREIGN_FILE = "Файл пакета не принадлежит этой проверке."
 MAIN_FILE_DUPLICATED = "В пакете больше одного файла «Контрагенты»."
+DEBT_HISTORY_CONFLICT = "debt_history"
+LAST_PAYMENT_CONFLICT = "last_payment"
 
 _Row = TypeVar("_Row")
 
@@ -51,6 +56,9 @@ class PackageReview:
     history: tuple[DebtSnapshot, ...]
     interactions: tuple[InteractionRow, ...]
     issues: tuple[ImportIssue, ...]  # every file's issues plus the cross-file ones
+    # INN → {DEBT_HISTORY_CONFLICT, LAST_PAYMENT_CONFLICT}: which indicator is unknown
+    # for which company because the files contradict each other.
+    conflicts: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def blocking(self) -> tuple[ImportIssue, ...]:
@@ -71,7 +79,14 @@ def _package_issue(
 
 
 def belongs_to_run(file: UploadedFile, run: AnalysisRun) -> bool:
-    return file.run_id == run.id and file.stored_path.startswith(f"{run.id}/")
+    """The record names this run and its path is a plain file inside the run's directory."""
+    parts = PurePosixPath(file.stored_path).parts
+    return (
+        file.run_id == run.id
+        and len(parts) == 2
+        and parts[0] == run.id
+        and parts[1] not in ("", ".", "..")
+    )
 
 
 def check_ownership(run: AnalysisRun) -> None:
@@ -125,31 +140,36 @@ def _merge_by_key(
     return list(accepted.values()), issues
 
 
+def _companies(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return f"{count} организации"
+    return f"{count} организаций"
+
+
 def date_conflicts(
     run: AnalysisRun,
     counterparties: tuple[CounterpartyRow, ...],
     payments: tuple[PaymentRow, ...],
     history: tuple[DebtSnapshot, ...],
     covered: dict[str, tuple[date, date]],
-) -> list[ImportIssue]:
-    """Contradictions between the main file and the optional ones; reasons carry no data."""
-    issues: list[ImportIssue] = []
+) -> tuple[list[ImportIssue], dict[str, frozenset[str]]]:
+    """Contradictions between the main file and the optional ones, per INN.
+
+    One issue per kind names how many companies are affected (never which); the mapping
+    says which, so S4-06 marks the indicator unknown only for them.
+    """
+    found: dict[str, set[str]] = {}
     by_inn = {row.inn: row for row in counterparties}
     for snapshot in history:
         row = by_inn.get(snapshot.inn)
-        if row is None or snapshot.cutoff_date != run.analysis_date or row.debt is None:
+        if row is None or row.debt is None:
+            continue
+        # The main file's debt is as of the row's own cut-off date (contract §4), which
+        # is the analysis date only by default.
+        if snapshot.cutoff_date != (row.cutoff_date or run.analysis_date):
             continue
         if snapshot.debt != row.debt:
-            issues.append(
-                _package_issue(
-                    "debt_history_conflict",
-                    IssueSeverity.WARNING,
-                    "Сумма долга в «Истории долга» на дату анализа расходится с файлом "
-                    "«Контрагенты»; показатель динамики долга по этой организации "
-                    "не рассчитывается.",
-                )
-            )
-            break
+            found.setdefault(snapshot.inn, set()).add(DEBT_HISTORY_CONFLICT)
     paid: dict[str, list[date]] = {}
     for payment in payments:
         paid.setdefault(payment.inn, []).append(payment.paid_on)
@@ -162,16 +182,32 @@ def date_conflicts(
         dates = paid.get(inn, [])
         later = [d for d in dates if d > last and any(s <= d <= e for s, e in covered.values())]
         if (inside and last not in dates) or later:
-            issues.append(
-                _package_issue(
-                    "last_payment_conflict",
-                    IssueSeverity.WARNING,
-                    "Дата последнего платежа в файле «Контрагенты» не совпадает с выгрузкой "
-                    "«Платежи» за подтверждённый период; давность платежа берётся из выгрузки.",
-                )
+            found.setdefault(inn, set()).add(LAST_PAYMENT_CONFLICT)
+
+    issues: list[ImportIssue] = []
+    debt = sum(1 for kinds in found.values() if DEBT_HISTORY_CONFLICT in kinds)
+    if debt:
+        issues.append(
+            _package_issue(
+                "debt_history_conflict",
+                IssueSeverity.WARNING,
+                f"У {_companies(debt)} сумма долга в «Истории долга» на дату среза расходится "
+                "с файлом «Контрагенты»; динамика долга по ним считается неизвестной "
+                "до исправления.",
             )
-            break
-    return issues
+        )
+    payment = sum(1 for kinds in found.values() if LAST_PAYMENT_CONFLICT in kinds)
+    if payment:
+        issues.append(
+            _package_issue(
+                "last_payment_conflict",
+                IssueSeverity.WARNING,
+                f"У {_companies(payment)} дата последнего платежа в файле «Контрагенты» "
+                "не совпадает с выгрузкой «Платежи» за подтверждённый период; давность "
+                "платежа по ним считается неизвестной до исправления.",
+            )
+        )
+    return issues, {inn: frozenset(kinds) for inn, kinds in found.items()}
 
 
 async def review_package(
@@ -248,7 +284,10 @@ async def review_package(
         "ID взаимодействия",
     )
     issues.extend(more)
-    issues.extend(date_conflicts(run, counterparties, tuple(payments), tuple(history), covered))
+    conflict_issues, conflicts = date_conflicts(
+        run, counterparties, tuple(payments), tuple(history), covered
+    )
+    issues.extend(conflict_issues)
     ordered_interactions = tuple(row for rows in chronology(interactions).values() for row in rows)
     return PackageReview(
         counterparties=counterparties,
@@ -256,11 +295,14 @@ async def review_package(
         history=tuple(history),
         interactions=ordered_interactions,
         issues=tuple(issues),
+        conflicts=conflicts,
     )
 
 
 __all__ = [
+    "DEBT_HISTORY_CONFLICT",
     "FOREIGN_FILE",
+    "LAST_PAYMENT_CONFLICT",
     "MAIN_FILE_DUPLICATED",
     "PACKAGE_SHEET",
     "PackageIntegrityError",

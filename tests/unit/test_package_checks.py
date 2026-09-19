@@ -13,9 +13,12 @@ from claims_assistant.application.check_package import (
     accept_ledger,
 )
 from claims_assistant.application.package_checks import (
+    DEBT_HISTORY_CONFLICT,
     FOREIGN_FILE,
+    LAST_PAYMENT_CONFLICT,
     PACKAGE_SHEET,
     PackageIntegrityError,
+    belongs_to_run,
     review_package,
 )
 from claims_assistant.domain.analysis import FileKind
@@ -190,6 +193,99 @@ async def test_debt_history_on_the_analysis_date_must_match_the_main_file(deps):
     ]
     reason = review.issues[0].reason
     assert "120" not in reason and INN_A not in reason
+    assert "1 организации" in reason and "неизвестной до исправления" in reason
+    assert review.conflicts == {INN_A: frozenset({DEBT_HISTORY_CONFLICT})}
+
+
+async def test_debt_history_is_compared_on_the_rows_own_cutoff_date(deps):
+    """Review B on #31: the main file's debt is as of the row's cut-off, not the analysis day.
+
+    The «Контрагенты» parser (S2-04) already rejects a cut-off other than the analysis
+    date, so the rows are built directly: the rule must hold even if that changes.
+    """
+    from claims_assistant.application.package_checks import date_conflicts
+    from claims_assistant.domain.debt_history import DebtSnapshot
+
+    run = await draft(deps)
+    cutoff = date(2026, 8, 31)
+    rows = (CounterpartyRow(inn=INN_A, cutoff_date=cutoff, debt=Decimal("100.00")),)
+    # 31.08 = 150 contradicts the row; 19.09 (analysis date) = 120 is simply a later snapshot.
+    history = (
+        DebtSnapshot(INN_A, cutoff, Decimal("150.00")),
+        DebtSnapshot(INN_A, DAY, Decimal("120.00")),
+    )
+    issues, conflicts = date_conflicts(run, rows, (), history, {})
+    assert conflicts == {INN_A: frozenset({DEBT_HISTORY_CONFLICT})}
+    assert [i.code for i in issues] == ["debt_history_conflict"]
+    # A matching 31.08 snapshot is clean, whatever the analysis-day snapshot says.
+    history = (
+        DebtSnapshot(INN_A, cutoff, Decimal("100.00")),
+        DebtSnapshot(INN_A, DAY, Decimal("120.00")),
+    )
+    assert date_conflicts(run, rows, (), history, {}) == ([], {})
+    # Without a cut-off on the row the analysis date is the row's date.
+    rows = (CounterpartyRow(inn=INN_A, debt=Decimal("100.00")),)
+    _, conflicts = date_conflicts(run, rows, (), history, {})
+    assert conflicts == {INN_A: frozenset({DEBT_HISTORY_CONFLICT})}
+
+
+async def test_conflicts_are_collected_for_every_company_and_counted_once(deps):
+    rows = (
+        CounterpartyRow(
+            inn=INN_A, cutoff_date=DAY, debt=Decimal("100.00"), last_payment_date=date(2026, 7, 15)
+        ),
+        CounterpartyRow(
+            inn=INN_B, cutoff_date=DAY, debt=Decimal("50.00"), last_payment_date=date(2026, 7, 16)
+        ),
+    )
+    run = await draft(deps, rows)
+    run = await attach(
+        deps,
+        run,
+        FileKind.DEBT_HISTORY,
+        build_debt_history_workbook([[INN_A, DAY, 1.0], [INN_B, DAY, 2.0]]),
+    )
+    run = await attach(
+        deps,
+        run,
+        FileKind.PAYMENTS,
+        build_payments_workbook([[INN_A, "P-1", date(2026, 7, 1), 1.0]]),
+        PERIOD,
+    )
+    review = await review_package(run, deps["files"], deps["reader"])
+    assert review.conflicts == {
+        INN_A: frozenset({DEBT_HISTORY_CONFLICT, LAST_PAYMENT_CONFLICT}),
+        INN_B: frozenset({DEBT_HISTORY_CONFLICT, LAST_PAYMENT_CONFLICT}),
+    }
+    assert [c for c, *_ in codes(review)] == ["debt_history_conflict", "last_payment_conflict"]
+    assert "У 2 организаций" in review.issues[0].reason
+    assert "У 2 организаций" in review.issues[1].reason
+
+
+@pytest.mark.parametrize(
+    "path, ok",
+    [
+        ("{run}/file.xlsx", True),
+        ("{run}/../other/file.xlsx", False),
+        ("{run}/sub/file.xlsx", False),
+        ("other/file.xlsx", False),
+        ("{run}-x/file.xlsx", False),
+        ("{run}/..", False),
+    ],
+)
+async def test_belongs_to_run_accepts_only_a_plain_file_in_the_runs_directory(deps, path, ok):
+    from claims_assistant.domain.analysis import UploadedFile
+
+    run = await draft(deps)
+    stored = path.format(run=run.id)
+    try:
+        file = replace(run.files[0], stored_path=stored)
+    except ValueError:
+        # The domain refuses the path outright; that is as good as a failed check.
+        assert not ok
+        return
+    assert isinstance(file, UploadedFile)
+    assert belongs_to_run(file, run) is ok
 
 
 @pytest.mark.parametrize(
