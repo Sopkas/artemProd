@@ -29,6 +29,7 @@ async def test_commands_and_menu(bot, update_factory, input_text, expected):
         "Проверить ИНН",
         "Новая проверка",
         "Статус",
+        "Отчёт",
         "О сервисе",
         "Помощь",
     ]
