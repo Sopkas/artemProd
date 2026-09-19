@@ -140,6 +140,21 @@ def test_full_export_without_payments_confirms_their_absence():
     assert earlier.no_payments_since == days_ago(60)
 
 
+def test_a_gap_between_exports_is_named_in_the_reason():
+    # 30.06 and 02.07 typed by hand: 01.07 is not covered.
+    periods = (Period(date(2026, 6, 1), date(2026, 6, 30)), Period(date(2026, 7, 2), DAY))
+    recency = payment_recency(row(), [pay(date(2026, 6, 15))], periods, DAY)
+    assert recency.status is PaymentStatus.NONE_SINCE
+    assert recency.no_payments_since == date(2026, 7, 2)
+    assert recency.gap == Period(date(2026, 7, 1), date(2026, 7, 1))
+    assert recency.period_last == date(2026, 6, 15)
+    assert "разрыв 01.07.2026–01.07.2026" in recency.reason
+    assert "15.06.2026" in recency.reason
+    touching = (Period(date(2026, 6, 1), date(2026, 6, 30)), Period(date(2026, 7, 1), DAY))
+    joined = payment_recency(row(), [pay(date(2026, 6, 15))], touching, DAY)
+    assert joined.status is PaymentStatus.CONFIRMED and joined.gap is None
+
+
 def test_partial_export_gives_only_the_last_payment_in_the_period():
     partial = (Period(days_ago(90), days_ago(20)),)
     recency = payment_recency(row(), [pay(days_ago(30))], partial, DAY)

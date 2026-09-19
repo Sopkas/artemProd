@@ -81,6 +81,7 @@ class PaymentRecency:
     source: str | None = None  # evidence ID the value rests on
     no_payments_since: date | None = None  # NONE_SINCE: start of the empty covered span
     period_last: date | None = None  # last payment inside the provided export, if any
+    gap: Period | None = None  # uncovered days right before the span that reaches the date
     reason: str | None = None  # why the age is not confirmed
 
     @property
@@ -156,6 +157,18 @@ def covered_since(periods: Iterable[Period], analysis_date: date) -> date | None
         if end >= analysis_date:
             reach = start
     return reach
+
+
+def gap_before(periods: Iterable[Period], since: date) -> Period | None:
+    """Uncovered days between an earlier export and the span starting on ``since``.
+
+    Two periods typed by hand with a one-day slip (30.06 and 02.07) leave such a gap; the
+    earlier export then cannot confirm the payment age, and the user should see why.
+    """
+    before = [p.end for p in periods if p.end < since]
+    if not before:
+        return None
+    return Period(max(before) + _DAY, since - _DAY)
 
 
 def _inside(day: date, periods: Sequence[Period]) -> bool:
@@ -234,14 +247,26 @@ def payment_recency(
                 period_last=period_last,
             )
         silent = (analysis_date - since).days + 1
+        gap = gap_before(periods, since)
+        reason = (
+            f"В полной выгрузке «Платежи» нет поступлений с {_fmt(since)} ({silent} дн.); "
+            "более ранние платежи неизвестны."
+        )
+        if gap is not None:
+            earlier = f" Последний платёж до разрыва — {_fmt(period_last)}." if period_last else ""
+            reason = (
+                f"В выгрузке «Платежи» нет поступлений с {_fmt(since)} ({silent} дн.), но между "
+                f"периодами выгрузок есть разрыв {_fmt(gap.start)}–{_fmt(gap.end)}: "
+                f"давность до него не подтверждена.{earlier}"
+            )
         return PaymentRecency(
             PaymentStatus.NONE_SINCE,
             age_days=silent,
             source=INTERNAL_PAYMENTS,
             no_payments_since=since,
             period_last=period_last,
-            reason=f"В полной выгрузке «Платежи» нет поступлений с {_fmt(since)} "
-            f"({silent} дн.); более ранние платежи неизвестны.",
+            gap=gap,
+            reason=reason,
         )
     if main is not None:
         return PaymentRecency(
