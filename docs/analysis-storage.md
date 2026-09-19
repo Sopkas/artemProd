@@ -77,8 +77,8 @@
 
 | Шаг | Запись | Чтение |
 | --- | --- | --- |
-| `external_fetch` (один раздел одного ИНН) | `json.dumps(snapshot_to_dict(snapshot), ensure_ascii=False)` | `snapshot_from_dict(json.loads(payload))` |
-| `scoring` (один ИНН) | `json.dumps(assessment_to_dict(assessment), ensure_ascii=False)` | `assessment_from_dict(json.loads(payload))` |
+| `external_fetch` (все разделы одного ИНН, один шаг на ИНН) | `step_payloads.dump_snapshots(snapshots)` — список `snapshot_to_dict(...)` | `step_payloads.load_snapshots(payload)` — `snapshot_from_dict` по каждому |
+| `scoring` (один ИНН; конвейер S3-01 пока не сохраняет — оценка считается в памяти, версия правил в ключе шага `report`) | `json.dumps(assessment_to_dict(assessment), ensure_ascii=False)` | `assessment_from_dict(json.loads(payload))` |
 
 - В каждом payload есть `"schema": 1`; другое значение отклоняется (`PayloadError`), поэтому старый формат после изменения не читается молча. Смена формата = новая схема и новая `version` шага.
 - Значения фактов хранятся с типом (`decimal` — строкой, `date` — ISO, `bool`, `int`, `str`, `company_status`, `none`): `Decimal` не становится `float`, `True` — `1`. Время — ISO с часовым поясом.
