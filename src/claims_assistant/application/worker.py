@@ -3,7 +3,9 @@
 It polls the queue, processes one run at a time and records a final outcome. A failing
 processor fails that run with a safe reason and the loop continues; the worker itself
 never crashes on a run. Blocking work belongs inside the processor (threads), so the
-Telegram loop keeps answering while a run is processed.
+Telegram loop keeps answering while a run is processed. When the run is recorded, an
+optional notifier tells the owner (S3-01); a notifier failure is logged and never changes
+the run, because the report can always be requested again with /report (S3-03).
 """
 
 import asyncio
@@ -25,12 +27,23 @@ class RunProcessor(Protocol):
         ...
 
 
+class RunNotifier(Protocol):
+    async def notify(self, run: AnalysisRun) -> None:
+        """Tell the owner about a finished run (summary and, if built, the report)."""
+        ...
+
+
 class RunWorker:
     def __init__(
-        self, queue: AnalysisQueue, processor: RunProcessor, poll_interval: float = 2.0
+        self,
+        queue: AnalysisQueue,
+        processor: RunProcessor,
+        poll_interval: float = 2.0,
+        notifier: RunNotifier | None = None,
     ) -> None:
         self._queue = queue
         self._processor = processor
+        self._notifier = notifier
         self._poll_interval = poll_interval
         self._stop = asyncio.Event()
 
@@ -55,8 +68,17 @@ class RunWorker:
             # The exception text may carry INNs, file contents or provider messages.
             logger.error("run_failed run_id=%s error_type=%s", run.id, type(exc).__name__)
             outcome = RunOutcome(RunStatus.FAILED, PROCESSING_FAILED)
-        await self._queue.finish(run.id, outcome)
+        finished = await self._queue.finish(run.id, outcome)
         logger.info("run_finished run_id=%s status=%s", run.id, outcome.status)
+        if self._notifier is not None:
+            try:
+                await self._notifier.notify(finished)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "run_notify_failed run_id=%s error_type=%s", run.id, type(exc).__name__
+                )
         return True
 
     async def run_forever(self) -> None:

@@ -53,7 +53,7 @@
 
 ### Обработчик
 
-`application/worker.py` — `RunWorker(queue, processor, poll_interval)`: `recover()` при старте, затем `run_forever()` как задача asyncio рядом с опросом Telegram; `process_one()` берёт одну проверку, вызывает `RunProcessor.process(run) -> RunOutcome`, исключение процессора превращается в `failed` с общим текстом (тип ошибки — только в журнал), сбой хранилища — пауза и повтор цикла. `application/package_processor.py` — тело шага спринта 2: перечитать файл «Контрагенты» из хранилища и записать `completed` / `partial` (число строк с ошибками) / `failed` (файл отсутствует или непригоден). S3-01 заменяет процессор конвейером импорт → провайдер → скоринг → отчёт.
+`application/worker.py` — `RunWorker(queue, processor, poll_interval, notifier=None)`: `recover()` при старте, затем `run_forever()` как задача asyncio рядом с опросом Telegram; `process_one()` берёт одну проверку, вызывает `RunProcessor.process(run) -> RunOutcome`, исключение процессора превращается в `failed` с общим текстом (тип ошибки — только в журнал), сбой хранилища — пауза и повтор цикла. `application/package_processor.py` — тело шага спринта 2: перечитать файл «Контрагенты» из хранилища и записать `completed` / `partial` (число строк с ошибками) / `failed` (файл отсутствует или непригоден). S3-01 заменяет процессор конвейером импорт → провайдер → скоринг → отчёт.
 
 ## Шаги и артефакт отчёта — контракт S3-03
 
@@ -70,6 +70,26 @@
 | `mark_delivery(run_id, status, error)` | Фиксирует результат отправки, не трогая статус проверки; повторная выдача готового отчёта не ставит проверку в очередь |
 
 Смена версии (`version`) правил или адаптера означает новый ключ: старые результаты остаются в истории, шаг выполняется заново.
+
+### Payload шагов `external_fetch` и `scoring` (B)
+
+Сериализация доменных типов — `domain/serialization.py`; хранилище payload не разбирает.
+
+| Шаг | Запись | Чтение |
+| --- | --- | --- |
+| `external_fetch` (все разделы одного ИНН, один шаг на ИНН) | `step_payloads.dump_snapshots(snapshots)` — список `snapshot_to_dict(...)` | `step_payloads.load_snapshots(payload)` — `snapshot_from_dict` по каждому |
+| `scoring` (один ИНН; конвейер S3-01 пока не сохраняет — оценка считается в памяти, версия правил в ключе шага `report`) | `json.dumps(assessment_to_dict(assessment), ensure_ascii=False)` | `assessment_from_dict(json.loads(payload))` |
+
+- В каждом payload есть `"schema": 1`; другое значение отклоняется (`PayloadError`), поэтому старый формат после изменения не читается молча. Смена формата = новая схема и новая `version` шага.
+- Значения фактов хранятся с типом (`decimal` — строкой, `date` — ISO, `bool`, `int`, `str`, `company_status`, `none`): `Decimal` не становится `float`, `True` — `1`. Время — ISO с часовым поясом.
+- Чтение идёт через обычные конструкторы, все проверки доменных типов срабатывают повторно; нарушение даёт `PayloadError`. Сообщения ошибок не содержат payload (там могут быть ИНН и тексты источника).
+- Шаг `report` хранит файл через `ReportStore`, модель отчёта в payload не кладётся.
+
+### Использование в конвейере (S3-01, S3-03)
+
+- `application/analysis_pipeline.py` — `AnalysisPipeline(files, reader, provider, repository, mode=, build_report=, limits=, sections=, clock=)`, реализует `RunProcessor`. Шаги и ключи: `("", "import", "counterparties-v2")` — строки и замечания импорта; `(inn, "external_fetch", "sections-v1")` — снимки разделов по ИНН; `("", "report", "xlsx-v1-rules-<RULES_VERSION>")` — сводка (`RunSummary`: организаций, проверено полностью, ошибок строк, приоритеты, исчерпан ли бюджет) после `save_report`. Перед каждым шагом — `get_step`; сохранённый `ok` не выполняется заново, сохранённый `failed` импорта даёт `failed` проверки. Шаг `external_fetch` **не сохраняется**, если среди разделов есть заглушка guard'а «бюджет исчерпан» или временная ошибка источника (`timeout`, `network_error`, `http_error`, `rate_limited`) — новая попытка запросит организацию снова; окончательные ответы (`ok`, `not_found`, `unauthorized`, `invalid_response`) сохраняются. Отчёт, записанный до падения между `save_report` и шагом `report`, при возобновлении заменяется, старый файл удаляется. `checked_at` отчёта — самый ранний `fetched_at` среди разделов (кэш guard'а хранит своё время): все внешние данные не старее него. Payload'ы — `application/step_payloads.py`: `dump_/load_import` (строки и замечания, `"schema": 1`) и `dump_/load_snapshots` — список разделов одного ИНН, каждый в формате `domain/serialization.snapshot_to_dict`; нечитаемый payload → `failed` с безопасной причиной.
+- `presentation/telegram/notifier.py` — `TelegramRunNotifier(bot, repository, files)`: после `finish` обработчик зовёт `notify(run)`; владельцу уходит сводка и файл отчёта, доставка фиксируется через `report_delivery`; ошибка отправки логируется типом исключения и не меняет статус проверки.
+- `application/report_delivery.py`: `fetch_report(owner, repository, files)` — **новейший отчёт владельца** (`latest_report`: по `list_runs` от новых к старым до первой проверки с `get_report`; начатая позже черновая или очередная проверка отчёт не прячет) → `FileStorage.read`, `confirm_delivery` — `mark_delivery`. Отсутствующий файл фиксируется как `failed` доставка, проверка не трогается. Команда `/report` в Telegram ничего не ставит в очередь.
 
 ## Реализация на SQLite — шаг 2
 

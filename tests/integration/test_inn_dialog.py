@@ -30,7 +30,14 @@ async def test_entry_prompts_for_inn_with_cancel_keyboard(bot, update_factory, e
 
 async def test_main_menu_has_check_inn_button(bot, update_factory):
     reply = await feed(create_dispatcher(frozenset({42})), bot, update_factory, "/start")
-    assert buttons(reply) == ["Проверить ИНН", "Новая проверка", "Статус", "О сервисе", "Помощь"]
+    assert buttons(reply) == [
+        "Проверить ИНН",
+        "Новая проверка",
+        "Статус",
+        "Отчёт",
+        "О сервисе",
+        "Помощь",
+    ]
 
 
 async def test_valid_inn_shows_the_demo_card_and_dialog_ends(bot, update_factory):
@@ -39,7 +46,14 @@ async def test_valid_inn_shows_the_demo_card_and_dialog_ends(bot, update_factory
     assert reply.text.startswith(DEMO_BANNER)
     assert f"ИНН {VALID_INN}" in reply.text
     assert "Организация" in reply.text
-    assert buttons(reply) == ["Проверить ИНН", "Новая проверка", "Статус", "О сервисе", "Помощь"]
+    assert buttons(reply) == [
+        "Проверить ИНН",
+        "Новая проверка",
+        "Статус",
+        "Отчёт",
+        "О сервисе",
+        "Помощь",
+    ]
     # The dialog is over: plain text goes back to the fallback, not to the validator.
     reply = await feed(dispatcher, bot, update_factory, "привет")
     assert reply.text == texts.FALLBACK
@@ -65,7 +79,14 @@ async def test_cancel_returns_to_menu(bot, update_factory, cancel):
     dispatcher = create_dispatcher(frozenset({42}))
     reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", cancel)
     assert reply.text == texts.INN_CANCELLED
-    assert buttons(reply) == ["Проверить ИНН", "Новая проверка", "Статус", "О сервисе", "Помощь"]
+    assert buttons(reply) == [
+        "Проверить ИНН",
+        "Новая проверка",
+        "Статус",
+        "Отчёт",
+        "О сервисе",
+        "Помощь",
+    ]
     reply = await feed(dispatcher, bot, update_factory, VALID_INN)
     assert reply.text == texts.FALLBACK
 
@@ -90,7 +111,14 @@ async def test_menu_commands_leave_the_dialog(bot, update_factory, command, expe
 async def test_cancel_outside_dialog_is_harmless(bot, update_factory):
     reply = await feed(create_dispatcher(frozenset({42})), bot, update_factory, "/cancel")
     assert reply.text == texts.NOTHING_TO_CANCEL
-    assert buttons(reply) == ["Проверить ИНН", "Новая проверка", "Статус", "О сервисе", "Помощь"]
+    assert buttons(reply) == [
+        "Проверить ИНН",
+        "Новая проверка",
+        "Статус",
+        "Отчёт",
+        "О сервисе",
+        "Помощь",
+    ]
 
 
 async def test_dialog_state_is_per_user(bot, update_factory):
@@ -122,6 +150,7 @@ async def test_non_text_returns_menu_and_clears_dialog(bot, update_factory, payl
         "Проверить ИНН",
         "Новая проверка",
         "Статус",
+        "Отчёт",
         "О сервисе",
         "Помощь",
     ]
@@ -141,7 +170,14 @@ async def test_configured_scenario_is_used_for_the_card(bot, update_factory):
     dispatcher = create_dispatcher(frozenset({42}), DemoCompanyDataProvider(DemoScenario.ERROR))
     reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
     assert reply.text.count("— раздел недоступен") == 3
-    assert buttons(reply) == ["Проверить ИНН", "Новая проверка", "Статус", "О сервисе", "Помощь"]
+    assert buttons(reply) == [
+        "Проверить ИНН",
+        "Новая проверка",
+        "Статус",
+        "Отчёт",
+        "О сервисе",
+        "Помощь",
+    ]
 
 
 async def test_provider_bug_gives_a_safe_reply_and_leaves_the_dialog(bot, update_factory, caplog):
@@ -152,7 +188,14 @@ async def test_provider_bug_gives_a_safe_reply_and_leaves_the_dialog(bot, update
     dispatcher = create_dispatcher(frozenset({42}), BrokenProvider())
     reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
     assert reply.text == texts.CHECK_FAILED
-    assert buttons(reply) == ["Проверить ИНН", "Новая проверка", "Статус", "О сервисе", "Помощь"]
+    assert buttons(reply) == [
+        "Проверить ИНН",
+        "Новая проверка",
+        "Статус",
+        "Отчёт",
+        "О сервисе",
+        "Помощь",
+    ]
     assert "check_failed" in caplog.text
     assert "private debtor note" not in caplog.text
     assert VALID_INN not in caplog.text

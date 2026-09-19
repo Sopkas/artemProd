@@ -1,8 +1,10 @@
 from datetime import date
 
+from claims_assistant.application.analysis_pipeline import RunSummary
 from claims_assistant.domain.analysis import AnalysisRun, RunStatus
 from claims_assistant.domain.external import DataMode
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.scoring import Priority
 
 START = (
     "Здравствуйте! Это «Помощник претензионщика».\n\n"
@@ -18,6 +20,7 @@ HELP = (
     "/inn — проверить ИНН\n"
     "/check — новая проверка по файлу «Контрагенты»\n"
     "/status — состояние последней проверки\n"
+    "/report — отчёт по последней проверке\n"
     "/cancel — отменить ввод\n\n"
     "Можно также воспользоваться кнопками меню. "
     "Дополнительные файлы (платежи, взаимодействия, история долга) появятся позже."
@@ -62,6 +65,13 @@ CHECK_QUEUED_PREFIX = "Проверка поставлена в очередь"
 CHECK_CANCELLED = "Новая проверка отменена. Черновик, если он был создан, не запускается."
 STATUS_TITLE = "Последняя проверка"
 STATUS_EMPTY = "Проверок пока нет. Нажмите «Новая проверка», чтобы загрузить список."
+STATUS_REPORT_HINT = "Отчёт готов — нажмите «Отчёт» или /report, чтобы получить файл ещё раз."
+RUN_FINISHED_TITLE = "Проверка завершена"
+REPORT_EMPTY = "Готового отчёта пока нет. Он появится после завершения проверки."
+REPORT_UNAVAILABLE = (
+    "Файл отчёта не найден в хранилище. Запустите новую проверку или обратитесь к разработчику."
+)
+REPORT_SEND_FAILED = "Не удалось отправить файл. Попробуйте ещё раз: «Отчёт» или /report."
 
 _STATUS_LABELS = {
     RunStatus.DRAFT: "черновик, не запущена",
@@ -72,6 +82,13 @@ _STATUS_LABELS = {
     RunStatus.FAILED: "не удалась",
 }
 _MAX_LISTED_ISSUES = 10
+_PRIORITY_LABELS = {
+    Priority.CRITICAL: "критичный",
+    Priority.HIGH: "высокий",
+    Priority.MEDIUM: "средний",
+    Priority.LOW: "низкий",
+    Priority.UNKNOWN: "недостаточно данных",
+}
 
 
 def status_label(status: RunStatus) -> str:
@@ -132,7 +149,14 @@ def check_queued(run: AnalysisRun) -> str:
     )
 
 
-def run_status(run: AnalysisRun) -> str:
+def report_caption(run: AnalysisRun) -> str:
+    caption = f"Отчёт по проверке: дата анализа {_date(run.analysis_date)}."
+    if run.mode is DataMode.DEMO:
+        caption += " Демонстрационные данные."
+    return caption
+
+
+def run_status(run: AnalysisRun, has_report: bool = False) -> str:
     lines = [
         f"{STATUS_TITLE}: {status_label(run.status)}",
         f"Дата анализа: {_date(run.analysis_date)}",
@@ -141,6 +165,29 @@ def run_status(run: AnalysisRun) -> str:
     ]
     if run.failure:
         lines.append(f"Причина: {run.failure}")
+    if has_report:
+        lines.append(STATUS_REPORT_HINT)
+    if run.mode is DataMode.DEMO:
+        lines.append("Режим: демонстрационные данные.")
+    return "\n".join(lines)
+
+
+def run_finished(run: AnalysisRun, summary: RunSummary | None) -> str:
+    lines = [
+        f"{RUN_FINISHED_TITLE}: {status_label(run.status)}",
+        f"Дата анализа: {_date(run.analysis_date)}",
+    ]
+    if run.failure:
+        lines.append(f"Причина: {run.failure}")
+    if summary is not None:
+        lines.append(f"Организаций: {summary.companies}, проверено полностью: {summary.checked}")
+        counts = [
+            f"{_PRIORITY_LABELS[priority]} — {summary.priorities.get(priority, 0)}"
+            for priority in Priority
+            if summary.priorities.get(priority, 0)
+        ]
+        lines.append("Приоритеты: " + (", ".join(counts) if counts else "нет"))
+        lines.append("Отчёт — файлом ниже; повторно: «Отчёт» или /report.")
     if run.mode is DataMode.DEMO:
         lines.append("Режим: демонстрационные данные.")
     return "\n".join(lines)

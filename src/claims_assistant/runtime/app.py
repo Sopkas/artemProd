@@ -6,19 +6,21 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommandScopeAllPrivateChats
 
+from claims_assistant.application.analysis_pipeline import AnalysisPipeline, RunLimits
 from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.external_guard import GuardedCompanyDataProvider, GuardPolicy
-from claims_assistant.application.package_processor import PackageProcessor
 from claims_assistant.application.worker import RunWorker
 from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.cache.memory import TtlSnapshotCache
 from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
+from claims_assistant.infrastructure.excel.report import build_report
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
 from claims_assistant.infrastructure.storage.local import LocalFileStorage
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 from claims_assistant.presentation.telegram.menu import bot_commands
+from claims_assistant.presentation.telegram.notifier import TelegramRunNotifier
 
 from .settings import ConfigurationError, Settings
 
@@ -96,7 +98,20 @@ async def run(settings: Settings) -> None:
                 business_utc_offset_hours=settings.business_utc_offset_hours,
             )
             # One worker in this process; runs left "running" by a crash go back to the queue.
-            worker = RunWorker(repository, PackageProcessor(files, reader))
+            pipeline = AnalysisPipeline(
+                files,
+                reader,
+                provider,
+                repository,
+                mode=mode,
+                build_report=build_report,
+                limits=RunLimits(
+                    max_requests=settings.external.run_request_limit,
+                    max_seconds=settings.external.run_time_limit_seconds,
+                ),
+            )
+            notifier = TelegramRunNotifier(bot, repository, files)
+            worker = RunWorker(repository, pipeline, notifier=notifier)
             await worker.recover()
             worker_task = asyncio.create_task(worker.run_forever(), name="run-worker")
             logger.info("bot_started")

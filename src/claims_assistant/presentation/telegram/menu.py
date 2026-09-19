@@ -3,6 +3,7 @@ from aiogram.types import BotCommand, KeyboardButton, ReplyKeyboardMarkup
 CHECK_INN = "Проверить ИНН"
 NEW_CHECK = "Новая проверка"
 STATUS = "Статус"
+REPORT = "Отчёт"
 CANCEL = "Отмена"
 TODAY = "Сегодня"
 LAUNCH = "Запустить проверку"
@@ -17,7 +18,7 @@ def _keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
 
 
 def main_menu() -> ReplyKeyboardMarkup:
-    return _keyboard([[CHECK_INN, NEW_CHECK, STATUS], ["О сервисе", "Помощь"]])
+    return _keyboard([[CHECK_INN, NEW_CHECK, STATUS], [REPORT, "О сервисе", "Помощь"]])
 
 
 def cancel_menu() -> ReplyKeyboardMarkup:
@@ -40,5 +41,6 @@ def bot_commands() -> list[BotCommand]:
         BotCommand(command="inn", description="Проверить ИНН"),
         BotCommand(command="check", description="Новая проверка по файлу"),
         BotCommand(command="status", description="Состояние последней проверки"),
+        BotCommand(command="report", description="Отчёт по последней проверке"),
         BotCommand(command="cancel", description="Отменить ввод"),
     ]

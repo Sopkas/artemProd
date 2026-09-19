@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, ErrorEvent, Message
 
-from claims_assistant.application.analysis_repository import AnalysisRepository
+from claims_assistant.application.analysis_repository import AnalysisRepository, RepositoryError
 from claims_assistant.application.check_company import check_company
 from claims_assistant.application.check_package import (
     FileStorage,
@@ -22,6 +22,11 @@ from claims_assistant.application.check_package import (
 )
 from claims_assistant.application.company_data import CompanyDataProvider
 from claims_assistant.application.imports import SheetReader
+from claims_assistant.application.report_delivery import (
+    ReportUnavailable,
+    confirm_delivery,
+    fetch_report,
+)
 from claims_assistant.domain.external import DataMode
 from claims_assistant.domain.inn import InvalidInn
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
@@ -38,6 +43,7 @@ from .menu import (
     CHECK_INN,
     LAUNCH,
     NEW_CHECK,
+    REPORT,
     STATUS,
     TODAY,
     cancel_menu,
@@ -178,8 +184,40 @@ def create_dispatcher(
     async def status(message: Message, state: FSMContext) -> None:
         await state.clear()
         run = await latest_run(message.from_user.id, repository)
-        text = texts.STATUS_EMPTY if run is None else texts.run_status(run)
-        await message.answer(text, reply_markup=main_menu())
+        if run is None:
+            await message.answer(texts.STATUS_EMPTY, reply_markup=main_menu())
+            return
+        has_report = await repository.get_report(message.from_user.id, run.id) is not None
+        await message.answer(texts.run_status(run, has_report), reply_markup=main_menu())
+
+    @router.message(Command("report"))
+    @router.message(F.text == REPORT)
+    async def report(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        try:
+            report_file = await fetch_report(message.from_user.id, repository, files)
+        except ReportUnavailable:
+            await message.answer(texts.REPORT_UNAVAILABLE, reply_markup=main_menu())
+            return
+        if report_file is None:
+            await message.answer(texts.REPORT_EMPTY, reply_markup=main_menu())
+            return
+        document = BufferedInputFile(report_file.data, filename=report_file.filename)
+        try:
+            await message.answer_document(
+                document, caption=texts.report_caption(report_file.run), reply_markup=main_menu()
+            )
+        except Exception as exc:
+            # Telegram refused the file: record it, keep the run and the artifact intact.
+            logger.error("report_delivery_failed error_type=%s", type(exc).__name__)
+            await confirm_delivery(report_file, repository, error="Не удалось отправить файл.")
+            await message.answer(texts.REPORT_SEND_FAILED, reply_markup=main_menu())
+            return
+        try:
+            await confirm_delivery(report_file, repository)
+        except RepositoryError as exc:
+            # The user already has the file; a bookkeeping failure is not their problem.
+            logger.error("report_delivery_unrecorded error_type=%s", type(exc).__name__)
 
     # --- INN card ---
 
