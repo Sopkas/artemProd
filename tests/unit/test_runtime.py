@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from claims_assistant.application.analysis_repository import RepositoryError
+from claims_assistant.application.external_guard import GuardedCompanyDataProvider
 from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
@@ -72,6 +73,10 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
     else:
         await app.run(settings)
         provider = create_dispatcher.call_args.args[1]
+        # The dispatcher gets the guarded provider (limits, retries, cache) around the demo one.
+        assert isinstance(provider, GuardedCompanyDataProvider)
+        assert isinstance(provider.inner, DemoCompanyDataProvider)
+        assert provider.inner.scenario == DemoScenario.ALARM
         repository.recover_interrupted.assert_awaited_once()
         kwargs = create_dispatcher.call_args.kwargs
         assert kwargs["repository"] is repository
@@ -79,8 +84,6 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
         assert isinstance(kwargs["reader"], OpenpyxlSheetReader)
         assert kwargs["mode"] == DataMode.DEMO
         assert kwargs["business_utc_offset_hours"] == 3
-        assert isinstance(provider, DemoCompanyDataProvider)
-        assert provider.scenario == DemoScenario.ALARM
         commands = bot.set_my_commands.call_args.args[0]
         assert [command.command for command in commands] == [
             "start",
@@ -149,7 +152,7 @@ async def test_checko_provider_is_selected_without_network(monkeypatch):
     await app.run(
         Settings(TOKEN, frozenset({42}), data_provider="checko", checko_api_key="synthetic-key")
     )
-    assert isinstance(create.call_args.args[1], CheckoCompanyDataProvider)
+    assert isinstance(create.call_args.args[1].inner, CheckoCompanyDataProvider)
     bot.session.close.assert_awaited_once()
 
 

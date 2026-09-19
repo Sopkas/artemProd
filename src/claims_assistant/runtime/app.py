@@ -7,9 +7,11 @@ from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommandScopeAllPrivateChats
 
 from claims_assistant.application.analysis_repository import RepositoryError
+from claims_assistant.application.external_guard import GuardedCompanyDataProvider, GuardPolicy
 from claims_assistant.application.package_processor import PackageProcessor
 from claims_assistant.application.worker import RunWorker
 from claims_assistant.domain.external import DataMode
+from claims_assistant.infrastructure.cache.memory import TtlSnapshotCache
 from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
@@ -68,10 +70,21 @@ async def run(settings: Settings) -> None:
             logger.info("storage_ready")
             files = LocalFileStorage(settings.storage_path)
             reader = OpenpyxlSheetReader()
-            provider = (
+            mode = DataMode.LIVE if settings.data_provider == "checko" else DataMode.DEMO
+            source = (
                 CheckoCompanyDataProvider(settings.checko_api_key)
                 if settings.data_provider == "checko"
                 else DemoCompanyDataProvider(settings.demo_scenario)
+            )
+            # Limits, retries and a per-process cache apply to demo and live alike.
+            provider = GuardedCompanyDataProvider(
+                source,
+                GuardPolicy(
+                    timeout_seconds=settings.external.timeout_seconds,
+                    max_retries=settings.external.max_retries,
+                ),
+                TtlSnapshotCache(settings.external.cache_ttl_seconds),
+                mode=mode,
             )
             dispatcher = create_dispatcher(
                 settings.allowed_ids,
@@ -79,7 +92,7 @@ async def run(settings: Settings) -> None:
                 repository=repository,
                 files=files,
                 reader=reader,
-                mode=DataMode.LIVE if settings.data_provider == "checko" else DataMode.DEMO,
+                mode=mode,
                 business_utc_offset_hours=settings.business_utc_offset_hours,
             )
             # One worker in this process; runs left "running" by a crash go back to the queue.

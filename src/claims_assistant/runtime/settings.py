@@ -9,6 +9,18 @@ from dotenv import dotenv_values
 from claims_assistant.infrastructure.demo.company_data import DemoScenario
 
 
+@dataclass(frozen=True)
+class ExternalLimits:
+    """Limits for external sources; defaults are the architecture's starting values,
+    to be aligned with the real Checko tariff (S3-02)."""
+
+    timeout_seconds: float = 20.0
+    max_retries: int = 2
+    cache_ttl_seconds: float = 3600.0
+    run_time_limit_seconds: float = 900.0
+    run_request_limit: int = 1500
+
+
 class ConfigurationError(ValueError):
     """Safe, user-facing configuration error without the rejected value."""
 
@@ -24,6 +36,7 @@ class Settings:
     database_path: Path = Path("data/claims.sqlite3")
     # Directory for uploaded .xlsx packages; created on first upload.
     storage_path: Path = Path("data/uploads")
+    external: ExternalLimits = ExternalLimits()
     # Calendar date for «Сегодня» and other business dates; Moscow (UTC+3) by default.
     business_utc_offset_hours: int = 3
 
@@ -77,6 +90,13 @@ class Settings:
             values, "DATABASE_PATH", "data/claims.sqlite3", "файлу базы данных"
         )
         storage_path = _path_setting(values, "STORAGE_PATH", "data/uploads", "каталогу загрузок")
+        external = ExternalLimits(
+            timeout_seconds=_number(values, "EXTERNAL_TIMEOUT_SECONDS", 20.0, minimum=0.001),
+            max_retries=_number(values, "EXTERNAL_MAX_RETRIES", 2, integer=True, minimum=0),
+            cache_ttl_seconds=_number(values, "EXTERNAL_CACHE_TTL_SECONDS", 3600.0, minimum=0),
+            run_time_limit_seconds=_number(values, "RUN_TIME_LIMIT_SECONDS", 900.0, minimum=1),
+            run_request_limit=_number(values, "RUN_REQUEST_LIMIT", 1500, integer=True, minimum=1),
+        )
         raw_offset = (values.get("BUSINESS_UTC_OFFSET_HOURS") or "").strip() or "3"
         try:
             offset = int(raw_offset)
@@ -95,6 +115,7 @@ class Settings:
             checko_api_key=checko_key,
             database_path=database_path,
             storage_path=storage_path,
+            external=external,
             business_utc_offset_hours=offset,
         )
 
@@ -106,3 +127,17 @@ def _path_setting(values: dict, key: str, default: str, what: str) -> Path:
     if not raw.strip():
         raise ConfigurationError(f"{key}: укажите путь к {what}.")
     return Path(raw.strip())
+
+
+def _number(values: dict, key: str, default, *, integer: bool = False, minimum):
+    raw = values.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        number = int(raw.strip()) if integer else float(raw.strip())
+    except ValueError:
+        kind = "целое число" if integer else "число"
+        raise ConfigurationError(f"{key}: нужно {kind}.") from None
+    if number < minimum or (not integer and number != number):
+        raise ConfigurationError(f"{key}: значение не меньше {minimum:g}.")
+    return number

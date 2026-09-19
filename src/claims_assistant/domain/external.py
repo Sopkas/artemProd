@@ -111,6 +111,12 @@ class ProviderError:
 
     code: str
     message: str
+    # Provider's own wait hint (HTTP Retry-After) for transient failures; None if absent.
+    retry_after_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.retry_after_seconds is not None and not (0 <= self.retry_after_seconds < 3600):
+            raise ValueError("retry_after_seconds must be within [0, 3600)")
 
 
 @dataclass(frozen=True, slots=True)

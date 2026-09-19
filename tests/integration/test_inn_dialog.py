@@ -158,3 +158,16 @@ async def test_provider_bug_gives_a_safe_reply_and_leaves_the_dialog(bot, update
     assert VALID_INN not in caplog.text
     reply = await feed(dispatcher, bot, update_factory, VALID_INN)
     assert reply.text == texts.FALLBACK
+
+
+async def test_card_works_through_the_guarded_provider(bot, update_factory):
+    from claims_assistant.application.external_guard import GuardedCompanyDataProvider, GuardPolicy
+    from claims_assistant.infrastructure.cache.memory import TtlSnapshotCache
+
+    provider = GuardedCompanyDataProvider(
+        DemoCompanyDataProvider(DemoScenario.ALARM), GuardPolicy(), TtlSnapshotCache(60)
+    )
+    dispatcher = create_dispatcher(frozenset({42}), provider)
+    reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
+    assert reply.text.startswith(DEMO_BANNER)
+    assert "наблюдени" in reply.text
