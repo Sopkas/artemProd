@@ -78,6 +78,7 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
         assert isinstance(kwargs["files"], LocalFileStorage)
         assert isinstance(kwargs["reader"], OpenpyxlSheetReader)
         assert kwargs["mode"] == DataMode.DEMO
+        assert kwargs["business_utc_offset_hours"] == 3
         assert isinstance(provider, DemoCompanyDataProvider)
         assert provider.scenario == DemoScenario.ALARM
         commands = bot.set_my_commands.call_args.args[0]
