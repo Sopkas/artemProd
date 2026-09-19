@@ -74,7 +74,7 @@
 ### Использование (S3-03, шаг 2)
 
 - `application/package_processor.py`: перед импортом — `get_step(run, RUN_SCOPE, "import", "counterparties-v1")`; если результат уже сохранён, файл не разбирается заново, итог берётся из шага; после импорта — `save_step` (`ok` с `{"rows", "errors"}` или `failed` с причиной). Прерванная и возобновлённая проверка (recover → повторный захват) не повторяет выполненные шаги.
-- `application/report_delivery.py`: `fetch_report(owner, repository, files)` — отчёт последней проверки владельца (`get_report` → `FileStorage.read`), `confirm_delivery` — `mark_delivery`. Отсутствующий файл фиксируется как `failed` доставка, проверка не трогается. Команда `/report` в Telegram ничего не ставит в очередь.
+- `application/report_delivery.py`: `fetch_report(owner, repository, files)` — **новейший отчёт владельца** (`latest_report`: по `list_runs` от новых к старым до первой проверки с `get_report`; начатая позже черновая или очередная проверка отчёт не прячет) → `FileStorage.read`, `confirm_delivery` — `mark_delivery`. Отсутствующий файл фиксируется как `failed` доставка, проверка не трогается. Команда `/report` в Telegram ничего не ставит в очередь.
 
 ## Реализация на SQLite — шаг 2
 

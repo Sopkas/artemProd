@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, ErrorEvent, Message
 
-from claims_assistant.application.analysis_repository import AnalysisRepository
+from claims_assistant.application.analysis_repository import AnalysisRepository, RepositoryError
 from claims_assistant.application.check_company import check_company
 from claims_assistant.application.check_package import (
     FileStorage,
@@ -204,14 +204,20 @@ def create_dispatcher(
             return
         document = BufferedInputFile(report_file.data, filename=report_file.filename)
         try:
-            await message.answer_document(document, reply_markup=main_menu())
+            await message.answer_document(
+                document, caption=texts.report_caption(report_file.run), reply_markup=main_menu()
+            )
         except Exception as exc:
             # Telegram refused the file: record it, keep the run and the artifact intact.
             logger.error("report_delivery_failed error_type=%s", type(exc).__name__)
             await confirm_delivery(report_file, repository, error="Не удалось отправить файл.")
-            await message.answer(texts.REPORT_UNAVAILABLE, reply_markup=main_menu())
+            await message.answer(texts.REPORT_SEND_FAILED, reply_markup=main_menu())
             return
-        await confirm_delivery(report_file, repository)
+        try:
+            await confirm_delivery(report_file, repository)
+        except RepositoryError as exc:
+            # The user already has the file; a bookkeeping failure is not their problem.
+            logger.error("report_delivery_unrecorded error_type=%s", type(exc).__name__)
 
     # --- INN card ---
 

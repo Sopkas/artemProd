@@ -68,6 +68,7 @@ REPORT_EMPTY = "Готового отчёта пока нет. Он появит
 REPORT_UNAVAILABLE = (
     "Файл отчёта не найден в хранилище. Запустите новую проверку или обратитесь к разработчику."
 )
+REPORT_SEND_FAILED = "Не удалось отправить файл. Попробуйте ещё раз: «Отчёт» или /report."
 
 _STATUS_LABELS = {
     RunStatus.DRAFT: "черновик, не запущена",
@@ -136,6 +137,13 @@ def check_queued(run: AnalysisRun) -> str:
         f"{CHECK_QUEUED_PREFIX}: дата анализа {_date(run.analysis_date)}, "
         f"файлов {len(run.files)}. Обработка идёт в фоне; состояние — /status."
     )
+
+
+def report_caption(run: AnalysisRun) -> str:
+    caption = f"Отчёт по проверке: дата анализа {_date(run.analysis_date)}."
+    if run.mode is DataMode.DEMO:
+        caption += " Демонстрационные данные."
+    return caption
 
 
 def run_status(run: AnalysisRun, has_report: bool = False) -> str:
