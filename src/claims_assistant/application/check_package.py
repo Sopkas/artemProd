@@ -20,7 +20,7 @@ from claims_assistant.domain.imports import ImportIssue
 
 from .analysis_repository import AnalysisRepository, NewFile
 from .imports import SheetReader, import_counterparties
-from .ledger_imports import import_debt_history, import_payments
+from .ledger_imports import import_debt_history, import_interactions, import_payments
 
 
 class StorageError(RuntimeError):
@@ -99,7 +99,12 @@ async def accept_counterparties(
     )
 
 
-LEDGER_KINDS = (FileKind.PAYMENTS, FileKind.DEBT_HISTORY)
+LEDGER_KINDS = (FileKind.PAYMENTS, FileKind.DEBT_HISTORY, FileKind.INTERACTIONS)
+_LEDGER_PARSERS = {
+    FileKind.PAYMENTS: import_payments,
+    FileKind.DEBT_HISTORY: import_debt_history,
+    FileKind.INTERACTIONS: import_interactions,
+}
 
 
 async def _store(
@@ -155,18 +160,20 @@ async def accept_ledger(
     reader: SheetReader,
     limits: ImportLimits = ImportLimits(),
 ) -> LedgerAccepted | PackageRejected:
-    """Attach «Платежи» or «История долга» to the draft after parsing it against the package.
+    """Attach «Платежи», «История долга» or «Взаимодействия» to the draft.
+
+    The sheet is parsed against the package first (S4-05 and S4-02 importers).
 
     Rows of INNs outside the «Контрагенты» file are rejected by the parser; a file with no
     usable rows is not stored. Payments carry the period the user vouches for.
     """
     if kind not in LEDGER_KINDS:
-        raise ValueError("Only payments and debt history are attached this way")
+        raise ValueError("Only the optional package files are attached this way")
     if kind is FileKind.PAYMENTS and coverage is None:
         raise ValueError("Payments need the covered period")
     run = await repository.get_run(owner_id, run_id)
     known = await package_inns(run, files, reader, limits)
-    parse = import_payments if kind is FileKind.PAYMENTS else import_debt_history
+    parse = _LEDGER_PARSERS[kind]
     result = await asyncio.to_thread(
         parse, reader, data, known_inns=known, analysis_date=run.analysis_date, limits=limits
     )

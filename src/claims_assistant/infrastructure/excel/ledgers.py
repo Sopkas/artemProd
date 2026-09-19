@@ -11,8 +11,9 @@ from datetime import date
 
 from openpyxl import Workbook
 
-from claims_assistant.domain import debt_history, payments
+from claims_assistant.domain import debt_history, interactions, payments
 from claims_assistant.domain.debt_history import DebtSnapshot
+from claims_assistant.domain.interactions import InteractionRow
 from claims_assistant.domain.payments import PaymentRow
 from claims_assistant.domain.sheet_rules import Cell
 
@@ -45,6 +46,16 @@ def build_payments_workbook(
     return _workbook(payments.SHEET_NAME, titles, rows)
 
 
+def interaction_cells(row: InteractionRow) -> list[Cell]:
+    return [row.inn, row.interaction_id, row.happened_on, row.comment, row.channel]
+
+
+def build_interactions_workbook(
+    rows: Sequence[Sequence[Cell]], titles: Sequence[str] = interactions.COLUMN_TITLES
+) -> bytes:
+    return _workbook(interactions.SHEET_NAME, titles, rows)
+
+
 def build_debt_history_workbook(
     rows: Sequence[Sequence[Cell]], titles: Sequence[str] = debt_history.COLUMN_TITLES
 ) -> bytes:
@@ -63,4 +74,18 @@ def build_payments_template() -> bytes:
 def build_debt_history_template() -> bytes:
     return build_debt_history_workbook(
         [[_SAMPLE_INN, date(2026, 8, 1), 150000.00], [_SAMPLE_INN, date(2026, 9, 1), 150000.00]]
+    )
+
+
+def build_interactions_template() -> bytes:
+    return build_interactions_workbook(
+        [
+            [
+                _SAMPLE_INN,
+                "INT-0001",
+                date(2026, 8, 20),
+                "Звонок: обещали оплатить до конца месяца.",
+                "телефон",
+            ]
+        ]
     )

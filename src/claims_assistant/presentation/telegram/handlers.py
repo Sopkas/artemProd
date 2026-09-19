@@ -36,6 +36,7 @@ from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataPro
 from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
 from claims_assistant.infrastructure.excel.ledgers import (
     build_debt_history_template,
+    build_interactions_template,
     build_payments_template,
 )
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
@@ -47,6 +48,7 @@ from .access import AccessMiddleware
 from .card import format_card
 from .menu import (
     ADD_HISTORY,
+    ADD_INTERACTIONS,
     ADD_PAYMENTS,
     CANCEL,
     CHECK_INN,
@@ -78,6 +80,7 @@ class CheckDialog(StatesGroup):
     waiting_for_payments_period = State()
     waiting_for_payments_file = State()
     waiting_for_history_file = State()
+    waiting_for_interactions_file = State()
 
 
 # A dash or whitespace between the dates; a bare hyphen only after a ДД.ММ.ГГГГ date,
@@ -201,6 +204,7 @@ def create_dispatcher(
     ledger_states = {
         CheckDialog.waiting_for_payments_file: FileKind.PAYMENTS,
         CheckDialog.waiting_for_history_file: FileKind.DEBT_HISTORY,
+        CheckDialog.waiting_for_interactions_file: FileKind.INTERACTIONS,
     }
 
     @router.message(StateFilter(*ledger_states), F.document)
@@ -360,6 +364,7 @@ def create_dispatcher(
         CheckDialog.waiting_for_payments_period,
         CheckDialog.waiting_for_payments_file,
         CheckDialog.waiting_for_history_file,
+        CheckDialog.waiting_for_interactions_file,
     )
 
     @router.message(optional_steps, Command("cancel"))
@@ -428,6 +433,13 @@ def create_dispatcher(
         await message.answer_document(template)
         await message.answer(texts.HISTORY_FILE_PROMPT, reply_markup=cancel_menu())
 
+    @router.message(CheckDialog.confirming, F.text == ADD_INTERACTIONS)
+    async def add_interactions(message: Message, state: FSMContext) -> None:
+        await state.set_state(CheckDialog.waiting_for_interactions_file)
+        template = BufferedInputFile(build_interactions_template(), filename="vzaimodeystviya.xlsx")
+        await message.answer_document(template)
+        await message.answer(texts.INTERACTIONS_FILE_PROMPT, reply_markup=cancel_menu())
+
     @router.message(CheckDialog.waiting_for_file, F.text)
     async def remind_file(message: Message) -> None:
         await message.answer(texts.CHECK_FILE_PROMPT, reply_markup=cancel_menu())
@@ -439,6 +451,10 @@ def create_dispatcher(
     @router.message(CheckDialog.waiting_for_history_file, F.text)
     async def remind_history_file(message: Message) -> None:
         await message.answer(texts.HISTORY_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_interactions_file, F.text)
+    async def remind_interactions_file(message: Message) -> None:
+        await message.answer(texts.INTERACTIONS_FILE_PROMPT, reply_markup=cancel_menu())
 
     @router.message(CheckDialog.confirming, F.text)
     async def remind_launch(message: Message) -> None:
