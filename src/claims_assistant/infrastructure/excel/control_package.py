@@ -12,14 +12,19 @@ computed only in sprint 3 (see ``docs/scoring.md``); nothing here is calculated.
 
 import io
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
 from openpyxl import Workbook
 
+from claims_assistant.application.imports import import_counterparties
 from claims_assistant.domain.counterparties import COLUMN_TITLES, SHEET_NAME, Cell
+from claims_assistant.domain.external import DataMode
 from claims_assistant.domain.imports import IssueSeverity
+from claims_assistant.domain.report import AnalysisReport, ReportMeta, ReportRow, demo_assessment
+from claims_assistant.domain.scoring import Priority
+from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 
 # The cut-off every dated row must match; the package is built for this analysis date.
 ANALYSIS_DATE = date(2026, 9, 1)
@@ -229,3 +234,24 @@ def build_control_package() -> bytes:
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def demo_report(created_at: datetime, run_id: str = "demo-control-package") -> AnalysisReport:
+    """The demo report of the control package: its import issues and predefined demo scores.
+
+    Priorities are the fixed showcase values above, marked as demo; nothing is computed.
+    """
+    result = import_counterparties(
+        OpenpyxlSheetReader(), build_control_package(), analysis_date=ANALYSIS_DATE
+    )
+    scores = {score.inn: Priority(score.priority.value) for score in DEMO_SCORES}
+    rows = tuple(ReportRow(row, demo_assessment(row.inn, scores[row.inn])) for row in result.rows)
+    meta = ReportMeta(
+        run_id=run_id,
+        analysis_date=ANALYSIS_DATE,
+        mode=DataMode.DEMO,
+        created_at=created_at,
+        package=(f"Контрагенты: {len(_SPECS)} строк, пригодных {len(result.rows)}",),
+        demo_scores=True,
+    )
+    return AnalysisReport(meta, rows, result.issues)
