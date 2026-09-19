@@ -40,17 +40,23 @@ class Transport:
 
 
 def provider(transport):
-    return checko.CheckoCompanyDataProvider(KEY, transport, lambda: NOW)
+    # The same fake stands in for every section transport so company tests stay offline.
+    return checko.CheckoCompanyDataProvider(
+        KEY, transport, lambda: NOW, bankruptcy_transport=transport, finances_transport=transport
+    )
 
 
-async def test_live_company_projection_and_unimplemented_sections():
+COMPANY_ONLY = CompanyDataRequest(INN, (Section.COMPANY,))
+
+
+async def test_live_company_projection():
     transport = Transport()
-    snapshots = await provider(transport).fetch(CompanyDataRequest(INN))
+    snapshots = await provider(transport).fetch(COMPANY_ONLY)
     assert len(transport.calls) == 1
     assert transport.calls[0] == (KEY, INN, 20)
-    assert [s.section for s in snapshots] == list(Section)
-    assert all(s.mode == DataMode.LIVE for s in snapshots)
+    assert [s.section for s in snapshots] == [Section.COMPANY]
     company = snapshots[0]
+    assert company.mode == DataMode.LIVE
     assert company.status == FetchStatus.OK
     assert company.coverage == Coverage.PARTIAL
     assert company.facts[1].value == CompanyStatus.ACTIVE
@@ -58,20 +64,14 @@ async def test_live_company_projection_and_unimplemented_sections():
     assert company.fetched_at == NOW
     assert company.source_updated_at is None
     assert company.evidence[0].record_id == "0000000000000"
-    for other in snapshots[1:]:
-        assert other.coverage == Coverage.UNAVAILABLE
-        assert other.error.code == "not_implemented"
-        assert not other.facts
     assert KEY not in repr(snapshots)
     assert KEY not in repr(provider(transport))
 
 
-async def test_no_network_for_unsupported_sections_and_preserves_order():
-    transport = Transport()
-    sections = (Section.FINANCES, Section.BANKRUPTCY)
-    snapshots = await provider(transport).fetch(CompanyDataRequest(INN, sections))
+async def test_sections_are_returned_in_request_order():
+    sections = (Section.FINANCES, Section.COMPANY)
+    snapshots = await provider(Transport()).fetch(CompanyDataRequest(INN, sections))
     assert tuple(s.section for s in snapshots) == sections
-    assert transport.calls == []
 
 
 @pytest.mark.parametrize(
@@ -145,7 +145,7 @@ async def test_unknown_envelope_is_not_no_risk(payload):
 )
 async def test_http_error_is_safe_and_not_retried(http, status, code):
     transport = Transport(http, {"private": KEY})
-    snapshots = await provider(transport).fetch(CompanyDataRequest(INN))
+    snapshots = await provider(transport).fetch(COMPANY_ONLY)
     assert snapshots[0].status == status
     assert snapshots[0].error.code == code
     assert len(transport.calls) == 1
@@ -257,7 +257,6 @@ async def test_live_card_through_telegram_without_real_api(bot, update_factory):
     assert "ИНН " + INN in text
     assert "синтетические данные" not in text
     assert "checko-company-v2" in text
-    assert "Раздел ещё не подключён" in text
     assert KEY not in text
 
 
