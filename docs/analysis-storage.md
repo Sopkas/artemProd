@@ -71,6 +71,20 @@
 
 Смена версии (`version`) правил или адаптера означает новый ключ: старые результаты остаются в истории, шаг выполняется заново.
 
+### Payload шагов `external_fetch` и `scoring` (B)
+
+Сериализация доменных типов — `domain/serialization.py`; хранилище payload не разбирает.
+
+| Шаг | Запись | Чтение |
+| --- | --- | --- |
+| `external_fetch` (один раздел одного ИНН) | `json.dumps(snapshot_to_dict(snapshot), ensure_ascii=False)` | `snapshot_from_dict(json.loads(payload))` |
+| `scoring` (один ИНН) | `json.dumps(assessment_to_dict(assessment), ensure_ascii=False)` | `assessment_from_dict(json.loads(payload))` |
+
+- В каждом payload есть `"schema": 1`; другое значение отклоняется (`PayloadError`), поэтому старый формат после изменения не читается молча. Смена формата = новая схема и новая `version` шага.
+- Значения фактов хранятся с типом (`decimal` — строкой, `date` — ISO, `bool`, `int`, `str`, `company_status`, `none`): `Decimal` не становится `float`, `True` — `1`. Время — ISO с часовым поясом.
+- Чтение идёт через обычные конструкторы, все проверки доменных типов срабатывают повторно; нарушение даёт `PayloadError`. Сообщения ошибок не содержат payload (там могут быть ИНН и тексты источника).
+- Шаг `report` хранит файл через `ReportStore`, модель отчёта в payload не кладётся.
+
 ### Использование (S3-03, шаг 2)
 
 - `application/package_processor.py`: перед импортом — `get_step(run, RUN_SCOPE, "import", "counterparties-v1")`; если результат уже сохранён, файл не разбирается заново, итог берётся из шага; после импорта — `save_step` (`ok` с `{"rows", "errors"}` или `failed` с причиной). Прерванная и возобновлённая проверка (recover → повторный захват) не повторяет выполненные шаги.
