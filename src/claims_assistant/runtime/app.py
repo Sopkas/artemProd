@@ -93,6 +93,7 @@ async def run(settings: Settings) -> None:
                 files=files,
                 reader=reader,
                 mode=mode,
+                business_utc_offset_hours=settings.business_utc_offset_hours,
             )
             # One worker in this process; runs left "running" by a crash go back to the queue.
             worker = RunWorker(repository, PackageProcessor(files, reader))

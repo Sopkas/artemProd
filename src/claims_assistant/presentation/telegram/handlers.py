@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -61,11 +61,15 @@ class CheckDialog(StatesGroup):
     confirming = State()
 
 
-def parse_user_date(text: str) -> date | None:
-    """Only unambiguous forms; anything else asks again instead of guessing."""
+def parse_user_date(text: str, utc_offset_hours: int = 3) -> date | None:
+    """Only unambiguous forms; anything else asks again instead of guessing.
+
+    «Сегодня» is the calendar date in the business timezone (offset from UTC), so a
+    user at 00:30 local time does not get yesterday's UTC date.
+    """
     text = text.strip()
     if text.casefold() == TODAY.casefold():
-        return datetime.now(UTC).date()
+        return datetime.now(timezone(timedelta(hours=utc_offset_hours))).date()
     try:
         if _ISO_DATE.fullmatch(text):
             return date.fromisoformat(text)
@@ -85,6 +89,7 @@ def create_dispatcher(
     files: FileStorage | None = None,
     reader: SheetReader | None = None,
     mode: DataMode = DataMode.DEMO,
+    business_utc_offset_hours: int = 3,
 ) -> Dispatcher:
     if provider is None:
         provider = DemoCompanyDataProvider()
@@ -223,7 +228,7 @@ def create_dispatcher(
 
     @router.message(CheckDialog.waiting_for_date, F.text)
     async def receive_date(message: Message, state: FSMContext) -> None:
-        analysis_date = parse_user_date(message.text or "")
+        analysis_date = parse_user_date(message.text or "", business_utc_offset_hours)
         if analysis_date is None:
             await message.answer(texts.CHECK_DATE_INVALID, reply_markup=date_menu())
             return
