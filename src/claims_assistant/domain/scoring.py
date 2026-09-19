@@ -16,6 +16,7 @@ from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import (
@@ -27,6 +28,9 @@ from claims_assistant.domain.external import (
     FetchStatus,
     Section,
 )
+
+if TYPE_CHECKING:
+    from claims_assistant.domain.indicators import InternalIndicators
 
 RULES_VERSION = "0.1"
 REVENUE_DROP_PERCENT = Decimal("30")
@@ -202,30 +206,47 @@ def _two_consecutive_years(snapshot: ExternalSnapshot | None) -> bool:
     return False
 
 
-def _finance_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
-    signals = []
+@dataclass(frozen=True, slots=True)
+class RevenueChange:
+    """Revenue change between the two latest consecutive full years (S4-06 indicator)."""
+
+    year: int
+    percent: Decimal
+    fact_ids: tuple[str, str]  # previous year, new year
+
+
+def revenue_change(snapshot: ExternalSnapshot | None) -> RevenueChange | None:
+    """Only a positive base and matching units give a percent; otherwise there is no trend."""
     revenue = _by_year(_facts(snapshot, FactKind.REVENUE))
     pair = next((y for y in sorted(revenue, reverse=True) if y - 1 in revenue), None)
-    if pair is not None:
-        new, prev = revenue[pair], revenue[pair - 1]
-        # Percent change only for a positive base and matching units; otherwise no trend.
-        if (
-            isinstance(new.value, Decimal)
-            and isinstance(prev.value, Decimal)
-            and prev.value > 0
-            and new.unit == prev.unit
-        ):
-            change = (new.value - prev.value) / prev.value * 100
-            if change <= -REVENUE_DROP_PERCENT:
-                signals.append(
-                    Signal(
-                        "revenue_drop_30",
-                        Priority.MEDIUM,
-                        f"Выручка снизилась на {abs(change):.1f}% за {pair - 1}–{pair} годы.",
-                        (prev.id, new.id),
-                        value=f"{change:.1f}%",
-                    )
-                )
+    if pair is None:
+        return None
+    new, prev = revenue[pair], revenue[pair - 1]
+    if not (
+        isinstance(new.value, Decimal)
+        and isinstance(prev.value, Decimal)
+        and prev.value > 0
+        and new.unit == prev.unit
+    ):
+        return None
+    percent = (new.value - prev.value) / prev.value * 100
+    return RevenueChange(pair, percent, (prev.id, new.id))
+
+
+def _finance_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
+    signals = []
+    change = revenue_change(snapshot)
+    if change is not None and change.percent <= -REVENUE_DROP_PERCENT:
+        signals.append(
+            Signal(
+                "revenue_drop_30",
+                Priority.MEDIUM,
+                f"Выручка снизилась на {abs(change.percent):.1f}% "
+                f"за {change.year - 1}–{change.year} годы.",
+                change.fact_ids,
+                value=f"{change.percent:.1f}%",
+            )
+        )
     profit = _by_year(_facts(snapshot, FactKind.NET_PROFIT))
     if profit:
         year = max(profit)
@@ -254,8 +275,14 @@ def payment_age_days(row: CounterpartyRow, analysis_date: date) -> int | None:
     return age if age >= 0 else None
 
 
-def row_signals(row: CounterpartyRow, analysis_date: date | None) -> tuple[Signal, ...]:
-    """Overdue buckets and payment age from the row; unknown values never fire a rule."""
+def row_signals(
+    row: CounterpartyRow, analysis_date: date | None, *, payment_age: bool = True
+) -> tuple[Signal, ...]:
+    """Overdue buckets and payment age from the row; unknown values never fire a rule.
+
+    ``payment_age=False`` leaves the payment age to the indicators (S4-06), which also
+    check the date against the payments export.
+    """
     signals = []
     days = row.overdue_days
     # The overdue rules are mutually exclusive.
@@ -282,7 +309,8 @@ def row_signals(row: CounterpartyRow, analysis_date: date | None) -> tuple[Signa
                 observed_on=row.cutoff_date,
             )
         )
-    age = payment_age_days(row, analysis_date) if analysis_date is not None else None
+    known_date = analysis_date is not None and payment_age
+    age = payment_age_days(row, analysis_date) if known_date else None
     if age is not None and age > NO_PAYMENTS_AFTER_DAYS and row.debt is not None and row.debt > 0:
         signals.append(
             Signal(
@@ -325,18 +353,26 @@ def _external_gaps(
     return missing, coverage, company_ok and efrsb_full and two_years
 
 
-def _internal_gaps(row: CounterpartyRow | None) -> tuple[list[str], Coverage, bool]:
+def _internal_gaps(
+    row: CounterpartyRow | None, indicators: "InternalIndicators | None" = None
+) -> tuple[list[str], Coverage, bool]:
     if row is None:
         return ["Внутренние данные о долге не переданы."], Coverage.UNAVAILABLE, False
     missing = []
     if row.debt is None or row.overdue_days is None:
         missing.append("Нет суммы долга или просрочки на дату анализа.")
-    if row.last_payment_date is None:
-        missing.append("Нет подтверждённой даты последнего платежа.")
-    if not missing:
-        return [], Coverage.COMPLETE, True
+    if indicators is None:
+        if row.last_payment_date is None:
+            missing.append("Нет подтверждённой даты последнего платежа.")
+        payment_settled = row.last_payment_date is not None
+    else:
+        payment_settled = indicators.payment_settled
+    # Indicator notes (payment age, debt dynamics); only the payment one blocks the base set.
+    notes = list(indicators.missing) if indicators is not None else []
+    if not missing and payment_settled:
+        return notes, Coverage.COMPLETE, True
     known = row.debt is not None or row.overdue_days is not None
-    return missing, Coverage.PARTIAL if known else Coverage.UNAVAILABLE, False
+    return missing + notes, Coverage.PARTIAL if known else Coverage.UNAVAILABLE, False
 
 
 def assess(
@@ -345,13 +381,17 @@ def assess(
     row: CounterpartyRow | None = None,
     internal_signals: Sequence[Signal] = (),
     analysis_date: date | None = None,
+    indicators: "InternalIndicators | None" = None,
 ) -> Assessment:
     """Apply the external and internal rules and assemble one priority for the INN.
 
     Internal signals are computed from ``row``; the analysis date defaults to the row's
-    cut-off date, which the parser keeps equal to it. ``internal_signals`` adds signals
-    from other data (payments file, debt history).
+    cut-off date, which the parser keeps equal to it. ``indicators`` (S4-06) replace the
+    row's own payment age with the one checked against the payments export and add the
+    debt dynamics; ``internal_signals`` adds signals from any other data.
     """
+    if indicators is not None and indicators.inn != inn:
+        raise ValueError("Indicators belong to another INN")
     by_section: dict[Section, ExternalSnapshot] = {}
     for snapshot in snapshots:
         if snapshot.inn != inn:
@@ -362,11 +402,16 @@ def assess(
         *_company_signals(by_section.get(Section.COMPANY)),
         *_bankruptcy_signals(by_section.get(Section.BANKRUPTCY)),
         *_finance_signals(by_section.get(Section.FINANCES)),
-        *(row_signals(row, analysis_date or row.cutoff_date) if row is not None else ()),
+        *(
+            row_signals(row, analysis_date or row.cutoff_date, payment_age=indicators is None)
+            if row is not None
+            else ()
+        ),
+        *(indicators.signals if indicators is not None else ()),
         *internal_signals,
     ]
     external_missing, coverage, external_complete = _external_gaps(by_section)
-    internal_missing, internal_coverage, internal_complete = _internal_gaps(row)
+    internal_missing, internal_coverage, internal_complete = _internal_gaps(row, indicators)
     coverage["internal"] = internal_coverage
     base_complete = external_complete and internal_complete
     return Assessment(

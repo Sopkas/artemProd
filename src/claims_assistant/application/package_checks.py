@@ -28,7 +28,14 @@ from typing import TypeVar
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow, ImportLimits
 from claims_assistant.domain.debt_history import DebtSnapshot
+from claims_assistant.domain.external import Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.indicators import (
+    DEBT_HISTORY_CONFLICT,
+    LAST_PAYMENT_CONFLICT,
+    debt_contradicts,
+    last_payment_contradicts,
+)
 from claims_assistant.domain.interactions import InteractionRow, chronology
 from claims_assistant.domain.payments import PaymentRow
 
@@ -39,8 +46,6 @@ from .ledger_imports import import_debt_history, import_interactions, import_pay
 PACKAGE_SHEET = "Пакет"
 FOREIGN_FILE = "Файл пакета не принадлежит этой проверке."
 MAIN_FILE_DUPLICATED = "В пакете больше одного файла «Контрагенты»."
-DEBT_HISTORY_CONFLICT = "debt_history"
-LAST_PAYMENT_CONFLICT = "last_payment"
 
 _Row = TypeVar("_Row")
 
@@ -158,31 +163,22 @@ def date_conflicts(
     One issue per kind names how many companies are affected (never which); the mapping
     says which, so S4-06 marks the indicator unknown only for them.
     """
+    # The rules themselves live in domain.indicators, so the indicators (S4-06) read the
+    # same contradictions as unknown values.
     found: dict[str, set[str]] = {}
-    by_inn = {row.inn: row for row in counterparties}
-    for snapshot in history:
-        row = by_inn.get(snapshot.inn)
-        if row is None or row.debt is None:
-            continue
-        # The main file's debt is as of the row's own cut-off date (contract §4), which
-        # is the analysis date only by default.
-        if snapshot.cutoff_date != (row.cutoff_date or run.analysis_date):
-            continue
-        if snapshot.debt != row.debt:
-            found.setdefault(snapshot.inn, set()).add(DEBT_HISTORY_CONFLICT)
+    periods = [Period(start, end) for start, end in covered.values()]
     paid: dict[str, list[date]] = {}
     for payment in payments:
         paid.setdefault(payment.inn, []).append(payment.paid_on)
-    for inn, row in by_inn.items():
-        last = row.last_payment_date
-        if last is None or not covered:
-            continue
-        # Only the period the user vouched for can contradict the main file.
-        inside = any(start <= last <= end for start, end in covered.values())
-        dates = paid.get(inn, [])
-        later = [d for d in dates if d > last and any(s <= d <= e for s, e in covered.values())]
-        if (inside and last not in dates) or later:
-            found.setdefault(inn, set()).add(LAST_PAYMENT_CONFLICT)
+    snapshots: dict[str, list[DebtSnapshot]] = {}
+    for snapshot in history:
+        snapshots.setdefault(snapshot.inn, []).append(snapshot)
+    for row in {row.inn: row for row in counterparties}.values():
+        # The main file's debt is as of the row's own cut-off date (contract §4).
+        if debt_contradicts(row, snapshots.get(row.inn, ()), run.analysis_date):
+            found.setdefault(row.inn, set()).add(DEBT_HISTORY_CONFLICT)
+        if last_payment_contradicts(row.last_payment_date, paid.get(row.inn, ()), periods):
+            found.setdefault(row.inn, set()).add(LAST_PAYMENT_CONFLICT)
 
     issues: list[ImportIssue] = []
     debt = sum(1 for kinds in found.values() if DEBT_HISTORY_CONFLICT in kinds)
