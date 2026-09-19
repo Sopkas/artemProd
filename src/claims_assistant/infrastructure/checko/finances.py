@@ -30,6 +30,7 @@ from claims_assistant.domain.external import (
     Period,
     Section,
 )
+from claims_assistant.domain.sheet_rules import number_text
 from claims_assistant.infrastructure.checko.errors import ApiRejected, InvalidResponse
 
 __all__ = ["read_finances", "project_finances", "AiohttpFinancesTransport", "FinancesTransport"]
@@ -94,7 +95,7 @@ def _amount(value: object) -> Decimal | None:
     if isinstance(value, float):
         text: str | None = str(value)
     elif isinstance(value, str):
-        text = value.strip().replace(" ", "").replace(" ", "").replace(",", ".") or None
+        text = number_text(value) or None
     else:
         return None
     if text is None:
