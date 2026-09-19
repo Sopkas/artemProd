@@ -1,6 +1,6 @@
 """Telegram dialog: new check → analysis date → .xlsx → summary → launch / status."""
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from aiogram.methods import SendDocument, SendMessage
@@ -98,8 +98,25 @@ async def test_today_button_uses_the_current_date(setup, bot, update_factory):
     # The template's cut-off (01.09.2026) does not match today, so rows carry errors but
     # the run is still created with today's date.
     run = (await repository.list_runs(OWNER))[0]
-    assert run.analysis_date == date.today()
+    # «Сегодня» is the calendar date in the business timezone (Moscow by default),
+    # not the UTC date and not the machine's local date.
+    assert run.analysis_date == datetime.now(timezone(timedelta(hours=3))).date()
     assert texts.CHECK_SUMMARY_TITLE in reply.text
+
+
+async def test_today_follows_the_configured_business_timezone(bot, update_factory, tmp_path):
+    repository = InMemoryAnalysisRepository()
+    dispatcher = create_dispatcher(
+        frozenset({OWNER}),
+        repository=repository,
+        files=LocalFileStorage(tmp_path / "uploads"),
+        reader=OpenpyxlSheetReader(),
+        business_utc_offset_hours=10,
+    )
+    await start_check(dispatcher, bot, update_factory, "Сегодня")
+    await send_document(dispatcher, bot, update_factory, build_counterparties_template())
+    run = (await repository.list_runs(OWNER))[0]
+    assert run.analysis_date == datetime.now(timezone(timedelta(hours=10))).date()
 
 
 async def test_valid_file_gives_a_summary_with_launch_button(setup, bot, update_factory):

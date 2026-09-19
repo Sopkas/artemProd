@@ -24,6 +24,7 @@ def clean_environment(monkeypatch):
         "EXTERNAL_CACHE_TTL_SECONDS",
         "RUN_TIME_LIMIT_SECONDS",
         "RUN_REQUEST_LIMIT",
+        "BUSINESS_UTC_OFFSET_HOURS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -198,3 +199,17 @@ def test_invalid_external_limits_are_rejected_without_disclosing_value(
     with pytest.raises(ConfigurationError, match=key) as error:
         Settings.load(tmp_path / "missing.env")
     assert raw not in str(error.value) or raw in ("0",)
+
+
+def test_business_timezone_defaults_to_moscow_and_accepts_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    assert Settings.load(tmp_path / "missing.env").business_utc_offset_hours == 3
+    monkeypatch.setenv("BUSINESS_UTC_OFFSET_HOURS", "10")
+    assert Settings.load(tmp_path / "missing.env").business_utc_offset_hours == 10
+    monkeypatch.setenv("BUSINESS_UTC_OFFSET_HOURS", "15")
+    with pytest.raises(ConfigurationError, match="BUSINESS_UTC_OFFSET_HOURS"):
+        Settings.load(tmp_path / "missing.env")
+    monkeypatch.setenv("BUSINESS_UTC_OFFSET_HOURS", "x")
+    with pytest.raises(ConfigurationError, match="BUSINESS_UTC_OFFSET_HOURS"):
+        Settings.load(tmp_path / "missing.env")

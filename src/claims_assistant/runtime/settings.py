@@ -37,6 +37,8 @@ class Settings:
     # Directory for uploaded .xlsx packages; created on first upload.
     storage_path: Path = Path("data/uploads")
     external: ExternalLimits = ExternalLimits()
+    # Calendar date for «Сегодня» and other business dates; Moscow (UTC+3) by default.
+    business_utc_offset_hours: int = 3
 
     data_provider: str = "demo"
     checko_api_key: str = field(default="", repr=False)
@@ -95,6 +97,15 @@ class Settings:
             run_time_limit_seconds=_number(values, "RUN_TIME_LIMIT_SECONDS", 900.0, minimum=1),
             run_request_limit=_number(values, "RUN_REQUEST_LIMIT", 1500, integer=True, minimum=1),
         )
+        raw_offset = (values.get("BUSINESS_UTC_OFFSET_HOURS") or "").strip() or "3"
+        try:
+            offset = int(raw_offset)
+        except ValueError:
+            raise ConfigurationError(
+                "BUSINESS_UTC_OFFSET_HOURS: нужно целое число часов."
+            ) from None
+        if not -12 <= offset <= 14:
+            raise ConfigurationError("BUSINESS_UTC_OFFSET_HOURS: допустимы значения от -12 до 14.")
         return cls(
             token=token,
             allowed_ids=allowed_ids,
@@ -105,6 +116,7 @@ class Settings:
             database_path=database_path,
             storage_path=storage_path,
             external=external,
+            business_utc_offset_hours=offset,
         )
 
 

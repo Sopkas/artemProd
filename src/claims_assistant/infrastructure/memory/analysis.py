@@ -14,6 +14,7 @@ from claims_assistant.application.analysis_repository import (
 )
 from claims_assistant.domain.analysis import AnalysisRun, RunStatus, UploadedFile, can_transition
 from claims_assistant.domain.external import DataMode
+from claims_assistant.domain.steps import DeliveryStatus, ReportArtifact, StepResult
 
 
 def _now() -> datetime:
@@ -26,6 +27,8 @@ class InMemoryAnalysisRepository:
         self._runs: dict[str, AnalysisRun] = {}
         # Creation order, the same tie-breaker the SQLite implementation stores as `sequence`.
         self._sequence: dict[str, int] = {}
+        self._steps: dict[tuple[str, str, str, str], StepResult] = {}
+        self._reports: dict[str, ReportArtifact] = {}
 
     async def create_run(self, owner_id: int, analysis_date: date, mode: DataMode) -> AnalysisRun:
         now = self._clock()
@@ -121,3 +124,40 @@ class InMemoryAnalysisRepository:
             self._runs[run.id] = updated
             recovered.append(updated)
         return tuple(recovered)
+
+    # --- StepStore ---
+
+    async def save_step(self, result: StepResult) -> StepResult:
+        if result.run_id not in self._runs:
+            raise RunNotFound()
+        return self._steps.setdefault(result.key, result)
+
+    async def get_step(self, run_id: str, inn: str, step: str, version: str) -> StepResult | None:
+        return self._steps.get((run_id, inn, step, version))
+
+    async def list_steps(self, run_id: str) -> tuple[StepResult, ...]:
+        return tuple(item for item in self._steps.values() if item.run_id == run_id)
+
+    # --- ReportStore ---
+
+    async def save_report(self, run_id: str, stored_path: str) -> ReportArtifact:
+        if run_id not in self._runs:
+            raise RunNotFound()
+        report = ReportArtifact(run_id=run_id, stored_path=stored_path, created_at=self._clock())
+        self._reports[run_id] = report
+        return report
+
+    async def get_report(self, owner_id: int, run_id: str) -> ReportArtifact | None:
+        await self.get_run(owner_id, run_id)
+        return self._reports.get(run_id)
+
+    async def mark_delivery(
+        self, run_id: str, status: DeliveryStatus, error: str | None = None
+    ) -> ReportArtifact:
+        report = self._reports.get(run_id)
+        if report is None:
+            raise RunNotFound()
+        delivered_at = self._clock() if status is DeliveryStatus.DELIVERED else None
+        updated = replace(report, delivery=status, delivered_at=delivered_at, delivery_error=error)
+        self._reports[run_id] = updated
+        return updated
