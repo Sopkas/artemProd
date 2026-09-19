@@ -32,7 +32,9 @@ class ReportMeta:
     analysis_date: date
     mode: DataMode
     created_at: datetime
-    checked_at: datetime | None = None  # when external sources were queried, if they were
+    # The oldest external answer in the report (cached answers keep their own time): every
+    # external fact is at least this fresh. None if no source was queried.
+    checked_at: datetime | None = None
     rules_version: str = RULES_VERSION
     ai_version: str | None = None  # no AI explanations yet (sprint 5)
     package: tuple[str, ...] = ()  # human-readable composition, e.g. "Контрагенты: 50 строк"
