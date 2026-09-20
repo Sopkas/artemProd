@@ -135,6 +135,7 @@ flowchart TD
 │   ├── architecture.md         # Границы модулей, задания, данные и ИИ
 │   ├── data-contracts.md       # Форматы Excel и выходного отчёта
 │   ├── scoring.md              # Проект правил и обработка неизвестности
+│   ├── ai-context.md          # Что уходит модели и версионируемая инструкция
 │   ├── integrations.md         # Checko и контракт адаптера
 │   └── roadmap.md              # Этапы и критерии готовности
 ├── src/claims_assistant/
@@ -170,6 +171,7 @@ flowchart TD
 - [Архитектура и ответственность модулей](docs/architecture.md).
 - [Входные данные и отчёт](docs/data-contracts.md).
 - [Правила приоритизации](docs/scoring.md).
+- [Контекст и инструкция для ИИ (v1, на согласование)](docs/ai-context.md).
 - [Интеграции и подтверждённые возможности Checko](docs/integrations.md).
 - [Roadmap для двух разработчиков: спринты, задачи, оценки и критерии приёмки](docs/roadmap.md).
 - [Контракт провайдера и запуск демосценариев S1-04](docs/company-data-provider.md).
