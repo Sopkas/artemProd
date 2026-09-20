@@ -31,7 +31,12 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.domain.sheet_rules import number_text
-from claims_assistant.infrastructure.checko.errors import ApiRejected, InvalidResponse
+from claims_assistant.infrastructure.checko.errors import (
+    ApiRejected,
+    InvalidResponse,
+    NotFound,
+    is_not_found,
+)
 
 __all__ = ["read_finances", "project_finances", "AiohttpFinancesTransport", "FinancesTransport"]
 
@@ -79,6 +84,10 @@ def read_finances(payload: object) -> dict[int, dict]:
     data = payload.get("data")
     if not isinstance(data, dict):
         raise InvalidResponse()
+    # Empty reports and an unknown company look alike in ``data``; the message tells them
+    # apart, and «no such company» must not read as «no reports».
+    if not data and is_not_found(payload["meta"]):
+        raise NotFound()
     return {
         int(key): value
         for key, value in data.items()

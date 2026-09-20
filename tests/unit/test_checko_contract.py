@@ -1,14 +1,18 @@
 """S3-06: contract examples for all three Checko sections.
 
-Each scenario from the task — empty data, unknown event, exhausted quota, timeout and a
-changed structure — runs through the provider on the synthetic examples in
-``tests/fixtures/checko``. The invariant under test: an unexpected answer never turns into
-"complete, no risk". When a real response is available, drop it next to these files and
-point a case at it.
+Each scenario from the task — empty data, an unknown company, an unknown event, an
+exhausted quota, a timeout and a changed structure — runs through the provider on the
+examples in ``tests/fixtures/checko``. The invariant under test: an unexpected answer
+never turns into "complete, no risk".
+
+The ``*_live_shape`` and ``*_not_found`` examples carry the field names and the envelope
+of the real API, checked against it on 20.09.2026 (free tariff); their values are
+synthetic, and no real response is stored in the repository.
 """
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -58,6 +62,48 @@ def is_no_risk(snapshot) -> bool:
     return snapshot.status is FetchStatus.OK and snapshot.coverage is Coverage.COMPLETE
 
 
+# --- the live shapes: what the API actually answers ---
+
+
+@pytest.mark.parametrize(
+    "section,name",
+    [
+        (Section.COMPANY, "company_not_found"),
+        (Section.BANKRUPTCY, "efrsb_not_found"),
+        (Section.FINANCES, "finances_not_found"),
+    ],
+)
+async def test_an_unknown_company_is_not_found_not_a_broken_answer(section, name):
+    """The API answers HTTP 200 and «ok» with an empty data and a message."""
+    snapshot = await fetch(section, Answer(fixture(name)))
+    assert snapshot.status is FetchStatus.NOT_FOUND
+    assert snapshot.error.code == "not_found"
+    assert snapshot.coverage is Coverage.UNAVAILABLE and not is_no_risk(snapshot)
+
+
+async def test_efrsb_records_are_read_by_their_real_field_names():
+    snapshot = await fetch(Section.BANKRUPTCY, Answer(fixture("efrsb_live_shape")))
+    assert [fact.value for fact in snapshot.facts] == [
+        "Сведения о судебном акте, дело А00-0000/2025",  # ТипНаим plus the case number
+        "Сведения о получении требования кредитора",  # no case number in the record
+    ]
+    first, second = snapshot.evidence
+    assert first.record_id == "00000000000000000000000000000001"  # GUID, not a surrogate
+    assert first.url == "https://fedresurs.ru/bankruptmessage/" + first.record_id
+    assert second.url is None  # only the source's own https link is kept
+    # The machine code is not shown and no procedure is inferred from it.
+    assert all("ArbitralDecree" not in str(fact.value) for fact in snapshot.facts)
+    assert any("требует проверки" in reason for reason in snapshot.missing)
+
+
+async def test_finances_are_read_beside_the_extra_blocks_of_the_live_answer():
+    snapshot = await fetch(Section.FINANCES, Answer(fixture("finances_live_shape")))
+    assert snapshot.coverage is Coverage.COMPLETE
+    by_kind = {(fact.kind, fact.period.end.year): fact.value for fact in snapshot.facts}
+    assert by_kind[(FactKind.REVENUE, 2024)] == Decimal("544581317000")
+    assert by_kind[(FactKind.NET_PROFIT, 2024)] == Decimal("-11681168000")
+
+
 # --- baseline: the example answers themselves are accepted ---
 
 
@@ -78,7 +124,7 @@ async def test_reference_examples_are_accepted(section, name):
 # --- empty data ---
 
 
-async def test_empty_company_is_invalid_not_absent():
+async def test_empty_company_without_the_message_is_invalid_not_absent():
     snapshot = await fetch(Section.COMPANY, Answer(fixture("company_empty")))
     assert snapshot.status is FetchStatus.INVALID_RESPONSE
     assert snapshot.coverage is Coverage.UNAVAILABLE
