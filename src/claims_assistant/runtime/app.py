@@ -24,6 +24,7 @@ from claims_assistant.presentation.telegram.handlers import create_dispatcher
 from claims_assistant.presentation.telegram.menu import bot_commands
 from claims_assistant.presentation.telegram.notifier import TelegramRunNotifier
 
+from .ai import build_recommendation_provider
 from .settings import ConfigurationError, Settings
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,13 @@ async def run(settings: Settings) -> None:
                 ),
             )
             notifier = TelegramRunNotifier(bot, repository, files)
+            # S5-01: the provider is built here; the pipeline starts asking it in S5-02,
+            # together with storing every answer.
+            recommendation_provider = build_recommendation_provider(settings)
+            logger.info(
+                "ai_provider=%s",
+                recommendation_provider.name if recommendation_provider else "off",
+            )
             worker = RunWorker(repository, pipeline, notifier=notifier)
             await worker.recover()
             worker_task = asyncio.create_task(worker.run_forever(), name="run-worker")

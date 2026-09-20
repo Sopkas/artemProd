@@ -50,6 +50,9 @@ class Settings:
 
     data_provider: str = "demo"
     checko_api_key: str = field(default="", repr=False)
+    # AI explanations (S5-01): "off" — no provider at all; "stub" — the stand-in model
+    # (no network). A real provider is added only after the customer confirms it.
+    ai_provider: str = "off"
 
     @classmethod
     def load(cls, env_file: Path = Path(".env")) -> "Settings":
@@ -91,6 +94,9 @@ class Settings:
         provider = (values.get("DATA_PROVIDER") or "demo").strip().lower()
         if provider not in {"demo", "checko"}:
             raise ConfigurationError("DATA_PROVIDER: допустимы demo, checko.")
+        ai_provider = (values.get("AI_PROVIDER") or "off").strip().lower()
+        if ai_provider not in {"off", "stub"}:
+            raise ConfigurationError("AI_PROVIDER: допустимы off, stub.")
         checko_key = (values.get("CHECKO_API_KEY") or "").strip()
         if provider == "checko" and not checko_key:
             raise ConfigurationError("Для DATA_PROVIDER=checko укажите CHECKO_API_KEY.")
@@ -121,6 +127,7 @@ class Settings:
             demo_scenario=scenario,
             data_provider=provider,
             checko_api_key=checko_key,
+            ai_provider=ai_provider,
             database_path=database_path,
             storage_path=storage_path,
             external=external,
