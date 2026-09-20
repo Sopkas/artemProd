@@ -44,7 +44,9 @@ git -C "$APP" checkout --quiet "$REF"
 if git -C "$APP" show-ref --verify --quiet "refs/remotes/origin/$REF"; then
   git -C "$APP" merge --ff-only "origin/$REF"
 fi
-chown -R "$APP_USER:$APP_USER" "$APP"
+# Код и окружение остаются за root: служба их только читает (наименьшие права).
+chown -R root:root "$APP"
+chmod -R o+rX "$APP"
 
 # 3. Отдельное окружение и зависимости из зафиксированных версий.
 [[ -x "$VENV/bin/python" ]] || "$PYTHON" -m venv "$VENV"
@@ -52,7 +54,8 @@ chown -R "$APP_USER:$APP_USER" "$APP"
 "$VENV/bin/python" -m pip install --quiet -r "$APP/requirements.txt"
 "$VENV/bin/python" -m pip install --quiet --no-build-isolation --no-deps -e "$APP"
 "$VENV/bin/python" -m pip check
-chown -R "$APP_USER:$APP_USER" "$VENV"
+chown -R root:root "$VENV"
+chmod -R o+rX "$VENV"
 
 # 4. Настройки: шаблон кладётся один раз, значения заполняет администратор.
 if [[ ! -f "$CONF/env" ]]; then
@@ -67,12 +70,14 @@ install -m 0644 "$APP/deploy/claims-assistant-backup.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable claims-assistant.service claims-assistant-backup.timer >/dev/null
 
-# 6. Проверка настроек тем же кодом, что и служба; без токена — остановиться здесь.
+# 6. Проверка настроек тем же механизмом, что и служба (EnvironmentFile разбирает
+#    systemd, а не shell); без токена — остановиться здесь.
 if grep -qE '^TELEGRAM_BOT_TOKEN=.+' "$CONF/env"; then
-  su -s /bin/sh "$APP_USER" -c "set -a; . '$CONF/env'; set +a; cd '$APP' && '$VENV/bin/python' -m claims_assistant --check"
+  systemd-run --wait --pipe --quiet --collect     -p User="$APP_USER" -p Group="$APP_USER" -p EnvironmentFile="$CONF/env"     -p WorkingDirectory="$APP"     "$VENV/bin/python" -m claims_assistant --check
   systemctl restart claims-assistant.service
   systemctl start claims-assistant-backup.timer
   echo "Служба запущена. Журнал: journalctl -u claims-assistant -f"
+  echo "Если служба ляжет пять раз за пять минут, systemd её остановит: systemctl is-failed claims-assistant"
 else
   echo "Токен не задан — служба установлена, но не запущена."
 fi

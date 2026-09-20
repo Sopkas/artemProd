@@ -301,5 +301,8 @@ def test_deploy_files_are_consistent():
     assert "Restart=always" in service and "-m claims_assistant.ops backup" in backup
     assert "OnCalendar=" in timer and "Persistent=true" in timer
     assert "useradd --system" in installer and "claims-assistant-backup.timer" in installer
+    # Review B on #47: the code stays root's and the check runs the way systemd does.
+    assert "chown -R root:root" in installer and "systemd-run --wait" in installer
+    assert "su -s" not in installer
     assert "DATABASE_PATH=/var/lib/claims-assistant/claims.sqlite3" in env
     assert "TELEGRAM_BOT_TOKEN=\n" in env  # the template never carries a token
