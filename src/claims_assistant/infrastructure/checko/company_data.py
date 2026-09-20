@@ -23,7 +23,7 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.infrastructure.checko import bankruptcy, finances
-from claims_assistant.infrastructure.checko.errors import InvalidResponse
+from claims_assistant.infrastructure.checko.errors import InvalidResponse, NotFound, is_not_found
 
 SOURCE = "checko-company-v2"
 COMPANY_URL = "https://api.checko.ru/v2/company"
@@ -31,7 +31,7 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 # Checko issues extract dates in Moscow time, which is UTC+3 with no DST since 2014.
 _MOSCOW = timezone(timedelta(hours=3))
 
-__all__ = ["CheckoCompanyDataProvider", "AiohttpCompanyTransport", "InvalidResponse"]
+__all__ = ["CheckoCompanyDataProvider", "AiohttpCompanyTransport", "InvalidResponse", "NotFound"]
 
 
 class CompanyTransport(Protocol):
@@ -78,6 +78,7 @@ def _http_error(http_status: int) -> tuple[FetchStatus, str, str] | None:
 
 _API_ERROR = "Checko отклонил запрос; проверьте доступ и лимиты в кабинете."
 _INVALID = "Ответ Checko не соответствует ожидаемому формату."
+_NOT_FOUND = "Организация с таким ИНН не найдена в источнике."
 
 
 def _failure(
@@ -112,6 +113,9 @@ def normalize_company(payload: object, inn: str, fetched_at: datetime) -> Extern
     if payload["meta"].get("status") != "ok":
         raise InvalidResponse()
     data = payload.get("data")
+    # An «ok» envelope with empty data is the source's way of saying «no such company».
+    if isinstance(data, dict) and not data and is_not_found(payload["meta"]):
+        raise NotFound()
     if not isinstance(data, dict) or data.get("ИНН") != inn:
         raise InvalidResponse()
     ogrn = data.get("ОГРН")
@@ -228,6 +232,8 @@ class CheckoCompanyDataProvider:
             code, message = "timeout", "Checko не ответил за отведённое время."
         except (aiohttp.ClientError, OSError):
             pass
+        except NotFound:
+            status, code, message = FetchStatus.NOT_FOUND, "not_found", _NOT_FOUND
         except InvalidResponse:
             status, code, message = FetchStatus.INVALID_RESPONSE, "invalid_response", _INVALID
         return _failure(request.inn, Section.COMPANY, fetched_at, status, code, message)
@@ -270,6 +276,8 @@ class CheckoCompanyDataProvider:
             code, message = "timeout", "Checko не ответил за отведённое время."
         except (aiohttp.ClientError, OSError):
             pass
+        except NotFound:
+            status, code, message = FetchStatus.NOT_FOUND, "not_found", _NOT_FOUND
         except bankruptcy.ApiRejected:
             status, code, message = FetchStatus.UNAVAILABLE, "api_error", _API_ERROR
         except bankruptcy.InvalidResponse:
@@ -298,6 +306,8 @@ class CheckoCompanyDataProvider:
             code, message = "timeout", "Checko не ответил за отведённое время."
         except (aiohttp.ClientError, OSError):
             pass
+        except NotFound:
+            status, code, message = FetchStatus.NOT_FOUND, "not_found", _NOT_FOUND
         except finances.ApiRejected:
             status, code, message = FetchStatus.UNAVAILABLE, "api_error", _API_ERROR
         except finances.InvalidResponse:

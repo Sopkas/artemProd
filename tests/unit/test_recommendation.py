@@ -105,13 +105,9 @@ async def test_accepted_outcome_carries_answer_versions_and_cost(caplog):
     assert "inn" not in provider.requests[0].context
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Fact IDs are built as «<ИНН>:<раздел>:<вид>» (S1-05), so the INN still reaches "
-    "the request through facts[].id and signals[].fact_ids even with include_inn=False; "
-    "raised with B on #36 — flips when the context masks or remaps the IDs.",
-)
 async def test_request_body_does_not_contain_the_inn_anywhere():
+    """Raised by A on #40: provider ids embed the INN («<ИНН>:company:status»), so
+    keeping it out of the named field was not enough. build_context masks it now."""
     context = await context_for()
     body = json.dumps(build_request(context).context, ensure_ascii=False)
     assert INN not in body

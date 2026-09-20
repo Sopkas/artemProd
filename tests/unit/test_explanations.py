@@ -281,3 +281,31 @@ async def test_a_new_model_version_is_a_new_key_and_a_new_request(tmp_path):
     line = pipeline(files, repository, guard(DemoCompanyDataProvider()), explainer=first)
     await line._report(run, imported, snapshots)
     assert len(first.requests) == 2
+
+
+def test_latency_must_be_a_number():
+    stored = StoredExplanation(
+        status="accepted", versions="v", provider="stub", model="stub-1", reference=None
+    )
+    data = json.loads(stored.to_payload())
+    data["latency_seconds"] = True
+    with pytest.raises(PayloadError):
+        StoredExplanation.from_payload(json.dumps(data))
+    data["latency_seconds"] = 2
+    assert StoredExplanation.from_payload(json.dumps(data)).latency_seconds == 2.0
+
+
+async def test_the_step_key_is_built_in_one_place():
+    """Review B on #41: the key the answer is saved under is the key it is looked up by."""
+    from claims_assistant.application.recommendation import explanation_key
+    from tests.unit.test_recommendation import context_for
+
+    context = await context_for()
+    provider = StubRecommendationProvider()
+    key = explanation_key(provider, context)
+    versions = (context.instruction_version, context.context_version, context.rules_version)
+    assert key == "stub:stub-1:i{}:c{}:s1:r{}".format(*versions)
+    from claims_assistant.application.recommendation import request_explanation
+
+    outcome = await request_explanation(provider, context)
+    assert outcome.versions == key

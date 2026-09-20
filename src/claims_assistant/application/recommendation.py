@@ -19,7 +19,12 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from claims_assistant.domain.ai_context import RecommendationContext, Request, build_request
-from claims_assistant.domain.ai_review import Explanation, Rejected, review_answer
+from claims_assistant.domain.ai_review import (
+    ANSWER_SCHEMA_VERSION,
+    Explanation,
+    Rejected,
+    review_answer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +51,7 @@ class AiLimits:
     """Limits of one request; the full budget policy is S5-03."""
 
     timeout_seconds: float = 30.0
-    max_request_chars: int = 40_000  # the S5-07 bound: 20 comments × 500 chars fit easily
+    max_request_chars: int = 24_000  # ≈ 6 000 tokens, the same default as AiPolicy
     max_output_tokens: int = 800  # 2–4 sentences of explanation plus the JSON around it
 
     def __post_init__(self) -> None:
@@ -105,6 +110,16 @@ def request_size(request: Request) -> int:
     return len(request.instruction) + len(json.dumps(request.context, ensure_ascii=False))
 
 
+def explanation_key(provider: RecommendationProvider, context: RecommendationContext) -> str:
+    """The step version an answer is stored under (S5-02): every version the answer
+    depends on, so a change of any of them is a new key. The only place that builds it —
+    a second copy once drifted from this one, and that would mean buying an answer twice."""
+    return (
+        f"{provider.name}:{provider.model}:i{context.instruction_version}"
+        f":c{context.context_version}:s{ANSWER_SCHEMA_VERSION}:r{context.rules_version}"
+    )
+
+
 async def request_explanation(
     provider: RecommendationProvider,
     context: RecommendationContext,
@@ -113,14 +128,8 @@ async def request_explanation(
     """Build the request, ask the provider, review the answer; never raises on the
     expected failures — the outcome says what happened, and the caller decides what
     the report shows (S5-04)."""
-    from claims_assistant.domain.ai_review import ANSWER_SCHEMA_VERSION
-
     request = build_request(context)
-    # Every version the answer depends on; a change of any of them is a new step key.
-    versions = (
-        f"{provider.name}:{provider.model}:i{request.instruction_version}"
-        f":c{request.context_version}:s{ANSWER_SCHEMA_VERSION}:r{context.rules_version}"
-    )
+    versions = explanation_key(provider, context)
     size = request_size(request)
     if size > limits.max_request_chars:
         error = AiUnavailable(
