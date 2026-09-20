@@ -116,9 +116,10 @@ async def request_explanation(
     from claims_assistant.domain.ai_review import ANSWER_SCHEMA_VERSION
 
     request = build_request(context)
+    # Every version the answer depends on; a change of any of them is a new step key.
     versions = (
         f"{provider.name}:{provider.model}:i{request.instruction_version}"
-        f":c{request.context_version}:s{ANSWER_SCHEMA_VERSION}"
+        f":c{request.context_version}:s{ANSWER_SCHEMA_VERSION}:r{context.rules_version}"
     )
     size = request_size(request)
     if size > limits.max_request_chars:

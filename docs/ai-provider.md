@@ -27,7 +27,17 @@ class RecommendationProvider(Protocol):
 - Ожидаемые отказы — `AiUnavailable(code, message)` с кодом `unavailable | timeout | rate_limited | refused | budget`; ошибки программирования — обычные исключения (воркер зафиксирует проверку как `failed`).
 - Провайдер **не логирует** тело запроса и ответ: там данные заказчика.
 
-`request_explanation(provider, context, limits)` → `ExplanationOutcome(provider, model, versions, answer, explanation | rejected | error)`; `status` — `accepted`, `rejected:<код S5-06>`, `unavailable:<код>`. Запрос больше `max_request_chars` наружу не уходит (`unavailable:budget`). `versions = "<provider>:<model>:i<инструкция>:c<контекст>:s<схема ответа>"` — ключ хранения в S5-02: любая смена версии = новый ключ.
+`request_explanation(provider, context, limits)` → `ExplanationOutcome(provider, model, versions, answer, explanation | rejected | error)`; `status` — `accepted`, `rejected:<код S5-06>`, `unavailable:<код>`. Запрос больше `max_request_chars` наружу не уходит (`unavailable:budget`). `versions = "<provider>:<model>:i<инструкция>:c<контекст>:s<схема ответа>:r<правила>"` — ключ хранения в S5-02: любая смена версии = новый ключ.
+
+## Хранение ответов (S5-02)
+
+Конвейер (`analysis_pipeline._explain`) после расчёта оценок строит контекст каждой организации (`build_context(..., reference="row-N")`, комментарии — только при `AI_SEND_COMMENTS=true`), спрашивает провайдера через `request_explanation` и сохраняет ответ шагом `(ИНН, "explanation", versions)` — `application/explanations.StoredExplanation`: статус, версии, провайдер/модель, ссылка, сырой текст ответа, токены и задержка, принятое объяснение или код отклонения. Сохраняются **принятые и отклонённые** ответы (окончательные); недоступность модели шага не оставляет — следующий прогон может спросить снова (границы — S5-03).
+
+Правила:
+- ключ включает все версии (`provider:model:i<инструкция>:c<контекст>:s<схема>:r<правила>`): смена любой — новый ключ, старое остаётся в истории;
+- возобновлённая проверка и повторный захват читают шаг и модель не зовут; повторная выдача отчёта (`/report`) конвейер не запускает вовсе — ИИ не вызывается заново;
+- принятое объяснение связано с оценкой через `ReportRow.explanation`, версия — в «О проверке» (`ReportMeta.ai_version`: «stub stub-1; контекст 1, инструкция 1»); вывод текста объяснения в отчёт — S5-04;
+- шаги живут в хранилище проверки и удаляются с ней по сроку хранения (S6-02).
 
 ## Подмена (`AI_PROVIDER=stub`)
 

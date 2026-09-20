@@ -101,6 +101,13 @@ async def run(settings: Settings) -> None:
                 business_utc_offset_hours=settings.business_utc_offset_hours,
             )
             # One worker in this process; runs left "running" by a crash go back to the queue.
+            # S5-01/S5-02: the recommendation provider, if any; every answer is stored.
+            recommendation_provider = build_recommendation_provider(settings)
+            logger.info(
+                "ai_provider=%s send_comments=%s",
+                recommendation_provider.name if recommendation_provider else "off",
+                settings.ai_send_comments,
+            )
             pipeline = AnalysisPipeline(
                 files,
                 reader,
@@ -112,15 +119,10 @@ async def run(settings: Settings) -> None:
                     max_requests=settings.external.run_request_limit,
                     max_seconds=settings.external.run_time_limit_seconds,
                 ),
+                explainer=recommendation_provider,
+                ai_send_comments=settings.ai_send_comments,
             )
             notifier = TelegramRunNotifier(bot, repository, files)
-            # S5-01: the provider is built here; the pipeline starts asking it in S5-02,
-            # together with storing every answer.
-            recommendation_provider = build_recommendation_provider(settings)
-            logger.info(
-                "ai_provider=%s",
-                recommendation_provider.name if recommendation_provider else "off",
-            )
             worker = RunWorker(repository, pipeline, notifier=notifier)
             await worker.recover()
             worker_task = asyncio.create_task(worker.run_forever(), name="run-worker")

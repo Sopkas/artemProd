@@ -97,6 +97,7 @@ async def test_accepted_outcome_carries_answer_versions_and_cost(caplog):
     assert outcome.answer.latency_seconds == pytest.approx(0.01)
     assert outcome.versions == (
         f"stub:stub-1:i{INSTRUCTION_VERSION}:c{CONTEXT_VERSION}:s{ANSWER_SCHEMA_VERSION}"
+        f":r{context.rules_version}"
     )
     assert "ai_answer_accepted" in caplog.text
     # The request the stub saw names the counterparty by the reference.
