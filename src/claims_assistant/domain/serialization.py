@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from claims_assistant.domain.counterparties import CounterpartyRow
+from claims_assistant.domain.debt_history import DebtSnapshot
 from claims_assistant.domain.external import (
     CompanyStatus,
     Coverage,
@@ -34,6 +35,8 @@ from claims_assistant.domain.external import (
 )
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.inn import InvalidInn, validate_legal_inn
+from claims_assistant.domain.interactions import InteractionRow
+from claims_assistant.domain.payments import PaymentRow
 from claims_assistant.domain.scoring import Assessment, Priority, Signal
 
 SCHEMA = 1
@@ -359,6 +362,79 @@ def _money_from_text(value: Any) -> Decimal | None:
     return amount
 
 
+def _money(value: Any, key: str) -> Decimal:
+    """A required amount: stored as text so no float ever rounds it."""
+    amount = _money_from_text(_field({key: value}, key, str))
+    if amount is None:
+        raise PayloadError("Unreadable decimal value")
+    return amount
+
+
+def _stored_inn(data: Any, key: str = "inn") -> str:
+    raw = _field(data, key, str)
+    try:
+        return validate_legal_inn(raw)
+    except InvalidInn:
+        raise PayloadError("Stored INN is not a valid legal-entity INN") from None
+
+
+def payment_row_to_dict(row: PaymentRow) -> dict[str, Any]:
+    return {
+        "inn": row.inn,
+        "payment_id": row.payment_id,
+        "paid_on": row.paid_on.isoformat(),
+        "amount": str(row.amount),
+    }
+
+
+def payment_row_from_dict(data: Any) -> PaymentRow:
+    fields = dict(
+        inn=_stored_inn(data),
+        payment_id=_field(data, "payment_id", str),
+        paid_on=_day(_field(data, "paid_on", str)),
+        amount=_money(_field(data, "amount", str), "amount"),
+    )
+    return _built(lambda: PaymentRow(**fields))
+
+
+def debt_snapshot_to_dict(row: DebtSnapshot) -> dict[str, Any]:
+    return {
+        "inn": row.inn,
+        "cutoff_date": row.cutoff_date.isoformat(),
+        "debt": str(row.debt),
+    }
+
+
+def debt_snapshot_from_dict(data: Any) -> DebtSnapshot:
+    fields = dict(
+        inn=_stored_inn(data),
+        cutoff_date=_day(_field(data, "cutoff_date", str)),
+        debt=_money(_field(data, "debt", str), "debt"),
+    )
+    return _built(lambda: DebtSnapshot(**fields))
+
+
+def interaction_row_to_dict(row: InteractionRow) -> dict[str, Any]:
+    return {
+        "inn": row.inn,
+        "interaction_id": row.interaction_id,
+        "happened_on": row.happened_on.isoformat(),
+        "comment": row.comment,
+        "channel": row.channel,
+    }
+
+
+def interaction_row_from_dict(data: Any) -> InteractionRow:
+    fields = dict(
+        inn=_stored_inn(data),
+        interaction_id=_field(data, "interaction_id", str),
+        happened_on=_day(_field(data, "happened_on", str)),
+        comment=_field(data, "comment", str),
+        channel=_optional_str(data.get("channel"), "channel"),
+    )
+    return _built(lambda: InteractionRow(**fields))
+
+
 def counterparty_row_to_dict(row: CounterpartyRow) -> dict[str, Any]:
     return {
         "inn": row.inn,
@@ -371,13 +447,8 @@ def counterparty_row_to_dict(row: CounterpartyRow) -> dict[str, Any]:
 
 
 def counterparty_row_from_dict(data: Any) -> CounterpartyRow:
-    raw_inn = _field(data, "inn", str)
-    try:
-        inn = validate_legal_inn(raw_inn)
-    except InvalidInn:
-        raise PayloadError("Stored INN is not a valid legal-entity INN") from None
     fields = dict(
-        inn=inn,
+        inn=_stored_inn(data),
         name=_optional_str(data.get("name"), "name"),
         cutoff_date=_optional(data, "cutoff_date", _day),
         debt=_money_from_text(data.get("debt")),
