@@ -214,3 +214,46 @@ async def test_card_works_through_the_guarded_provider(bot, update_factory):
     reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
     assert reply.text.startswith(DEMO_BANNER)
     assert "наблюдени" in reply.text
+
+
+async def test_card_includes_the_owners_data_after_a_finished_check(bot, update_factory, tmp_path):
+    """S4-04: the INN card shows what the owner's own package says about the company."""
+    from datetime import date
+    from decimal import Decimal
+
+    from claims_assistant.application.analysis_queue import RunOutcome
+    from claims_assistant.application.check_package import accept_counterparties
+    from claims_assistant.domain.analysis import RunStatus
+    from claims_assistant.domain.counterparties import CounterpartyRow
+    from claims_assistant.domain.external import DataMode
+    from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
+    from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
+    from claims_assistant.infrastructure.memory.analysis import InMemoryAnalysisRepository
+    from claims_assistant.infrastructure.storage.local import LocalFileStorage
+
+    repository = InMemoryAnalysisRepository()
+    files = LocalFileStorage(tmp_path / "uploads")
+    reader = OpenpyxlSheetReader()
+    rows = (CounterpartyRow(inn=VALID_INN, cutoff_date=date(2026, 9, 1), debt=Decimal("10.00")),)
+    result = await accept_counterparties(
+        42,
+        date(2026, 9, 1),
+        DataMode.DEMO,
+        build_counterparties_template(rows),
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    await repository.transition(42, result.run.id, RunStatus.QUEUED)
+    await repository.claim_next()
+    await repository.finish(result.run.id, RunOutcome(RunStatus.COMPLETED))
+
+    dispatcher = create_dispatcher(
+        frozenset({42, 43}), repository=repository, files=files, reader=reader
+    )
+    reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", VALID_INN)
+    assert "Внутренние данные — проверка от 01.09.2026" in reply.text
+    assert "Долг: 10,00 ₽" in reply.text
+    # Another allowed user gets the plain card: the package is not theirs.
+    reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", VALID_INN, user_id=43)
+    assert "Внутренние данные" not in reply.text
