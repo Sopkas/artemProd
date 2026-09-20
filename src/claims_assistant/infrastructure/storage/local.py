@@ -5,6 +5,7 @@ inside the root even through symlinks, as agreed in docs/analysis-storage.md.
 """
 
 import re
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
@@ -43,6 +44,21 @@ class LocalFileStorage:
             target.unlink(missing_ok=True)
         except OSError as error:
             raise StorageError("Не удалось удалить файл.") from error
+
+    def remove_run(self, run_id: str) -> None:
+        """Delete the run's directory tree (S6-02); nothing to delete is not an error."""
+        if not _RUN_ID.fullmatch(run_id):
+            raise StorageError("Unsafe run identifier")
+        try:
+            target = self._inside_root(run_id)
+        except StorageError:
+            raise
+        if not target.exists():
+            return
+        try:
+            shutil.rmtree(target)
+        except OSError as error:
+            raise StorageError("Не удалось удалить файлы проверки.") from error
 
     def _inside_root(self, relative: str) -> Path:
         root = self._root.resolve()
