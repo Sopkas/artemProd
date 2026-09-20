@@ -248,3 +248,61 @@ async def test_worker_runs_alongside_polling_and_stops_with_it(monkeypatch):
     assert options["explainer"] is None and options["ai_send_comments"] is False
     assert options["ai_run_limits"] == app.run_limits(Settings(TOKEN, frozenset({42})))
     assert isinstance(workers[0][1]["notifier"], app.TelegramRunNotifier)
+
+
+def test_check_mode_validates_settings_and_storage_without_telegram(tmp_path, monkeypatch, capsys):
+    """S6-01: `python -m claims_assistant --check` is the service's ExecStartPre."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "data" / "claims.sqlite3"))
+    monkeypatch.setenv("STORAGE_PATH", str(tmp_path / "data" / "uploads"))
+    monkeypatch.setenv("BACKUP_PATH", str(tmp_path / "data" / "backups"))
+    monkeypatch.chdir(tmp_path)
+    assert app.main(["--check"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("config_ok data_provider=demo ai_provider=off")
+    assert (tmp_path / "data" / "claims.sqlite3").exists()
+    assert (tmp_path / "data" / "uploads").is_dir() and (tmp_path / "data" / "backups").is_dir()
+    assert not list((tmp_path / "data" / "uploads").iterdir())  # the write probe is gone
+
+
+def test_check_mode_fails_on_bad_settings_or_unwritable_storage(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert app.main(["--check"]) == 2
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    blocker = tmp_path / "blocked"
+    blocker.write_text("not a directory")
+    monkeypatch.setenv("STORAGE_PATH", str(blocker / "uploads"))
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "claims.sqlite3"))
+    assert app.main(["--check"]) == 1
+    assert "Ошибка проверки" in capsys.readouterr().err
+    assert app.main(["--bogus"]) == 2
+
+
+def test_deploy_files_are_consistent():
+    """The units, the installer and the guide name the same paths and user."""
+    from pathlib import Path
+
+    deploy = Path(__file__).resolve().parents[2] / "deploy"
+    service = (deploy / "claims-assistant.service").read_text(encoding="utf-8")
+    backup = (deploy / "claims-assistant-backup.service").read_text(encoding="utf-8")
+    timer = (deploy / "claims-assistant-backup.timer").read_text(encoding="utf-8")
+    installer = (deploy / "install.sh").read_text(encoding="utf-8")
+    env = (deploy / "env.example").read_text(encoding="utf-8")
+    for text in (service, backup):
+        assert "User=claims" in text and "EnvironmentFile=/etc/claims-assistant/env" in text
+        assert "ReadWritePaths=/var/lib/claims-assistant" in text
+        assert "/opt/claims-assistant/venv/bin/python" in text
+    assert (
+        "ExecStartPre=/opt/claims-assistant/venv/bin/python -m claims_assistant --check" in service
+    )
+    assert "Restart=always" in service and "-m claims_assistant.ops backup" in backup
+    assert "OnCalendar=" in timer and "Persistent=true" in timer
+    assert "useradd --system" in installer and "claims-assistant-backup.timer" in installer
+    # Review B on #47: the code stays root's and the check runs the way systemd does.
+    assert "chown -R root:root" in installer and "systemd-run --wait" in installer
+    assert "su -s" not in installer
+    assert "DATABASE_PATH=/var/lib/claims-assistant/claims.sqlite3" in env
+    assert "TELEGRAM_BOT_TOKEN=\n" in env  # the template never carries a token

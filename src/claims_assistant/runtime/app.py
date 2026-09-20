@@ -157,11 +157,39 @@ async def run(settings: Settings) -> None:
         logger.info("bot_stopped")
 
 
-def main() -> int:
+def check(settings: Settings) -> int:
+    """Offline start check for the service (S6-01): settings are readable, the database
+    opens and migrates, the storage directories are writable. No Telegram call, so it
+    is safe as ExecStartPre and on a machine without network."""
+    try:
+        repository = open_sqlite_repository(settings.database_path)
+        repository.close()
+        for directory in (settings.storage_path, settings.backup_path):
+            directory.mkdir(parents=True, exist_ok=True)
+            probe = directory / ".write-check"
+            probe.write_bytes(b"")
+            probe.unlink()
+    except (RepositoryError, OSError) as exc:
+        print(f"Ошибка проверки: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    print(
+        f"config_ok data_provider={settings.data_provider} ai_provider={settings.ai_provider} "
+        f"database={settings.database_path} storage={settings.storage_path}"
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
     try:
         settings = Settings.load()
     except ConfigurationError as exc:
         print(f"Ошибка настройки: {exc}", file=sys.stderr)
+        return 2
+    if args == ["--check"]:
+        return check(settings)
+    if args:
+        print("Использование: python -m claims_assistant [--check]", file=sys.stderr)
         return 2
     configure_logging(settings)
     try:
