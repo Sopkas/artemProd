@@ -100,8 +100,11 @@ class ReportRow:
     # S4-04: the internal indicators the assessment rested on, for «Основания».
     indicators: InternalIndicators | None = None
     # S5-02: the accepted AI explanation of this assessment, if one was obtained; the
-    # report shows it (S5-04) or the rules' next step when it is None.
+    # report shows it (S5-04) or the template from the rules when it is None.
     explanation: Explanation | None = None
+    # S5-04: why there is no model text — "rejected:<code>" / "unavailable:<code>" — or
+    # "accepted"; None when no provider was configured for the run.
+    explanation_status: str | None = None
 
     def __post_init__(self) -> None:
         inn = self.counterparty.inn
