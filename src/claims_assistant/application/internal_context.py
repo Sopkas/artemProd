@@ -18,7 +18,7 @@ from claims_assistant.domain.interactions import InteractionRow, chronology
 from claims_assistant.domain.report import file_labels
 
 from .analysis_repository import AnalysisRepository
-from .check_package import FileStorage, StorageError
+from .check_package import FileStorage, StorageError, package_inns
 from .imports import SheetReader
 from .package_checks import PackageIntegrityError, review_package
 
@@ -60,7 +60,11 @@ async def internal_context(
     """
     runs = [run for run in await repository.list_runs(owner_id) if run.status in FINISHED]
     for run in runs[:_NEWEST_RUNS]:
+        # Cheap first: only the «Контрагенты» file says whether the INN is in the package;
+        # the optional files are parsed once, for the check that has it.
         try:
+            if inn not in await package_inns(run, files, reader, limits):
+                continue
             review = await review_package(run, files, reader, limits)
         except (PackageIntegrityError, StorageError):
             continue  # a broken package is the pipeline's business, not the card's

@@ -50,6 +50,11 @@ _UNIT_SUFFIX = {"RUB": " ₽"}
 
 
 _MAX_INTERACTIONS = 5
+_MAX_COMMENT_CHARS = 200  # a comment may hold 2000; the card shows the beginning
+TELEGRAM_MESSAGE_LIMIT = 4096
+# The internal block never pushes the card past the Telegram limit: interactions are
+# dropped one by one (newest kept) until the whole text fits.
+_CARD_BUDGET = TELEGRAM_MESSAGE_LIMIT - 96
 
 
 def format_card(check: CompanyCheck, internal: InternalContext | None = None) -> str:
@@ -61,27 +66,27 @@ def format_card(check: CompanyCheck, internal: InternalContext | None = None) ->
     for snapshot in check.snapshots:
         lines.append("")
         lines.extend(_section(snapshot))
-    if internal is not None:
-        lines.append("")
-        lines.extend(_internal(internal))
-    lines.append("")
-    lines.append("Карточка показывает полученные факты и полноту проверки без оценки очерёдности.")
-    return "\n".join(lines)
+    footer = ["", "Карточка показывает полученные факты и полноту проверки без оценки очерёдности."]
+    if internal is None:
+        return "\n".join(lines + footer)
+    budget = _CARD_BUDGET - len("\n".join(lines + footer)) - 1
+    return "\n".join(lines + [""] + _internal(internal, budget) + footer)
 
 
-def _internal(context: InternalContext) -> list[str]:
+def _internal(context: InternalContext, budget: int) -> list[str]:
     """The owner's own data on this company (S4-04): which files, what they give, what
-    is missing. Amounts and comments are the owner's; nothing here is sent anywhere."""
+    is missing. Amounts and comments are the owner's; nothing here is sent anywhere.
+    ``budget`` is how many characters the block may take so the card still fits one
+    Telegram message; interactions give way first."""
     run = context.run
-    row = _row_of(context)
+    row = context.row
     lines = [f"Внутренние данные — проверка от {_date(run.analysis_date)}"]
     lines.append("  Файлы: " + "; ".join(context.files))
-    if row is not None:
-        if row.debt is not None:
-            when = f" на {_date(row.cutoff_date)}" if row.cutoff_date else ""
-            lines.append(f"  Долг: {_money(row.debt, 'RUB')}{when}")
-        if row.overdue_days is not None:
-            lines.append(f"  Просрочка: {row.overdue_days} дн.")
+    if row.debt is not None:
+        when = f" на {_date(row.cutoff_date)}" if row.cutoff_date else ""
+        lines.append(f"  Долг: {_money(row.debt, 'RUB')}{when}")
+    if row.overdue_days is not None:
+        lines.append(f"  Просрочка: {row.overdue_days} дн.")
     lines.append("  Давность платежа: " + _payment_line(context.indicators.payment))
     lines.append("  Долг за месяц: " + _debt_line(context.indicators.debt))
     revenue = context.indicators.revenue
@@ -90,21 +95,26 @@ def _internal(context: InternalContext) -> list[str]:
         lines.append(
             f"  Выручка за {revenue.year}: {sign}{abs(revenue.percent):.0f} % к предыдущему году"
         )
-    if context.interactions:
-        shown = context.interactions[-_MAX_INTERACTIONS:]
-        lines.append(f"  Взаимодействия: {len(context.interactions)}, последние:")
-        for item in shown:
-            channel = f" ({item.channel})" if item.channel else ""
-            lines.append(f"    {_date(item.happened_on)}{channel}: {item.comment}")
-    else:
-        lines.append("  Взаимодействия: файл не загружен.")
-    for note in context.indicators.missing:
-        lines.append(f"  Не хватает: {note}")
-    return lines
+    tail = [f"  Не хватает: {note}" for note in context.indicators.missing]
+    if not context.interactions:
+        return lines + ["  Взаимодействия: файл не загружен."] + tail
+    total = len(context.interactions)
+    shown = list(context.interactions[-_MAX_INTERACTIONS:])
+    while True:
+        block = [f"  Взаимодействия: {total}, последние {len(shown)}:"] + [
+            _interaction_line(item) for item in shown
+        ]
+        if len("\n".join(lines + block + tail)) <= budget or not shown:
+            return lines + block + tail
+        shown = shown[1:]  # drop the oldest shown; the newest stay
 
 
-def _row_of(context: InternalContext):
-    return context.row
+def _interaction_line(item) -> str:
+    channel = f" ({item.channel})" if item.channel else ""
+    comment = item.comment
+    if len(comment) > _MAX_COMMENT_CHARS:
+        comment = comment[: _MAX_COMMENT_CHARS - 1].rstrip() + "…"
+    return f"    {_date(item.happened_on)}{channel}: {comment}"
 
 
 def _payment_line(recency: PaymentRecency) -> str:

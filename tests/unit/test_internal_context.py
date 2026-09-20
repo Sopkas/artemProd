@@ -140,7 +140,7 @@ async def test_card_shows_files_indicators_chronology_and_gaps(tmp_path):
     assert "Долг: 200,00 ₽ на 01.09.2026" in text and "Просрочка: 45 дн." in text
     assert "Давность платежа: последний платёж 15.07.2026, 48 дн. назад (подтверждено)" in text
     assert "Долг за месяц: 100,00 ₽ (01.08.2026) → 200,00 ₽ (01.09.2026), ×2,00" in text
-    assert "Взаимодействия: 2, последние:" in text
+    assert "Взаимодействия: 2, последние 2:" in text
     assert "01.08.2026: Направлена претензия." in text
     assert "20.08.2026 (телефон): Обещали оплатить." in text
     assert "Не хватает" not in text
@@ -160,3 +160,53 @@ def test_card_without_context_is_unchanged():
 
     check = asyncio.run(check_company(INN, DemoCompanyDataProvider()))
     assert "Внутренние данные" not in format_card(check)
+
+
+async def test_card_with_long_comments_fits_one_telegram_message(tmp_path):
+    """Review B on #35: five 2000-character comments must not push the card past 4096."""
+    from claims_assistant.domain.interactions import MAX_COMMENT_CHARS
+    from claims_assistant.presentation.telegram.card import TELEGRAM_MESSAGE_LIMIT
+
+    deps = deps_for(tmp_path)
+    result = await accept_counterparties(
+        OWNER, DAY, DataMode.DEMO, build_counterparties_template(ROWS), **deps
+    )
+    long = "х" * MAX_COMMENT_CHARS
+    rows = [[INN, f"I-{n}", date(2026, 8, n), long, None] for n in range(1, 8)]
+    await accept_ledger(
+        OWNER,
+        result.run.id,
+        FileKind.INTERACTIONS,
+        build_interactions_workbook(rows),
+        coverage=None,
+        **deps,
+    )
+    repository = deps["repository"]
+    await repository.transition(OWNER, result.run.id, RunStatus.QUEUED)
+    await repository.claim_next()
+    await repository.finish(result.run.id, RunOutcome(RunStatus.COMPLETED))
+
+    check = await check_company(INN, DemoCompanyDataProvider())
+    context = await internal_context(OWNER, INN, **deps)
+    text = format_card(check, context)
+    assert len(text) <= TELEGRAM_MESSAGE_LIMIT
+    assert "Взаимодействия: 7, последние 5:" in text
+    assert "…" in text and long not in text  # comments are cut, newest are kept
+    assert "07.08.2026" in text and "01.08.2026" not in text
+    assert text.endswith("без оценки очерёдности.")
+
+
+async def test_interactions_give_way_when_the_card_is_tight(tmp_path, monkeypatch):
+    from claims_assistant.presentation.telegram import card as card_module
+
+    deps = deps_for(tmp_path)
+    await finished_check(deps)
+    check = await check_company(INN, DemoCompanyDataProvider())
+    context = await internal_context(OWNER, INN, **deps)
+    full = format_card(check, context)
+    # A budget that leaves no room for the interaction lines: they go, the rest stays.
+    monkeypatch.setattr(card_module, "_CARD_BUDGET", len(full) - 40)
+    tight = format_card(check, context)
+    assert "Взаимодействия: 2, последние 1:" in tight or "последние 0:" in tight
+    assert "Давность платежа" in tight and tight.endswith("без оценки очерёдности.")
+    assert len(tight) < len(full)
