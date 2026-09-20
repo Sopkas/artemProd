@@ -56,9 +56,9 @@ def deps(tmp_path):
     )
 
 
-async def draft(deps, rows=ROWS):
+async def draft(deps, rows=ROWS, data: bytes | None = None):
     result = await accept_counterparties(
-        OWNER, DAY, DataMode.DEMO, build_counterparties_template(rows), **deps
+        OWNER, DAY, DataMode.DEMO, data or build_counterparties_template(rows), **deps
     )
     return result.run
 
@@ -112,15 +112,16 @@ async def test_file_of_another_run_is_never_read(deps, tmp_path):
 
 
 async def test_second_different_counterparties_file_is_a_conflict(deps):
-    run = await draft(deps)
+    # One set of bytes: openpyxl stamps the creation time into the workbook, so two
+    # builds a second apart would differ by checksum and look like different files.
+    same = build_counterparties_template(ROWS)
+    run = await draft(deps, data=same)
     other = build_counterparties_template((CounterpartyRow(inn=INN_A, cutoff_date=DAY),))
     result = await accept_counterparties(OWNER, DAY, DataMode.DEMO, other, run_id=run.id, **deps)
     assert result == PackageConflict(MAIN_FILE_ALREADY_IN_PACKAGE)
     assert len((await deps["repository"].get_run(OWNER, run.id)).files) == 1
     # The same file again stays a duplicate, not a conflict.
-    again = await accept_counterparties(
-        OWNER, DAY, DataMode.DEMO, build_counterparties_template(ROWS), run_id=run.id, **deps
-    )
+    again = await accept_counterparties(OWNER, DAY, DataMode.DEMO, same, run_id=run.id, **deps)
     assert again.duplicate is True
 
 

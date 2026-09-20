@@ -25,7 +25,8 @@ from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import DataMode, ExternalSnapshot, FetchStatus, Section
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
-from claims_assistant.domain.report import AnalysisReport, ReportMeta, ReportRow
+from claims_assistant.domain.indicators import package_indicators
+from claims_assistant.domain.report import AnalysisReport, ReportMeta, ReportRow, file_labels
 from claims_assistant.domain.scoring import RULES_VERSION, Priority, assess
 from claims_assistant.domain.steps import RUN_SCOPE, StepResult, StepStatus
 
@@ -34,8 +35,16 @@ from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
 from .external_guard import BUDGET_EXHAUSTED, TRANSIENT_CODES, RunBudget
 from .imports import SheetReader
-from .package_checks import PackageIntegrityError, review_package
-from .step_payloads import PayloadError, dump_import, dump_snapshots, load_import, load_snapshots
+from .internal_context import payment_periods
+from .package_checks import PackageIntegrityError, PackageReview, review_package
+from .step_payloads import (
+    ImportedPackage,
+    PayloadError,
+    dump_import,
+    dump_snapshots,
+    load_import,
+    load_snapshots,
+)
 from .step_store import ReportStore, StepStore
 
 logger = logging.getLogger(__name__)
@@ -48,7 +57,7 @@ REPORT_WRITE_FAILED = "Не удалось сохранить файл отчё�
 STEP_UNREADABLE = "Сохранённый шаг проверки не читается; запустите проверку заново."
 
 IMPORT_STEP = "import"
-IMPORT_VERSION = "counterparties-v2"  # v1 kept only counts; v2 keeps rows and issues
+IMPORT_VERSION = "package-v3"  # v1: counts; v2: rows and issues; v3: every file of the package
 FETCH_STEP = "external_fetch"
 FETCH_VERSION = "sections-v1"
 REPORT_STEP = "report"
@@ -184,9 +193,9 @@ class AnalysisPipeline:
             summary = await load_summary(run.id, self._repository)
             if summary is not None:
                 return summary.outcome()
-            rows, issues = await self._import(run)
-            snapshots = await self._fetch_all(run, rows)
-            summary = await self._report(run, rows, issues, snapshots)
+            package = await self._import(run)
+            snapshots = await self._fetch_all(run, package.rows)
+            summary = await self._report(run, package, snapshots)
         except _Failed as failed:
             return RunOutcome(RunStatus.FAILED, failed.reason)
         except PayloadError:
@@ -196,27 +205,29 @@ class AnalysisPipeline:
 
     # --- import -------------------------------------------------------------------
 
-    async def _import(
-        self, run: AnalysisRun
-    ) -> tuple[tuple[CounterpartyRow, ...], tuple[ImportIssue, ...]]:
+    async def _import(self, run: AnalysisRun) -> ImportedPackage:
+        """Every file of the package, from the saved step or read now and saved (S4-04)."""
         saved = await self._repository.get_step(run.id, RUN_SCOPE, IMPORT_STEP, IMPORT_VERSION)
         if saved is not None:
             if saved.status is StepStatus.FAILED:
                 raise _Failed(saved.error)
             return load_import(saved.payload or "")
         try:
-            rows, issues = await self._read_package(run)
+            review = await self._read_package(run)
         except _Failed as failed:
             await self._save(run, RUN_SCOPE, IMPORT_STEP, IMPORT_VERSION, error=failed.reason)
             raise
-        await self._save(
-            run, RUN_SCOPE, IMPORT_STEP, IMPORT_VERSION, payload=dump_import(rows, issues)
+        package = ImportedPackage(
+            rows=review.counterparties,
+            issues=review.issues,
+            payments=review.payments,
+            history=review.history,
+            interactions=review.interactions,
         )
-        return rows, issues
+        await self._save(run, RUN_SCOPE, IMPORT_STEP, IMPORT_VERSION, payload=dump_import(package))
+        return package
 
-    async def _read_package(
-        self, run: AnalysisRun
-    ) -> tuple[tuple[CounterpartyRow, ...], tuple[ImportIssue, ...]]:
+    async def _read_package(self, run: AnalysisRun) -> PackageReview:
         """The whole package (S4-03): every file is checked on its own and against the
         others; the issues go to the report's «Качество данных»."""
         if not any(file.kind == FileKind.COUNTERPARTIES for file in run.files):
@@ -232,7 +243,7 @@ class AnalysisPipeline:
             raise _Failed(review.blocking[0].reason)
         if not review.counterparties:
             raise _Failed(NO_USABLE_ROWS)
-        return review.counterparties, review.issues
+        return review
 
     # --- external data ------------------------------------------------------------
 
@@ -265,20 +276,41 @@ class AnalysisPipeline:
     async def _report(
         self,
         run: AnalysisRun,
-        rows: tuple[CounterpartyRow, ...],
-        issues: tuple[ImportIssue, ...],
+        package: ImportedPackage,
         snapshots: dict[str, tuple[ExternalSnapshot, ...]],
     ) -> RunSummary:
+        rows, issues = package.rows, package.issues
+        # Internal indicators (S4-06) from the owner's own files: payments with the periods
+        # they vouched for, debt history, and the finances section already fetched.
+        finances = {
+            inn: next((s for s in group if s.section is Section.FINANCES), None)
+            for inn, group in snapshots.items()
+        }
+        indicators = package_indicators(
+            rows,
+            run.analysis_date,
+            package.payments,
+            payment_periods(run),
+            package.history,
+            {inn: snapshot for inn, snapshot in finances.items() if snapshot is not None},
+        )
         report_rows = tuple(
             ReportRow(
                 counterparty=row,
                 assessment=assess(
-                    row.inn, snapshots[row.inn], row, analysis_date=run.analysis_date
+                    row.inn,
+                    snapshots[row.inn],
+                    row,
+                    analysis_date=run.analysis_date,
+                    indicators=indicators[row.inn],
                 ),
                 snapshots=snapshots[row.inn],
+                indicators=indicators[row.inn],
             )
             for row in rows
         )
+        known = {row.inn for row in rows}
+        interactions = tuple(item for item in package.interactions if item.inn in known)
         # The oldest answer among the sections: cached snapshots keep their own
         # fetched_at, so every external fact in the report is at least this fresh.
         fetched = [
@@ -290,9 +322,12 @@ class AnalysisPipeline:
             mode=run.mode,
             created_at=self._clock(),
             checked_at=min(fetched) if fetched else None,
-            package=_package_lines(run, rows, issues),
+            package=_package_lines(run, package),
+            files=file_labels(run.files),
         )
-        report = AnalysisReport(meta=meta, rows=report_rows, import_issues=issues)
+        report = AnalysisReport(
+            meta=meta, rows=report_rows, import_issues=issues, interactions=interactions
+        )
         data = await asyncio.to_thread(self._build_report, report)
         previous = await self._repository.get_report(run.owner_id, run.id)
         try:
@@ -353,26 +388,35 @@ _EXTRA_FILE_LABELS = {
 }
 
 
-def _package_lines(
-    run: AnalysisRun, rows: tuple[CounterpartyRow, ...], issues: tuple[ImportIssue, ...]
-) -> tuple[str, ...]:
-    """The package as the report states it; optional files are named honestly:
-    they are stored with the check but enter the indicators only from S4-04 on."""
+_FILE_USE = {
+    FileKind.PAYMENTS: "давность платежа",
+    FileKind.DEBT_HISTORY: "динамика долга за месяц",
+    FileKind.INTERACTIONS: "лист «Хронология»",
+}
+
+
+def _package_lines(run: AnalysisRun, package: ImportedPackage) -> tuple[str, ...]:
+    """The package as the report states it: every file with the same label as on
+    «Качество данных», how many usable rows it gave and what it was used for (S4-04)."""
+    rows, issues = package.rows, package.issues
     bad_rows = {
         issue.row
         for issue in issues
         if issue.severity is IssueSeverity.ERROR and issue.row is not None
     }
-    lines = [f"Контрагенты: {len(rows) + len(bad_rows)} строк, пригодных {len(rows)}"]
-    for file in run.files:
+    counts = {
+        FileKind.PAYMENTS: len(package.payments),
+        FileKind.DEBT_HISTORY: len(package.history),
+        FileKind.INTERACTIONS: len(package.interactions),
+    }
+    lines = []
+    for file, (_, label) in zip(run.files, file_labels(run.files), strict=True):
         if file.kind is FileKind.COUNTERPARTIES:
-            continue
-        label = _EXTRA_FILE_LABELS.get(file.kind, file.kind.value)
-        period = ""
-        if file.coverage is not None:
-            start, end = file.coverage.start, file.coverage.end
-            period = f" за {start.strftime('%d.%m.%Y')}–{end.strftime('%d.%m.%Y')}"
-        lines.append(f"{label}{period}: загружен, в показатели пока не входит")
+            lines.append(f"{label}: {len(rows) + len(bad_rows)} строк, пригодных {len(rows)}")
+        else:
+            use = _FILE_USE.get(file.kind, "не используется")
+            usable = counts.get(file.kind, 0)
+            lines.append(f"{label}: использован — {use}; пригодных строк этого вида: {usable}")
     return tuple(lines)
 
 
