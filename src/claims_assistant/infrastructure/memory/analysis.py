@@ -12,6 +12,7 @@ from claims_assistant.application.analysis_repository import (
     RunLocked,
     RunNotFound,
 )
+from claims_assistant.application.retention import EXPIRABLE_STATUSES
 from claims_assistant.domain.analysis import AnalysisRun, RunStatus, UploadedFile, can_transition
 from claims_assistant.domain.external import DataMode
 from claims_assistant.domain.steps import DeliveryStatus, ReportArtifact, StepResult
@@ -161,3 +162,27 @@ class InMemoryAnalysisRepository:
         updated = replace(report, delivery=status, delivered_at=delivered_at, delivery_error=error)
         self._reports[run_id] = updated
         return updated
+
+    # --- MaintenanceStore (S6-02) ---
+
+    async def list_expired(self, before: datetime) -> tuple[AnalysisRun, ...]:
+        expired = [
+            run
+            for run in self._runs.values()
+            if run.status in EXPIRABLE_STATUSES and run.updated_at < before
+        ]
+        return tuple(sorted(expired, key=lambda run: (run.updated_at, self._sequence[run.id])))
+
+    async def is_expired(self, run_id: str, before: datetime) -> bool:
+        run = self._runs.get(run_id)
+        return run is not None and run.status in EXPIRABLE_STATUSES and run.updated_at < before
+
+    async def delete_run(self, run_id: str, before: datetime) -> bool:
+        if not await self.is_expired(run_id, before):
+            return False
+        self._runs.pop(run_id, None)
+        self._sequence.pop(run_id, None)
+        self._reports.pop(run_id, None)
+        for key in [key for key in self._steps if key[0] == run_id]:
+            del self._steps[key]
+        return True

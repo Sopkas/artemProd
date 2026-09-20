@@ -39,6 +39,14 @@ class Settings:
     external: ExternalLimits = ExternalLimits()
     # Calendar date for «Сегодня» and other business dates; Moscow (UTC+3) by default.
     business_utc_offset_hours: int = 3
+    # Retention (S6-02): finished and never-launched checks older than this are deleted
+    # with their files; the sweep runs at start and then every interval.
+    retention_days: int = 30
+    retention_sweep_seconds: float = 6 * 3600
+    # Backups (S6-02): where `python -m claims_assistant.ops backup` puts snapshots and
+    # how many newest snapshots it keeps.
+    backup_path: Path = Path("data/backups")
+    backup_keep: int = 7
 
     data_provider: str = "demo"
     checko_api_key: str = field(default="", repr=False)
@@ -117,6 +125,12 @@ class Settings:
             storage_path=storage_path,
             external=external,
             business_utc_offset_hours=offset,
+            retention_days=_number(values, "RETENTION_DAYS", 30, integer=True, minimum=1),
+            retention_sweep_seconds=_number(
+                values, "RETENTION_SWEEP_SECONDS", 6 * 3600.0, minimum=60
+            ),
+            backup_path=_path_setting(values, "BACKUP_PATH", "data/backups", "каталогу копий"),
+            backup_keep=_number(values, "BACKUP_KEEP", 7, integer=True, minimum=1),
         )
 
 
