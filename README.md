@@ -172,6 +172,7 @@ flowchart TD
 - [Входные данные и отчёт](docs/data-contracts.md).
 - [Правила приоритизации](docs/scoring.md).
 - [Контекст и инструкция для ИИ (v1, на согласование)](docs/ai-context.md).
+- [Оценочные сценарии для ИИ](docs/ai-evals.md).
 - [Интеграции и подтверждённые возможности Checko](docs/integrations.md).
 - [Roadmap для двух разработчиков: спринты, задачи, оценки и критерии приёмки](docs/roadmap.md).
 - [Контракт провайдера и запуск демосценариев S1-04](docs/company-data-provider.md).
