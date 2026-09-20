@@ -1,12 +1,18 @@
 """S3-04: Checko EFRSB (bankruptcy messages) section — paginated and source-linked.
 
-ASSUMED SCHEMA (pending a real sample; kept in this one module so reconciling with the
-live API is a local change). Request: ``POST /v2/bankruptcy-messages`` with
-``{"key", "inn", "page"}``. Response envelope — only the pagination fields are confirmed:
+CONFIRMED against the live API on 20.09.2026 (free tariff). Request:
+``POST /v2/bankruptcy-messages`` with ``{"key", "inn", "page"}``. Response:
 
-    {"meta": {"status": "ok"},
+    {"meta": {"status": "ok", "today_request_count": int, "balance": float},
+     "company": {...},
      "data": {"ЗапВсего": int, "СтрВсего": int, "СтрТекущ": int,
-              "Записи": [{"Дата": "YYYY-MM-DD", "Тип": str, "Номер": str}, ...]}}
+              "Записи": [{"GUID": str, "URL": str, "Дата": "YYYY-MM-DD",
+                          "Тип": str, "ТипНаим": str, "НомерДела": str,
+                          "Суд": str, "РешенСуда": str}, ...]}}
+
+``Тип`` is the source's machine code (``ArbitralDecree``…), ``ТипНаим`` its Russian name;
+the record is identified by ``GUID`` and ``URL`` points at its Fedresurs page. The earlier
+assumption of a ``Номер`` field was wrong and is kept only as a fallback.
 
 Event *types* are not classified here: scoring.md treats an unverified type as "requires
 manual review", so we surface every message as a dated ``BANKRUPTCY_EVENT`` fact linked to
@@ -30,7 +36,12 @@ from claims_assistant.domain.external import (
     FetchStatus,
     Section,
 )
-from claims_assistant.infrastructure.checko.errors import ApiRejected, InvalidResponse
+from claims_assistant.infrastructure.checko.errors import (
+    ApiRejected,
+    InvalidResponse,
+    NotFound,
+    is_not_found,
+)
 
 __all__ = ["read_page", "project_bankruptcy", "AiohttpBankruptcyTransport", "BankruptcyTransport"]
 
@@ -81,6 +92,29 @@ def _iso_date(value: object) -> date | None:
         return None
 
 
+def _text(value: object, limit: int = 500) -> str | None:
+    return value.strip()[:limit] if isinstance(value, str) and value.strip() else None
+
+
+def _url(value: object) -> str | None:
+    """Only the source's own https link is kept; anything else is dropped silently."""
+    text = _text(value, 1000)
+    return text if text and text.startswith("https://") else None
+
+
+def _label(record: dict) -> str:
+    """What the user reads: the Russian name of the type, with the case number if given.
+
+    The machine code (``Тип``) is not shown and is not classified here — scoring.md wants
+    every message reviewed until the dictionary of types is agreed with the specialist.
+    """
+    if not isinstance(record, dict):
+        return "Сообщение ЕФРСБ"
+    label = _text(record.get("ТипНаим")) or _text(record.get("Тип")) or "Сообщение ЕФРСБ"
+    case = _text(record.get("НомерДела"), 100)
+    return f"{label}, дело {case}"[:500] if case else label[:500]
+
+
 def read_page(payload: object, inn: str) -> tuple[list[dict], int, int]:
     """Validate one page envelope; return (records, total_pages, current_page)."""
     if not isinstance(payload, dict) or not isinstance(payload.get("meta"), dict):
@@ -93,6 +127,8 @@ def read_page(payload: object, inn: str) -> tuple[list[dict], int, int]:
     data = payload.get("data")
     if not isinstance(data, dict):
         raise InvalidResponse()
+    if not data and is_not_found(payload["meta"]):
+        raise NotFound()
     records = data.get("Записи")
     total_pages = data.get("СтрВсего")
     current_page = data.get("СтрТекущ")
@@ -126,11 +162,15 @@ def project_bankruptcy(
         if observed_on is None:
             unreadable += 1
             continue
-        kind = record.get("Тип") if isinstance(record, dict) else None
-        label = kind.strip() if isinstance(kind, str) and kind.strip() else "Сообщение ЕФРСБ"
-        number = record.get("Номер") if isinstance(record, dict) else None
-        record_id = number.strip() if isinstance(number, str) and number.strip() else None
-        item = Evidence(f"efrsb-{index}", SOURCE, record_id or f"{inn}:{index}")
+        label = _label(record)
+        # The source's own identifier of the message, and the page a person can open.
+        record_id = _text(record.get("GUID")) or _text(record.get("Номер"))
+        item = Evidence(
+            f"efrsb-{index}",
+            SOURCE,
+            record_id or f"{inn}:{index}",
+            url=_url(record.get("URL")),
+        )
         evidence.append(item)
         facts.append(
             Fact(
