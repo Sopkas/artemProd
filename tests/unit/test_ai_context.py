@@ -74,7 +74,8 @@ def talk(day, text, interaction_id="INT-1", inn=INN, channel="телефон"):
     )
 
 
-def context_for(line=None, interactions=(), indicators=None, snaps=None, limits=None):
+def context_for(line=None, interactions=(), indicators=None, snaps=None, limits=None, ref=None):
+    """Comments are off by default in the contract; most tests here are about them."""
     line = line or row()
     snaps = snapshots() if snaps is None else snaps
     assessment = assess(line.inn, snaps, line, indicators=indicators, analysis_date=DAY)
@@ -85,7 +86,8 @@ def context_for(line=None, interactions=(), indicators=None, snaps=None, limits=
         indicators=indicators,
         interactions=interactions,
         snapshots=snaps,
-        limits=limits or ContextLimits(),
+        limits=limits or ContextLimits(include_comments=True),
+        reference=ref,
     )
 
 
@@ -104,7 +106,31 @@ def test_only_this_counterparty_is_in_the_context():
     assert [c.interaction_id for c in context.comments] == ["INT-1"]
     body = json.dumps(context.as_dict(), ensure_ascii=False)
     assert OTHER not in body and SECRET not in body
-    assert INN in body
+    assert "Наш разговор" in body
+
+
+def test_the_inn_is_not_sent_unless_the_caller_asks():
+    plain = context_for()
+    assert plain.inn == INN  # kept for the checks
+    assert "inn" not in plain.as_dict() and "counterparty_ref" not in plain.as_dict()
+    assert INN not in json.dumps(plain.as_dict(), ensure_ascii=False)
+    referenced = context_for(ref="row-3")
+    assert referenced.as_dict()["counterparty_ref"] == "row-3"
+    assert INN not in json.dumps(referenced.as_dict(), ensure_ascii=False)
+    asked = context_for(limits=ContextLimits(include_inn=True))
+    assert asked.as_dict()["inn"] == INN
+    with pytest.raises(ValueError):  # a reference that would leak the INN anyway
+        context_for(ref=f"run-1/{INN}")
+
+
+def test_comments_are_left_out_until_the_caller_asks_for_them():
+    context = build_context(
+        row(),
+        assess(INN, snapshots(), row(), analysis_date=DAY),
+        DAY,
+        interactions=[talk(DAY, SECRET)],
+    )
+    assert context.comments == () and context.comments_omitted == 1
 
 
 @pytest.mark.parametrize(
@@ -149,7 +175,7 @@ def test_older_comments_are_counted_not_sent_and_long_ones_are_cut():
         talk(DAY - timedelta(days=n), f"Разговор {n}", f"INT-{n}") for n in range(5, 0, -1)
     ]
     interactions.append(talk(DAY, "Я" * 50, "INT-0"))
-    limits = ContextLimits(max_comments=3, max_comment_chars=10)
+    limits = ContextLimits(max_comments=3, max_comment_chars=10, include_comments=True)
     context = context_for(interactions=interactions, limits=limits)
     assert context.comments_omitted == 3
     assert [c.interaction_id for c in context.comments] == ["INT-2", "INT-1", "INT-0"]
@@ -159,7 +185,7 @@ def test_older_comments_are_counted_not_sent_and_long_ones_are_cut():
 
 def test_comments_can_be_turned_off_without_hiding_that_they_exist():
     interactions = [talk(DAY, SECRET, "INT-3")]
-    limits = ContextLimits(include_comments=False)
+    limits = ContextLimits(include_comments=False, max_comments=5)
     context = context_for(interactions=interactions, limits=limits)
     assert context.comments == () and context.comments_omitted == 1
     assert SECRET not in json.dumps(context.as_dict(), ensure_ascii=False)

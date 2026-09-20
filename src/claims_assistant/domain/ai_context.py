@@ -158,7 +158,7 @@ class CommentLine:
 
 @dataclass(frozen=True, slots=True)
 class RecommendationContext:
-    inn: str
+    inn: str  # never sent unless ``include_inn``; it is here to keep foreign data out
     analysis_date: date
     priority: str
     next_step: str
@@ -170,16 +170,27 @@ class RecommendationContext:
     comments: tuple[CommentLine, ...] = ()
     missing_data: tuple[str, ...] = ()
     comments_omitted: int = 0  # older comments left out by the limit
+    reference: str | None = None  # opaque id of this counterparty in the request
+    sends_inn: bool = False
     context_version: str = CONTEXT_VERSION
     instruction_version: str = INSTRUCTION_VERSION
 
     def as_dict(self) -> dict[str, Any]:
-        """JSON-ready request body: plain types, ISO dates, no objects of ours."""
+        """JSON-ready request body: plain types, ISO dates, no objects of ours.
+
+        The counterparty is named by ``inn`` only when the caller asked for it; otherwise
+        by the opaque ``reference``, or by nothing at all when there is none.
+        """
+        who: dict[str, Any] = {}
+        if self.sends_inn:
+            who["inn"] = self.inn
+        elif self.reference is not None:
+            who["counterparty_ref"] = self.reference
         return {
             "context_version": self.context_version,
             "instruction_version": self.instruction_version,
             "rules_version": self.rules_version,
-            "inn": self.inn,
+            **who,
             "analysis_date": self.analysis_date.isoformat(),
             "priority": self.priority,
             "next_step": self.next_step,
@@ -253,9 +264,16 @@ def _comment_dict(comment: CommentLine) -> dict[str, Any]:
 class ContextLimits:
     max_comments: int = MAX_COMMENTS
     max_comment_chars: int = MAX_COMMENT_CHARS
-    # Sending the customer's own texts outside needs their consent; without it the
-    # explanation rests on facts and indicators only, and the count still shows they exist.
-    include_comments: bool = True
+    # Both default to off: what leaves the service is the caller's explicit decision
+    # (S5-01/S5-03), not a forgotten default.
+    #
+    # ``include_comments``: the customer's own texts need their consent; without it the
+    # explanation rests on facts and indicators, and the count still shows they exist.
+    # ``include_inn``: the model does not need it to explain anything, while for an
+    # outside provider it identifies the debtor. Off, the request carries the opaque
+    # ``reference`` the caller passes instead, and the mapping stays here (S5-02).
+    include_comments: bool = False
+    include_inn: bool = False
 
     def __post_init__(self) -> None:
         if self.max_comments < 0 or self.max_comment_chars < 1:
@@ -408,11 +426,17 @@ def build_context(
     interactions: Sequence[InteractionRow] = (),
     snapshots: Iterable[ExternalSnapshot] = (),
     limits: ContextLimits = ContextLimits(),
+    reference: str | None = None,
 ) -> RecommendationContext:
     """Everything the model may see about this counterparty, and nothing else.
 
+    ``reference`` names the counterparty in the request while the INN stays here: the
+    caller keeps the mapping (S5-02) and may pass a row number or any opaque id — it must
+    not contain the INN itself.
+
     Raises ``ValueError`` if the result, the indicators or a snapshot belong to another
-    INN; interactions of other INNs are dropped, as they come from the shared file.
+    INN, or if the reference would leak it; interactions of other INNs are dropped, as
+    they come from the shared file.
     """
     inn = row.inn
     if assessment.inn != inn:
@@ -422,6 +446,8 @@ def build_context(
     snapshots = tuple(snapshots)
     if any(snapshot.inn != inn for snapshot in snapshots):
         raise ValueError("Snapshot belongs to another INN")
+    if reference is not None and inn in reference:
+        raise ValueError("The reference must not contain the INN")
     comments, omitted = _comments([r for r in interactions if r.inn == inn], limits)
     return RecommendationContext(
         inn=inn,
@@ -446,6 +472,8 @@ def build_context(
         comments=tuple(comments),
         missing_data=assessment.missing_data,
         comments_omitted=omitted,
+        reference=reference,
+        sends_inn=limits.include_inn,
     )
 
 
