@@ -213,3 +213,37 @@ def test_business_timezone_defaults_to_moscow_and_accepts_override(tmp_path, mon
     monkeypatch.setenv("BUSINESS_UTC_OFFSET_HOURS", "x")
     with pytest.raises(ConfigurationError, match="BUSINESS_UTC_OFFSET_HOURS"):
         Settings.load(tmp_path / "missing.env")
+
+
+def test_retention_and_backup_defaults_and_overrides(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    settings = Settings.load(tmp_path / "missing.env")
+    assert (settings.retention_days, settings.retention_sweep_seconds) == (30, 6 * 3600)
+    assert (settings.backup_path, settings.backup_keep) == (Path("data/backups"), 7)
+    monkeypatch.setenv("RETENTION_DAYS", "7")
+    monkeypatch.setenv("RETENTION_SWEEP_SECONDS", "600")
+    monkeypatch.setenv("BACKUP_PATH", "var/backups")
+    monkeypatch.setenv("BACKUP_KEEP", "2")
+    settings = Settings.load(tmp_path / "missing.env")
+    assert (settings.retention_days, settings.retention_sweep_seconds) == (7, 600)
+    assert (settings.backup_path, settings.backup_keep) == (Path("var/backups"), 2)
+
+
+@pytest.mark.parametrize(
+    ("key", "raw"),
+    [
+        ("RETENTION_DAYS", "0"),
+        ("RETENTION_DAYS", "1.5"),
+        ("RETENTION_SWEEP_SECONDS", "5"),
+        ("BACKUP_KEEP", "0"),
+    ],
+)
+def test_invalid_retention_settings_are_rejected(tmp_path, monkeypatch, key, raw):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv(key, raw)
+    with pytest.raises(ConfigurationError, match=key):
+        Settings.load(tmp_path / "missing.env")

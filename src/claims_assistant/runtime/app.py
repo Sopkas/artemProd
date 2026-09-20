@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+from datetime import timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
@@ -9,6 +10,7 @@ from aiogram.types import BotCommandScopeAllPrivateChats
 from claims_assistant.application.analysis_pipeline import AnalysisPipeline, RunLimits
 from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.external_guard import GuardedCompanyDataProvider, GuardPolicy
+from claims_assistant.application.retention import RetentionSweeper
 from claims_assistant.application.worker import RunWorker
 from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.cache.memory import TtlSnapshotCache
@@ -114,6 +116,14 @@ async def run(settings: Settings) -> None:
             worker = RunWorker(repository, pipeline, notifier=notifier)
             await worker.recover()
             worker_task = asyncio.create_task(worker.run_forever(), name="run-worker")
+            # Retention (S6-02): expired checks and their files go at start and periodically.
+            sweeper = RetentionSweeper(
+                repository,
+                files,
+                retention=timedelta(days=settings.retention_days),
+                interval=settings.retention_sweep_seconds,
+            )
+            sweeper_task = asyncio.create_task(sweeper.run_forever(), name="retention-sweeper")
             logger.info("bot_started")
             try:
                 await dispatcher.start_polling(
@@ -121,8 +131,10 @@ async def run(settings: Settings) -> None:
                 )
             finally:
                 worker.stop()
+                sweeper.stop()
                 worker_task.cancel()
-                await asyncio.gather(worker_task, return_exceptions=True)
+                sweeper_task.cancel()
+                await asyncio.gather(worker_task, sweeper_task, return_exceptions=True)
         finally:
             repository.close()
     finally:

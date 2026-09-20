@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -210,11 +211,31 @@ async def test_worker_runs_alongside_polling_and_stops_with_it(monkeypatch):
         workers.append((args, kwargs))
         return Worker()
 
+    sweepers = []
+
+    class Sweeper:
+        def __init__(self, *args, **kwargs):
+            sweepers.append((args, kwargs))
+            self.stopped = False
+
+        async def run_forever(self):
+            seen.append("sweeper")
+            while not self.stopped:
+                await asyncio.sleep(0.01)
+
+        def stop(self):
+            self.stopped = True
+
     monkeypatch.setattr(app, "AnalysisPipeline", capture_pipeline)
     monkeypatch.setattr(app, "RunWorker", capture_worker)
+    monkeypatch.setattr(app, "RetentionSweeper", Sweeper)
     await asyncio.wait_for(app.run(Settings(TOKEN, frozenset({42}))), timeout=2)
-    assert seen[:2] == ["worker", "polling"] or seen[:2] == ["polling", "worker"]
+    assert set(seen[:3]) == {"worker", "polling", "sweeper"}
     assert seen[-1] == "stopped"
+    # The retention sweep (S6-02) runs next to the worker with the configured period.
+    assert sweepers[0][0][0] is repository
+    assert sweepers[0][1]["retention"] == timedelta(days=30)
+    assert sweepers[0][1]["interval"] == 6 * 3600
     repository.close.assert_called_once()
     # The pipeline stores steps in the repository, serves the service mode explicitly and
     # takes the run budget from settings; the worker notifies the owner through Telegram.
