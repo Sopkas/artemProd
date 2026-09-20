@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 
 from claims_assistant.application.step_payloads import (
+    ImportedPackage,
     PayloadError,
     dump_import,
     dump_snapshots,
@@ -57,9 +58,9 @@ def test_import_round_trip_keeps_decimals_dates_and_issue_coordinates():
         ImportIssue("empty_cell", IssueSeverity.WARNING, "Контрагенты", "Пусто", row=4, column="C"),
         ImportIssue("sheet_note", IssueSeverity.ERROR, "Контрагенты", "Нет листа", file_id="f1"),
     )
-    restored = load_import(dump_import(rows, issues))
-    assert restored == (rows, issues)
-    assert type(restored[0][0].debt) is Decimal and type(restored[0][0].cutoff_date) is date
+    restored = load_import(dump_import(ImportedPackage(rows, issues)))
+    assert (restored.rows, restored.issues) == (rows, issues)
+    assert type(restored.rows[0].debt) is Decimal and type(restored.rows[0].cutoff_date) is date
 
 
 def test_snapshot_round_trip_keeps_every_value_type_and_the_error():
@@ -132,7 +133,7 @@ def test_unreadable_snapshot_payloads_raise_one_error_type(payload):
 
 def test_payload_is_readable_json_without_escaped_cyrillic():
     rows = (CounterpartyRow(inn=INN, name="Ромашка"),)
-    assert "Ромашка" in dump_import(rows, ())
+    assert "Ромашка" in dump_import(ImportedPackage(rows, ()))
 
 
 @pytest.mark.parametrize(
@@ -149,7 +150,7 @@ def test_payload_is_readable_json_without_escaped_cyrillic():
 def test_import_payload_with_a_wrong_field_type_is_rejected(field, value):
     import json
 
-    payload = json.loads(dump_import((CounterpartyRow(inn=INN),), ()))
+    payload = json.loads(dump_import(ImportedPackage((CounterpartyRow(inn=INN),), ())))
     payload["rows"][0][field] = value
     with pytest.raises(PayloadError):
         load_import(json.dumps(payload))
@@ -160,7 +161,60 @@ def test_import_issue_with_a_wrong_field_type_is_rejected(field, value):
     import json
 
     issue = ImportIssue("empty_cell", IssueSeverity.WARNING, "Контрагенты", "Пусто", row=4)
-    payload = json.loads(dump_import((), (issue,)))
+    payload = json.loads(dump_import(ImportedPackage((), (issue,))))
     payload["issues"][0][field] = value
+    with pytest.raises(PayloadError):
+        load_import(json.dumps(payload))
+
+
+def test_whole_package_round_trips_with_exact_types():
+    """S4-04: the import step keeps every file, so a resumed run re-reads nothing."""
+    from claims_assistant.domain.debt_history import DebtSnapshot
+    from claims_assistant.domain.interactions import InteractionRow
+    from claims_assistant.domain.payments import PaymentRow
+
+    package = ImportedPackage(
+        rows=(CounterpartyRow(inn=INN, debt=Decimal("10.00"), cutoff_date=date(2026, 9, 1)),),
+        issues=(),
+        payments=(PaymentRow(INN, "P-1", date(2026, 7, 15), Decimal("100.50")),),
+        history=(DebtSnapshot(INN, date(2026, 8, 1), Decimal("0.00")),),
+        interactions=(
+            InteractionRow(INN, "I-1", date(2026, 8, 20), "Обещали оплатить.", "телефон"),
+            InteractionRow(INN, "I-2", date(2026, 8, 21), "Без ответа.", None),
+        ),
+    )
+    restored = load_import(dump_import(package))
+    assert restored == package
+    assert type(restored.payments[0].amount) is Decimal
+    assert type(restored.history[0].debt) is Decimal
+
+
+@pytest.mark.parametrize(
+    "section, field, value",
+    [
+        ("payments", "amount", 100.5),
+        ("payments", "paid_on", "15.07.2026"),
+        ("payments", "payment_id", 1),
+        ("history", "debt", "abc"),
+        ("interactions", "comment", None),
+        ("interactions", "channel", 5),
+    ],
+)
+def test_optional_file_rows_with_wrong_types_are_rejected(section, field, value):
+    import json
+
+    from claims_assistant.domain.debt_history import DebtSnapshot
+    from claims_assistant.domain.interactions import InteractionRow
+    from claims_assistant.domain.payments import PaymentRow
+
+    package = ImportedPackage(
+        rows=(),
+        issues=(),
+        payments=(PaymentRow(INN, "P-1", date(2026, 7, 15), Decimal("1.00")),),
+        history=(DebtSnapshot(INN, date(2026, 8, 1), Decimal("1.00")),),
+        interactions=(InteractionRow(INN, "I-1", date(2026, 8, 20), "Текст.", None),),
+    )
+    payload = json.loads(dump_import(package))
+    payload[section][0][field] = value
     with pytest.raises(PayloadError):
         load_import(json.dumps(payload))

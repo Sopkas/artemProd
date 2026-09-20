@@ -26,7 +26,7 @@ from claims_assistant.domain.external import (
     Fact,
     FactKind,
 )
-from claims_assistant.domain.imports import IssueSeverity
+from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.report import DEMO_SCORE_NOTE, AnalysisReport, ReportRow
 from claims_assistant.domain.scoring import (
     INTERNAL_DEBT,
@@ -36,7 +36,7 @@ from claims_assistant.domain.scoring import (
     report_order_key,
 )
 
-SHEETS = ("Приоритеты", "Основания", "Качество данных", "О проверке")
+SHEETS = ("Приоритеты", "Основания", "Качество данных", "О проверке", "Хронология")
 _MAX_CELL = 32_767  # Excel's limit for one cell
 
 PRIORITY_LABELS = {
@@ -274,8 +274,17 @@ def _grounds(report: AnalysisReport) -> list[tuple[object, ...]]:
 
 def _quality(report: AnalysisReport) -> list[tuple[object, ...]]:
     rows: list[tuple[object, ...]] = []
-    for issue in sorted(report.import_issues, key=lambda i: (i.row or 0, i.column or "")):
+    labels = dict(report.meta.files)
+    # Package-level issues first, then file by file in upload order, then by cell.
+    order = {file_id: index for index, (file_id, _) in enumerate(report.meta.files)}
+
+    def key(issue: ImportIssue) -> tuple[int, int, str]:
+        return order.get(issue.file_id, -1), issue.row or 0, issue.column or ""
+
+    for issue in sorted(report.import_issues, key=key):
         where = [f"лист «{issue.sheet}»"]
+        if issue.file_id in labels:
+            where.insert(0, f"файл «{labels[issue.file_id]}»")
         if issue.row is not None:
             where.append(f"строка {issue.row}")
         if issue.column is not None:
@@ -288,6 +297,24 @@ def _quality(report: AnalysisReport) -> list[tuple[object, ...]]:
             if reason != DEMO_SCORE_NOTE:
                 rows.append(("Пропуск или ограничение данных", row.counterparty.inn, None, reason))
     return rows or [("Замечаний нет", None, None, None)]
+
+
+def _chronology(report: AnalysisReport) -> list[tuple[object, ...]]:
+    """«Взаимодействия» per company in report order, then by date (S4-04); no AI reading."""
+    names = {row.counterparty.inn: _company_name(row) for row in _ordered(report)}
+    order = {inn: index for index, inn in enumerate(names)}
+    items = sorted(report.interactions, key=lambda i: (order[i.inn], i.happened_on))
+    return [
+        (
+            item.inn,
+            names[item.inn],
+            _day(item.happened_on),
+            item.interaction_id,
+            item.channel,
+            item.comment,
+        )
+        for item in items
+    ] or [(None, None, None, None, None, "Файл «Взаимодействия» в пакет не загружен.")]
 
 
 def _about(report: AnalysisReport) -> list[tuple[object, ...]]:
@@ -329,7 +356,7 @@ def _about(report: AnalysisReport) -> list[tuple[object, ...]]:
 
 
 def build_report(report: AnalysisReport) -> bytes:
-    """Return the .xlsx bytes of the four-sheet report."""
+    """Return the .xlsx bytes of the five-sheet report."""
     workbook = Workbook()
     priorities = workbook.active
     priorities.title = SHEETS[0]
@@ -378,11 +405,19 @@ def build_report(report: AnalysisReport) -> bytes:
         _about(report),
         (26, 80),
     )
+    _table(
+        workbook.create_sheet(SHEETS[4]),
+        _title(report, SHEETS[4]),
+        ("ИНН", "Название", "Дата", "ID взаимодействия", "Канал", "Комментарий"),
+        _chronology(report),
+        (14, 34, 12, 20, 14, 80),
+    )
     # INN columns stay textual so leading digits are shown as written.
     for sheet, column in (
         (priorities, "A"),
         (workbook[SHEETS[1]], "B"),
         (workbook[SHEETS[2]], "B"),
+        (workbook[SHEETS[4]], "A"),
     ):
         for cell in sheet[column][2:]:
             cell.number_format = "@"

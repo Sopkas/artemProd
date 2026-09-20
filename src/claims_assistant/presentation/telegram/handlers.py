@@ -25,6 +25,7 @@ from claims_assistant.application.check_package import (
 )
 from claims_assistant.application.company_data import CompanyDataProvider
 from claims_assistant.application.imports import SheetReader
+from claims_assistant.application.internal_context import internal_context
 from claims_assistant.application.package_checks import (
     PACKAGE_SHEET,
     PackageIntegrityError,
@@ -36,7 +37,7 @@ from claims_assistant.application.report_delivery import (
     fetch_report,
 )
 from claims_assistant.domain.analysis import FileKind
-from claims_assistant.domain.external import DataMode, Period
+from claims_assistant.domain.external import DataMode, Period, Section
 from claims_assistant.domain.inn import InvalidInn
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
@@ -358,7 +359,17 @@ def create_dispatcher(
             await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
             return
         await state.clear()
-        await message.answer(format_card(check), reply_markup=main_menu())
+        # S4-04: the owner's own files on this company, if a finished check names it.
+        internal = None
+        try:
+            finances = next((s for s in check.snapshots if s.section is Section.FINANCES), None)
+            internal = await internal_context(
+                message.from_user.id, check.inn, repository, files, reader, finances=finances
+            )
+        except Exception as exc:
+            # The card is still useful without the internal block; log the type only.
+            logger.error("internal_context_failed error_type=%s", type(exc).__name__)
+        await message.answer(format_card(check, internal), reply_markup=main_menu())
 
     # --- new check: date → file → launch ---
 
