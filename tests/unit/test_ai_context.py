@@ -123,6 +123,33 @@ def test_the_inn_is_not_sent_unless_the_caller_asks():
         context_for(ref=f"run-1/{INN}")
 
 
+def test_the_inn_never_rides_along_inside_an_identifier():
+    """Some providers build fact ids from the INN; with the INN kept back, the id is
+    masked with the same reference, so the caller can map an answer's ground back."""
+    snaps = snapshots()
+    context = context_for(ref="row-7")
+    body = json.dumps(context.as_dict(), ensure_ascii=False)
+    assert INN not in body
+    for line in context.values + context.facts:
+        assert INN not in line.id
+    for signal in context.signals:
+        assert all(INN not in fact_id for fact_id in signal.fact_ids)
+    # With the INN sent on purpose the ids stay exactly as the sources built them.
+    kept = context_for(limits=ContextLimits(include_inn=True, include_comments=True))
+    assert {line.id for line in kept.facts} == {f.id for f in snaps[0].facts} | {
+        f.id for f in snaps[1].facts
+    } | {f.id for f in snaps[2].facts}
+
+
+def test_record_ids_of_the_sources_can_be_dropped():
+    """ОГРН identifies the company like the INN; a customer may refuse to send it."""
+    with_ids = context_for()
+    assert any(fact.record_id for fact in with_ids.facts)
+    without = context_for(limits=ContextLimits(include_record_ids=False, include_comments=True))
+    assert all(fact.record_id is None for fact in without.facts)
+    assert all("record_id" not in fact for fact in without.as_dict()["facts"])
+
+
 def test_comments_are_left_out_until_the_caller_asks_for_them():
     context = build_context(
         row(),
