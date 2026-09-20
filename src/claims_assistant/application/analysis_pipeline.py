@@ -33,6 +33,7 @@ from claims_assistant.domain.report import AnalysisReport, ReportMeta, ReportRow
 from claims_assistant.domain.scoring import RULES_VERSION, Assessment, Priority, assess
 from claims_assistant.domain.steps import RUN_SCOPE, StepResult, StepStatus
 
+from .ai_guard import AiBudget, AiRunLimits, ScopedExplainerFactory
 from .analysis_queue import RunOutcome
 from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
@@ -105,6 +106,9 @@ class RunSummary:
     row_errors: int
     priorities: Mapping[Priority, int]
     budget_exhausted: bool
+    # S5-03: companies left without an accepted AI explanation while a provider was
+    # configured (model unavailable, answer rejected, AI budget exhausted).
+    explanations_missing: int = 0
 
     def to_payload(self) -> str:
         return json.dumps(
@@ -115,6 +119,7 @@ class RunSummary:
                 "row_errors": self.row_errors,
                 "priorities": {key.value: value for key, value in self.priorities.items()},
                 "budget_exhausted": self.budget_exhausted,
+                "explanations_missing": self.explanations_missing,
             }
         )
 
@@ -129,6 +134,7 @@ class RunSummary:
                 row_errors=int(data["row_errors"]),
                 priorities={Priority(key): int(value) for key, value in data["priorities"].items()},
                 budget_exhausted=bool(data["budget_exhausted"]),
+                explanations_missing=int(data.get("explanations_missing", 0)),
             )
         except (ValueError, KeyError, TypeError) as exc:
             raise PayloadError("summary payload is not readable") from exc
@@ -141,6 +147,11 @@ class RunSummary:
             reasons.append("Лимит времени или запросов проверки исчерпан.")
         if self.unchecked:
             reasons.append(f"Организаций с неполными внешними данными: {self.unchecked}.")
+        if self.explanations_missing:
+            reasons.append(
+                f"Пояснений ИИ нет у {self.explanations_missing} организаций; "
+                "в отчёте — рекомендация по правилам."
+            )
         if reasons:
             return RunOutcome(RunStatus.PARTIAL, " ".join(reasons))
         return RunOutcome(RunStatus.COMPLETED)
@@ -177,8 +188,9 @@ class AnalysisPipeline:
         limits: RunLimits = RunLimits(),
         sections: tuple[Section, ...] = tuple(Section),
         clock: Callable[[], datetime] = _now,
-        explainer: RecommendationProvider | None = None,
+        explainer: RecommendationProvider | ScopedExplainerFactory | None = None,
         ai_limits: AiLimits = AiLimits(),
+        ai_run_limits: AiRunLimits = AiRunLimits(),
         ai_send_comments: bool = False,
     ) -> None:
         self._files = files
@@ -194,6 +206,7 @@ class AnalysisPipeline:
         # answer is stored by version; without one the report keeps the rules' next step.
         self._explainer = explainer
         self._ai_limits = ai_limits
+        self._ai_run_limits = ai_run_limits
         self._ai_send_comments = ai_send_comments
 
     async def process(self, run: AnalysisRun) -> RunOutcome:
@@ -364,7 +377,7 @@ class AnalysisPipeline:
                 await asyncio.to_thread(self._files.remove, previous.stored_path)
             except StorageError:
                 logger.warning("report_orphan run_id=%s", run.id)
-        summary = _summarize(report_rows, issues)
+        summary = _summarize(report_rows, issues, explainer=self._explainer is not None)
         await self._save(run, RUN_SCOPE, REPORT_STEP, REPORT_VERSION, payload=summary.to_payload())
         return summary
 
@@ -394,6 +407,11 @@ class AnalysisPipeline:
         accepted: dict[str, Explanation] = {}
         if self._explainer is None:
             return accepted
+        # S5-03: a guarded provider gets one budget for the whole run; once it is spent
+        # the remaining companies get no explanation and the check still finishes.
+        explainer = self._explainer
+        if hasattr(explainer, "scoped"):
+            explainer = explainer.scoped(AiBudget.for_run(self._ai_run_limits, self._clock()))
         limits = ContextLimits(include_comments=self._ai_send_comments)
         for index, row in enumerate(rows, start=1):
             context = build_context(
@@ -408,7 +426,7 @@ class AnalysisPipeline:
             )
             stored = await self._stored_explanation(run, row.inn, context)
             if stored is None:
-                outcome = await request_explanation(self._explainer, context, self._ai_limits)
+                outcome = await request_explanation(explainer, context, self._ai_limits)
                 stored = StoredExplanation.from_outcome(outcome, f"row-{index}")
                 if stored.final:
                     await self._save(
@@ -504,7 +522,9 @@ def _package_lines(run: AnalysisRun, package: ImportedPackage) -> tuple[str, ...
     return tuple(lines)
 
 
-def _summarize(rows: tuple[ReportRow, ...], issues: tuple[ImportIssue, ...]) -> RunSummary:
+def _summarize(
+    rows: tuple[ReportRow, ...], issues: tuple[ImportIssue, ...], *, explainer: bool = False
+) -> RunSummary:
     priorities = {priority: 0 for priority in Priority}
     checked = 0
     budget_exhausted = False
@@ -521,4 +541,7 @@ def _summarize(rows: tuple[ReportRow, ...], issues: tuple[ImportIssue, ...]) -> 
         row_errors=sum(1 for issue in issues if issue.severity is IssueSeverity.ERROR),
         priorities=priorities,
         budget_exhausted=budget_exhausted,
+        explanations_missing=(
+            sum(1 for row in rows if row.explanation is None) if explainer else 0
+        ),
     )

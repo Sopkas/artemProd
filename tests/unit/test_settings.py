@@ -272,4 +272,47 @@ def test_recommendation_provider_factory_follows_the_setting():
 
     assert build_recommendation_provider(Settings(TOKEN, frozenset({42}))) is None
     built = build_recommendation_provider(Settings(TOKEN, frozenset({42}), ai_provider="stub"))
-    assert isinstance(built, StubRecommendationProvider)
+    assert isinstance(built.inner, StubRecommendationProvider)  # behind the S5-03 guard
+    assert built.name == "stub" and built.policy.max_retries == 1
+
+
+def test_ai_limits_defaults_and_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    ai = Settings.load(tmp_path / "missing.env").ai
+    assert (ai.timeout_seconds, ai.max_retries, ai.max_output_tokens) == (30.0, 1, 1000)
+    assert (ai.max_request_chars, ai.run_request_limit) == (24_000, 100)
+    assert (ai.run_token_limit, ai.run_time_limit_seconds) == (400_000, 600.0)
+    for key, raw in {
+        "AI_TIMEOUT_SECONDS": "5",
+        "AI_MAX_RETRIES": "0",
+        "AI_MAX_REQUEST_CHARS": "1000",
+        "AI_MAX_OUTPUT_TOKENS": "200",
+        "AI_RUN_REQUEST_LIMIT": "3",
+        "AI_RUN_TOKEN_LIMIT": "5000",
+        "AI_RUN_TIME_LIMIT_SECONDS": "60",
+    }.items():
+        monkeypatch.setenv(key, raw)
+    ai = Settings.load(tmp_path / "missing.env").ai
+    assert (ai.timeout_seconds, ai.max_retries, ai.max_request_chars) == (5.0, 0, 1000)
+    assert (ai.max_output_tokens, ai.run_request_limit) == (200, 3)
+    assert (ai.run_token_limit, ai.run_time_limit_seconds) == (5000, 60.0)
+
+
+@pytest.mark.parametrize(
+    ("key", "raw"),
+    [("AI_TIMEOUT_SECONDS", "0"), ("AI_MAX_RETRIES", "-1"), ("AI_RUN_TOKEN_LIMIT", "0")],
+)
+def test_invalid_ai_limits_are_rejected(tmp_path, monkeypatch, key, raw):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv(key, raw)
+    with pytest.raises(ConfigurationError, match=key):
+        Settings.load(tmp_path / "missing.env")
+
+
+def test_run_limits_come_from_the_settings():
+    from claims_assistant.runtime.ai import run_limits
+
+    limits = run_limits(Settings(TOKEN, frozenset({42})))
+    assert (limits.max_requests, limits.max_tokens, limits.max_seconds) == (100, 400_000, 600.0)

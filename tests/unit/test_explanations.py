@@ -246,7 +246,8 @@ async def test_rejected_answers_are_stored_unavailable_ones_are_not(tmp_path):
     outcome = await pipeline(
         files2, repository2, guard(DemoCompanyDataProvider()), explainer=down
     ).process(run2)
-    assert outcome.status == RunStatus.COMPLETED  # the report is built without explanations
+    # The report is still built; the missing explanations make the check partial (S5-03).
+    assert outcome.status == RunStatus.PARTIAL and "Пояснений ИИ нет у 2" in outcome.failure
     assert explanation_steps(await repository2.list_steps(run2.id)) == []
 
 
