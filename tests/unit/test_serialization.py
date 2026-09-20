@@ -9,6 +9,7 @@ import pytest
 
 from claims_assistant.application.company_data import CompanyDataRequest
 from claims_assistant.domain.counterparties import CounterpartyRow
+from claims_assistant.domain.debt_history import DebtSnapshot
 from claims_assistant.domain.external import (
     Coverage,
     DataMode,
@@ -18,6 +19,8 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.interactions import InteractionRow
+from claims_assistant.domain.payments import PaymentRow
 from claims_assistant.domain.scoring import Priority, assess
 from claims_assistant.domain.serialization import (
     SCHEMA,
@@ -26,8 +29,14 @@ from claims_assistant.domain.serialization import (
     assessment_to_dict,
     counterparty_row_from_dict,
     counterparty_row_to_dict,
+    debt_snapshot_from_dict,
+    debt_snapshot_to_dict,
     import_issue_from_dict,
     import_issue_to_dict,
+    interaction_row_from_dict,
+    interaction_row_to_dict,
+    payment_row_from_dict,
+    payment_row_to_dict,
     snapshot_from_dict,
     snapshot_to_dict,
 )
@@ -281,3 +290,72 @@ def test_malformed_issue_is_rejected(field, value):
     data[field] = value
     with pytest.raises(PayloadError):
         import_issue_from_dict(data)
+
+
+# --- optional package files: payments, debt history, interactions ---
+
+INN = "1234567894"
+PAYMENT = PaymentRow(inn=INN, payment_id="P-1", paid_on=date(2026, 8, 1), amount=Decimal("1500.50"))
+SNAPSHOT = DebtSnapshot(inn=INN, cutoff_date=date(2026, 8, 1), debt=Decimal("0"))
+TALK = InteractionRow(
+    inn=INN,
+    interaction_id="INT-1",
+    happened_on=date(2026, 8, 20),
+    comment="Звонок: обещали оплатить.",
+    channel="телефон",
+)
+
+
+@pytest.mark.parametrize(
+    "row,dump,load",
+    [
+        (PAYMENT, payment_row_to_dict, payment_row_from_dict),
+        (SNAPSHOT, debt_snapshot_to_dict, debt_snapshot_from_dict),
+        (TALK, interaction_row_to_dict, interaction_row_from_dict),
+        (
+            InteractionRow(
+                inn=INN,
+                interaction_id="INT-2",
+                happened_on=date(2026, 8, 21),
+                comment="Без канала.",
+            ),
+            interaction_row_to_dict,
+            interaction_row_from_dict,
+        ),
+    ],
+)
+def test_package_rows_round_trip_exactly(row, dump, load):
+    data = json.loads(json.dumps(dump(row)))  # through JSON, as the step store keeps it
+    assert load(data) == row
+
+
+@pytest.mark.parametrize(
+    "row,dump,load,field,value",
+    [
+        (PAYMENT, payment_row_to_dict, payment_row_from_dict, "amount", 1500.5),  # a float
+        (PAYMENT, payment_row_to_dict, payment_row_from_dict, "amount", "не число"),
+        (PAYMENT, payment_row_to_dict, payment_row_from_dict, "amount", "NaN"),
+        (PAYMENT, payment_row_to_dict, payment_row_from_dict, "amount", "-10"),  # not positive
+        (PAYMENT, payment_row_to_dict, payment_row_from_dict, "paid_on", "01.08.2026"),
+        (PAYMENT, payment_row_to_dict, payment_row_from_dict, "payment_id", 1),
+        (PAYMENT, payment_row_to_dict, payment_row_from_dict, "inn", "1234567890"),  # checksum
+        (SNAPSHOT, debt_snapshot_to_dict, debt_snapshot_from_dict, "debt", "-1"),
+        (SNAPSHOT, debt_snapshot_to_dict, debt_snapshot_from_dict, "cutoff_date", None),
+        (TALK, interaction_row_to_dict, interaction_row_from_dict, "comment", "   "),
+        (TALK, interaction_row_to_dict, interaction_row_from_dict, "comment", True),
+        (TALK, interaction_row_to_dict, interaction_row_from_dict, "channel", 5),
+    ],
+)
+def test_malformed_package_row_is_rejected_without_echoing_it(row, dump, load, field, value):
+    data = dump(row)
+    data[field] = value
+    with pytest.raises(PayloadError) as error:
+        load(data)
+    assert str(value) not in str(error.value)
+
+
+def test_a_missing_field_of_a_package_row_is_rejected():
+    data = payment_row_to_dict(PAYMENT)
+    del data["paid_on"]
+    with pytest.raises(PayloadError):
+        payment_row_from_dict(data)
