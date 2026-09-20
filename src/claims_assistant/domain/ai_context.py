@@ -20,7 +20,7 @@ Three rules shape it:
 """
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -274,6 +274,10 @@ class ContextLimits:
     # ``reference`` the caller passes instead, and the mapping stays here (S5-02).
     include_comments: bool = False
     include_inn: bool = False
+    # Record ids of the sources (ОГРН of the company, GUID of an EFRSB message) are the
+    # link to the evidence; ОГРН identifies the company as surely as the INN, so a
+    # customer who wants nothing identifying sent can drop them.
+    include_record_ids: bool = True
 
     def __post_init__(self) -> None:
         if self.max_comments < 0 or self.max_comment_chars < 1:
@@ -364,6 +368,18 @@ def _indicator_values(indicators: InternalIndicators) -> list[ValueLine]:
     return values
 
 
+def _mask(text: str | None, inn: str, reference: str | None) -> str | None:
+    """Identifiers are built from the INN by some providers («<ИНН>:company:status»).
+
+    With the INN kept back, it must not travel inside an id either: every occurrence is
+    replaced by the same reference the request uses, so the caller can map an id in the
+    answer back by replacing it again.
+    """
+    if text is None or inn not in text:
+        return text
+    return text.replace(inn, reference or "ref")
+
+
 def _facts(snapshots: Iterable[ExternalSnapshot]) -> list[FactLine]:
     lines = []
     for snapshot in snapshots:
@@ -449,6 +465,39 @@ def build_context(
     if reference is not None and inn in reference:
         raise ValueError("The reference must not contain the INN")
     comments, omitted = _comments([r for r in interactions if r.inn == inn], limits)
+    values = tuple(_row_values(row, indicators))
+    facts = tuple(_facts(snapshots))
+    signals = tuple(
+        SignalLine(
+            code=signal.code,
+            level=signal.level.value,
+            reason=signal.reason,
+            fact_ids=signal.fact_ids,
+            value=signal.value,
+            observed_on=signal.observed_on,
+        )
+        for signal in assessment.signals
+    )
+    if not limits.include_record_ids:
+        facts = tuple(replace(fact, record_id=None) for fact in facts)
+    if not limits.include_inn:
+        # The INN is kept back, so it must not ride along inside an identifier either.
+        values = tuple(replace(value, id=_mask(value.id, inn, reference)) for value in values)
+        facts = tuple(
+            replace(
+                fact,
+                id=_mask(fact.id, inn, reference),
+                record_id=_mask(fact.record_id, inn, reference),
+            )
+            for fact in facts
+        )
+        signals = tuple(
+            replace(
+                signal,
+                fact_ids=tuple(_mask(fact_id, inn, reference) for fact_id in signal.fact_ids),
+            )
+            for signal in signals
+        )
     return RecommendationContext(
         inn=inn,
         analysis_date=analysis_date,
@@ -456,19 +505,9 @@ def build_context(
         next_step=assessment.next_step,
         base_complete=assessment.base_complete,
         rules_version=assessment.rules_version,
-        values=tuple(_row_values(row, indicators)),
-        facts=tuple(_facts(snapshots)),
-        signals=tuple(
-            SignalLine(
-                code=signal.code,
-                level=signal.level.value,
-                reason=signal.reason,
-                fact_ids=signal.fact_ids,
-                value=signal.value,
-                observed_on=signal.observed_on,
-            )
-            for signal in assessment.signals
-        ),
+        values=values,
+        facts=facts,
+        signals=signals,
         comments=tuple(comments),
         missing_data=assessment.missing_data,
         comments_omitted=omitted,
