@@ -1,0 +1,11 @@
+# Ежедневная копия в 03:30 по времени сервера; при пропуске — сразу после старта.
+[Unit]
+Description=Daily claims assistant backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,38 @@
+# Помощник претензионщика — один экземпляр бота через long polling (S6-01).
+# Установка: deploy/install.sh или docs/deployment.md. Настройки — /etc/claims-assistant/env.
+[Unit]
+Description=Claims assistant Telegram bot (long polling)
+Documentation=file:///opt/claims-assistant/app/docs/deployment.md
+After=network-online.target
+Wants=network-online.target
+# Ровно один экземпляр: два polling-процесса на одном токене мешают друг другу.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=claims
+Group=claims
+WorkingDirectory=/opt/claims-assistant/app
+EnvironmentFile=/etc/claims-assistant/env
+# Настройки читаются из окружения; .env в каталоге приложения не нужен.
+ExecStartPre=/opt/claims-assistant/venv/bin/python -m claims_assistant --check
+ExecStart=/opt/claims-assistant/venv/bin/python -m claims_assistant
+# Автоматический перезапуск при любом падении; ограничение частоты — в [Unit].
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+# Журнал — в journald (stderr), токены и ключи вырезает SafeFormatter приложения.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claims-assistant
+# Изоляция: пишем только в данные и логи, остальное — только чтение.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/claims-assistant
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
