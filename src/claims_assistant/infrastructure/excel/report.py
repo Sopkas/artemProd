@@ -18,7 +18,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font
 from openpyxl.worksheet.worksheet import Worksheet
 
-from claims_assistant.domain.explanation import explain_row
+from claims_assistant.domain.explanation import explain_row, status_note
 from claims_assistant.domain.external import (
     CompanyStatus,
     Coverage,
@@ -311,12 +311,23 @@ def _quality(report: AnalysisReport) -> list[tuple[object, ...]]:
         for reason in row.assessment.missing_data:
             if reason != DEMO_SCORE_NOTE:
                 rows.append(("Пропуск или ограничение данных", row.counterparty.inn, None, reason))
+    # One line per reason with a count: the reason is on each row's «Пояснение» already.
+    missing: dict[str, int] = {}
     for row in _ordered(report):
-        status = row.explanation_status
-        if status is not None and status != "accepted":
-            note = explain_row(row.assessment, None, status).note
-            rows.append(("Пояснение ИИ недоступно", row.counterparty.inn, None, note))
+        note = status_note(row.explanation_status)
+        if note is not None:
+            missing[note] = missing.get(note, 0) + 1
+    for note, count in missing.items():
+        rows.append(("Пояснение ИИ недоступно", None, None, f"{note} — {_companies(count)}"))
     return rows or [("Замечаний нет", None, None, None)]
+
+
+def _companies(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return f"{count} организация"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return f"{count} организации"
+    return f"{count} организаций"
 
 
 def _chronology(report: AnalysisReport) -> list[tuple[object, ...]]:

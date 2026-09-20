@@ -41,7 +41,12 @@ from .external_guard import BUDGET_EXHAUSTED, TRANSIENT_CODES, RunBudget
 from .imports import SheetReader
 from .internal_context import payment_periods
 from .package_checks import PackageIntegrityError, PackageReview, review_package
-from .recommendation import AiLimits, RecommendationProvider, request_explanation
+from .recommendation import (
+    AiLimits,
+    RecommendationProvider,
+    explanation_key,
+    request_explanation,
+)
 from .step_payloads import (
     ImportedPackage,
     PayloadError,
@@ -412,7 +417,7 @@ class AnalysisPipeline:
         # S5-03: a guarded provider gets one budget for the whole run; once it is spent
         # the remaining companies get no explanation and the check still finishes.
         explainer = self._explainer
-        if hasattr(explainer, "scoped"):
+        if isinstance(explainer, ScopedExplainerFactory):
             explainer = explainer.scoped(AiBudget.for_run(self._ai_run_limits, self._clock()))
         limits = ContextLimits(include_comments=self._ai_send_comments)
         for index, row in enumerate(rows, start=1):
@@ -438,12 +443,7 @@ class AnalysisPipeline:
         return outcomes
 
     async def _stored_explanation(self, run, inn: str, context) -> StoredExplanation | None:
-        from claims_assistant.domain.ai_review import ANSWER_SCHEMA_VERSION
-
-        key = (
-            f"{self._explainer.name}:{self._explainer.model}:i{context.instruction_version}"
-            f":c{context.context_version}:s{ANSWER_SCHEMA_VERSION}:r{context.rules_version}"
-        )
+        key = explanation_key(self._explainer, context)
         step = await self._repository.get_step(run.id, inn, EXPLANATION_STEP, key)
         if step is None or step.status is not StepStatus.OK or step.payload is None:
             return None
