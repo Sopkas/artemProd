@@ -22,7 +22,6 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from claims_assistant.domain.ai_context import ContextLimits, build_context, versions
-from claims_assistant.domain.ai_review import Explanation
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import DataMode, ExternalSnapshot, FetchStatus, Section
@@ -341,7 +340,10 @@ class AnalysisPipeline:
                 assessment=assessments[row.inn],
                 snapshots=snapshots[row.inn],
                 indicators=indicators[row.inn],
-                explanation=explanations.get(row.inn),
+                explanation=explanations[row.inn].explanation if row.inn in explanations else None,
+                explanation_status=explanations[row.inn].status
+                if row.inn in explanations
+                else None,
             )
             for row in rows
         )
@@ -396,7 +398,7 @@ class AnalysisPipeline:
         indicators: dict,
         snapshots: dict[str, tuple[ExternalSnapshot, ...]],
         interactions: dict[str, tuple[InteractionRow, ...]],
-    ) -> dict[str, Explanation]:
+    ) -> dict[str, StoredExplanation]:
         """One explanation attempt per company, each answer stored under its versions.
 
         A stored final answer (accepted or rejected) is read back instead of asking
@@ -404,9 +406,9 @@ class AnalysisPipeline:
         model is asked once per version. Unavailable answers are not stored: the next
         run of the pipeline may try again (S5-03 bounds that).
         """
-        accepted: dict[str, Explanation] = {}
+        outcomes: dict[str, StoredExplanation] = {}
         if self._explainer is None:
-            return accepted
+            return outcomes
         # S5-03: a guarded provider gets one budget for the whole run; once it is spent
         # the remaining companies get no explanation and the check still finishes.
         explainer = self._explainer
@@ -432,9 +434,8 @@ class AnalysisPipeline:
                     await self._save(
                         run, row.inn, EXPLANATION_STEP, stored.versions, payload=stored.to_payload()
                     )
-            if stored.explanation is not None:
-                accepted[row.inn] = stored.explanation
-        return accepted
+            outcomes[row.inn] = stored
+        return outcomes
 
     async def _stored_explanation(self, run, inn: str, context) -> StoredExplanation | None:
         from claims_assistant.domain.ai_review import ANSWER_SCHEMA_VERSION

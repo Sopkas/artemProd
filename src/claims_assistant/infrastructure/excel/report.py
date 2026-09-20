@@ -18,6 +18,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font
 from openpyxl.worksheet.worksheet import Worksheet
 
+from claims_assistant.domain.explanation import explain_row
 from claims_assistant.domain.external import (
     CompanyStatus,
     Coverage,
@@ -195,9 +196,23 @@ def _priorities(report: AnalysisReport) -> list[tuple[object, ...]]:
             _coverage_text(row, demo),
             _reasons(row, demo),
             "Рекомендация в демо не формируется." if demo else row.assessment.next_step,
+            *_explanation_cells(row, demo),
         )
         for row in _ordered(report)
     ]
+
+
+def _explanation_cells(row: ReportRow, demo_scores: bool) -> tuple[str, str]:
+    """«Пояснение» and «Обещания оплаты» (S5-04): the model's accepted text or the
+    template from the rules, with a note on why the model's text is absent."""
+    if demo_scores:
+        return ("Пояснение в демо не формируется.", "")
+    explained = explain_row(row.assessment, row.explanation, row.explanation_status)
+    prefix = "ИИ: " if explained.from_model else "По правилам: "
+    text = prefix + explained.text
+    if explained.note:
+        text += f" (пояснение ИИ недоступно: {explained.note})"
+    return (text, "; ".join(explained.promises))
 
 
 def _fact_value(fact: Fact) -> str:
@@ -296,6 +311,11 @@ def _quality(report: AnalysisReport) -> list[tuple[object, ...]]:
         for reason in row.assessment.missing_data:
             if reason != DEMO_SCORE_NOTE:
                 rows.append(("Пропуск или ограничение данных", row.counterparty.inn, None, reason))
+    for row in _ordered(report):
+        status = row.explanation_status
+        if status is not None and status != "accepted":
+            note = explain_row(row.assessment, None, status).note
+            rows.append(("Пояснение ИИ недоступно", row.counterparty.inn, None, note))
     return rows or [("Замечаний нет", None, None, None)]
 
 
@@ -315,6 +335,19 @@ def _chronology(report: AnalysisReport) -> list[tuple[object, ...]]:
         )
         for item in items
     ] or [(None, None, None, None, None, "Файл «Взаимодействия» в пакет не загружен.")]
+
+
+def _explanations_summary(report: AnalysisReport) -> str:
+    statuses = [row.explanation_status for row in report.rows]
+    if not any(status is not None for status in statuses):
+        return "не запрашивались; в отчёте пояснения по правилам"
+    accepted = sum(1 for s in statuses if s == "accepted")
+    rejected = sum(1 for s in statuses if s and s.startswith("rejected:"))
+    unavailable = sum(1 for s in statuses if s and s.startswith("unavailable:"))
+    return (
+        f"принято {accepted}, отклонено проверкой {rejected}, недоступно {unavailable}; "
+        "без пояснения ИИ — шаблон по правилам"
+    )
 
 
 def _about(report: AnalysisReport) -> list[tuple[object, ...]]:
@@ -340,6 +373,7 @@ def _about(report: AnalysisReport) -> list[tuple[object, ...]]:
         ),
         ("Версия правил", meta.rules_version),
         ("Версия ИИ", meta.ai_version or "ИИ-пояснения не используются"),
+        ("Пояснения ИИ", _explanations_summary(report)),
         ("Отчёт сформирован", _moment(meta.created_at)),
         ("Организаций в отчёте", str(len(report.rows))),
         ("Замечания импорта", f"ошибок: {errors}, предупреждений: {warnings}"),
@@ -372,9 +406,11 @@ def build_report(report: AnalysisReport) -> bytes:
             "Полнота",
             "Причины",
             "Следующий шаг",
+            "Пояснение",
+            "Обещания оплаты",
         ),
         _priorities(report),
-        (14, 34, 16, 12, 20, 36, 60, 44),
+        (14, 34, 16, 12, 20, 36, 60, 44, 80, 30),
     )
     _table(
         workbook.create_sheet(SHEETS[1]),
