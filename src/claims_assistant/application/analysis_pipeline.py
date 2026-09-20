@@ -21,22 +21,27 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
+from claims_assistant.domain.ai_context import ContextLimits, build_context, versions
+from claims_assistant.domain.ai_review import Explanation
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import DataMode, ExternalSnapshot, FetchStatus, Section
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.indicators import package_indicators
+from claims_assistant.domain.interactions import InteractionRow, chronology
 from claims_assistant.domain.report import AnalysisReport, ReportMeta, ReportRow, file_labels
-from claims_assistant.domain.scoring import RULES_VERSION, Priority, assess
+from claims_assistant.domain.scoring import RULES_VERSION, Assessment, Priority, assess
 from claims_assistant.domain.steps import RUN_SCOPE, StepResult, StepStatus
 
 from .analysis_queue import RunOutcome
 from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
+from .explanations import EXPLANATION_STEP, StoredExplanation
 from .external_guard import BUDGET_EXHAUSTED, TRANSIENT_CODES, RunBudget
 from .imports import SheetReader
 from .internal_context import payment_periods
 from .package_checks import PackageIntegrityError, PackageReview, review_package
+from .recommendation import AiLimits, RecommendationProvider, request_explanation
 from .step_payloads import (
     ImportedPackage,
     PayloadError,
@@ -172,6 +177,9 @@ class AnalysisPipeline:
         limits: RunLimits = RunLimits(),
         sections: tuple[Section, ...] = tuple(Section),
         clock: Callable[[], datetime] = _now,
+        explainer: RecommendationProvider | None = None,
+        ai_limits: AiLimits = AiLimits(),
+        ai_send_comments: bool = False,
     ) -> None:
         self._files = files
         self._reader = reader
@@ -182,6 +190,11 @@ class AnalysisPipeline:
         self._limits = limits
         self._sections = sections
         self._clock = clock
+        # S5-02: with a provider, every assessment gets an explanation attempt whose
+        # answer is stored by version; without one the report keeps the rules' next step.
+        self._explainer = explainer
+        self._ai_limits = ai_limits
+        self._ai_send_comments = ai_send_comments
 
     async def process(self, run: AnalysisRun) -> RunOutcome:
         if run.mode is not self._mode:
@@ -294,23 +307,31 @@ class AnalysisPipeline:
             package.history,
             {inn: snapshot for inn, snapshot in finances.items() if snapshot is not None},
         )
-        report_rows = tuple(
-            ReportRow(
-                counterparty=row,
-                assessment=assess(
-                    row.inn,
-                    snapshots[row.inn],
-                    row,
-                    analysis_date=run.analysis_date,
-                    indicators=indicators[row.inn],
-                ),
-                snapshots=snapshots[row.inn],
+        assessments = {
+            row.inn: assess(
+                row.inn,
+                snapshots[row.inn],
+                row,
+                analysis_date=run.analysis_date,
                 indicators=indicators[row.inn],
             )
             for row in rows
-        )
+        }
         known = {row.inn for row in rows}
         interactions = tuple(item for item in package.interactions if item.inn in known)
+        explanations = await self._explain(
+            run, rows, assessments, indicators, snapshots, chronology(interactions)
+        )
+        report_rows = tuple(
+            ReportRow(
+                counterparty=row,
+                assessment=assessments[row.inn],
+                snapshots=snapshots[row.inn],
+                indicators=indicators[row.inn],
+                explanation=explanations.get(row.inn),
+            )
+            for row in rows
+        )
         # The oldest answer among the sections: cached snapshots keep their own
         # fetched_at, so every external fact in the report is at least this fresh.
         fetched = [
@@ -324,6 +345,7 @@ class AnalysisPipeline:
             checked_at=min(fetched) if fetched else None,
             package=_package_lines(run, package),
             files=file_labels(run.files),
+            ai_version=self._ai_version(),
         )
         report = AnalysisReport(
             meta=meta, rows=report_rows, import_issues=issues, interactions=interactions
@@ -345,6 +367,68 @@ class AnalysisPipeline:
         summary = _summarize(report_rows, issues)
         await self._save(run, RUN_SCOPE, REPORT_STEP, REPORT_VERSION, payload=summary.to_payload())
         return summary
+
+    # --- AI explanations (S5-02) -----------------------------------------------------
+
+    def _ai_version(self) -> str | None:
+        if self._explainer is None:
+            return None
+        return f"{self._explainer.name} {self._explainer.model}; {versions()}"
+
+    async def _explain(
+        self,
+        run: AnalysisRun,
+        rows: tuple[CounterpartyRow, ...],
+        assessments: dict[str, Assessment],
+        indicators: dict,
+        snapshots: dict[str, tuple[ExternalSnapshot, ...]],
+        interactions: dict[str, tuple[InteractionRow, ...]],
+    ) -> dict[str, Explanation]:
+        """One explanation attempt per company, each answer stored under its versions.
+
+        A stored final answer (accepted or rejected) is read back instead of asking
+        again; a stored answer whose versions changed is simply a different key, so the
+        model is asked once per version. Unavailable answers are not stored: the next
+        run of the pipeline may try again (S5-03 bounds that).
+        """
+        accepted: dict[str, Explanation] = {}
+        if self._explainer is None:
+            return accepted
+        limits = ContextLimits(include_comments=self._ai_send_comments)
+        for index, row in enumerate(rows, start=1):
+            context = build_context(
+                row,
+                assessments[row.inn],
+                run.analysis_date,
+                indicators=indicators[row.inn],
+                interactions=interactions.get(row.inn, ()),
+                snapshots=snapshots[row.inn],
+                limits=limits,
+                reference=f"row-{index}",
+            )
+            stored = await self._stored_explanation(run, row.inn, context)
+            if stored is None:
+                outcome = await request_explanation(self._explainer, context, self._ai_limits)
+                stored = StoredExplanation.from_outcome(outcome, f"row-{index}")
+                if stored.final:
+                    await self._save(
+                        run, row.inn, EXPLANATION_STEP, stored.versions, payload=stored.to_payload()
+                    )
+            if stored.explanation is not None:
+                accepted[row.inn] = stored.explanation
+        return accepted
+
+    async def _stored_explanation(self, run, inn: str, context) -> StoredExplanation | None:
+        from claims_assistant.domain.ai_review import ANSWER_SCHEMA_VERSION
+
+        key = (
+            f"{self._explainer.name}:{self._explainer.model}:i{context.instruction_version}"
+            f":c{context.context_version}:s{ANSWER_SCHEMA_VERSION}:r{context.rules_version}"
+        )
+        step = await self._repository.get_step(run.id, inn, EXPLANATION_STEP, key)
+        if step is None or step.status is not StepStatus.OK or step.payload is None:
+            return None
+        return StoredExplanation.from_payload(step.payload)
 
     async def _save(
         self,
