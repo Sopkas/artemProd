@@ -4,6 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from claims_assistant.application.check_company import CompanyCheck
+from claims_assistant.application.internal_context import InternalContext
 from claims_assistant.domain.external import (
     CompanyStatus,
     Coverage,
@@ -13,6 +14,12 @@ from claims_assistant.domain.external import (
     FetchStatus,
     Period,
     Section,
+)
+from claims_assistant.domain.indicators import (
+    DebtDynamics,
+    DebtTrend,
+    PaymentRecency,
+    PaymentStatus,
 )
 
 DEMO_BANNER = "ДЕМО: синтетические данные, не сведения о реальной организации."
@@ -42,7 +49,15 @@ _COVERAGE_LABELS = {
 _UNIT_SUFFIX = {"RUB": " ₽"}
 
 
-def format_card(check: CompanyCheck) -> str:
+_MAX_INTERACTIONS = 5
+_MAX_COMMENT_CHARS = 200  # a comment may hold 2000; the card shows the beginning
+TELEGRAM_MESSAGE_LIMIT = 4096
+# The internal block never pushes the card past the Telegram limit: interactions are
+# dropped one by one (newest kept) until the whole text fits.
+_CARD_BUDGET = TELEGRAM_MESSAGE_LIMIT - 96
+
+
+def format_card(check: CompanyCheck, internal: InternalContext | None = None) -> str:
     lines: list[str] = []
     if check.mode == "demo":
         lines.append(DEMO_BANNER)
@@ -51,9 +66,98 @@ def format_card(check: CompanyCheck) -> str:
     for snapshot in check.snapshots:
         lines.append("")
         lines.extend(_section(snapshot))
-    lines.append("")
-    lines.append("Карточка показывает полученные факты и полноту проверки без оценки очерёдности.")
-    return "\n".join(lines)
+    footer = ["", "Карточка показывает полученные факты и полноту проверки без оценки очерёдности."]
+    if internal is None:
+        return "\n".join(lines + footer)
+    budget = _CARD_BUDGET - len("\n".join(lines + footer)) - 1
+    return "\n".join(lines + [""] + _internal(internal, budget) + footer)
+
+
+def _internal(context: InternalContext, budget: int) -> list[str]:
+    """The owner's own data on this company (S4-04): which files, what they give, what
+    is missing. Amounts and comments are the owner's; nothing here is sent anywhere.
+    ``budget`` is how many characters the block may take so the card still fits one
+    Telegram message; interactions give way first."""
+    run = context.run
+    row = context.row
+    lines = [f"Внутренние данные — проверка от {_date(run.analysis_date)}"]
+    lines.append("  Файлы: " + "; ".join(context.files))
+    if row.debt is not None:
+        when = f" на {_date(row.cutoff_date)}" if row.cutoff_date else ""
+        lines.append(f"  Долг: {_money(row.debt, 'RUB')}{when}")
+    if row.overdue_days is not None:
+        lines.append(f"  Просрочка: {row.overdue_days} дн.")
+    lines.append("  Давность платежа: " + _payment_line(context.indicators.payment))
+    lines.append("  Долг за месяц: " + _debt_line(context.indicators.debt))
+    revenue = context.indicators.revenue
+    if revenue is not None:
+        sign = "+" if revenue.percent >= 0 else "−"
+        lines.append(
+            f"  Выручка за {revenue.year}: {sign}{abs(revenue.percent):.0f} % к предыдущему году"
+        )
+    tail = [f"  Не хватает: {note}" for note in context.indicators.missing]
+    if not context.interactions:
+        return lines + ["  Взаимодействия: файл не загружен."] + tail
+    total = len(context.interactions)
+    shown = list(context.interactions[-_MAX_INTERACTIONS:])
+    while True:
+        block = [f"  Взаимодействия: {total}, последние {len(shown)}:"] + [
+            _interaction_line(item) for item in shown
+        ]
+        if len("\n".join(lines + block + tail)) <= budget or not shown:
+            return lines + block + tail
+        shown = shown[1:]  # drop the oldest shown; the newest stay
+
+
+def _interaction_line(item) -> str:
+    channel = f" ({item.channel})" if item.channel else ""
+    comment = item.comment
+    if len(comment) > _MAX_COMMENT_CHARS:
+        comment = comment[: _MAX_COMMENT_CHARS - 1].rstrip() + "…"
+    return f"    {_date(item.happened_on)}{channel}: {comment}"
+
+
+def _payment_line(recency: PaymentRecency) -> str:
+    if recency.status is PaymentStatus.CONFIRMED:
+        return (
+            f"последний платёж {_date(recency.last_payment)}, {recency.age_days} дн. назад "
+            "(подтверждено)"
+        )
+    if recency.status is PaymentStatus.NONE_SINCE:
+        return (
+            f"поступлений нет с {_date(recency.no_payments_since)} — {recency.age_days} дн. "
+            "(выгрузка полная)"
+        )
+    if recency.status is PaymentStatus.IN_PERIOD:
+        last = (
+            f"последний платёж в выгрузке {_date(recency.period_last)}; "
+            if recency.period_last
+            else ""
+        )
+        return (
+            last + "давность не подтверждена" + (f" — {recency.reason}" if recency.reason else "")
+        )
+    if recency.status is PaymentStatus.CONFLICT:
+        return "неизвестна до исправления — файлы противоречат друг другу"
+    return "неизвестна" + (f" — {recency.reason}" if recency.reason else "")
+
+
+def _debt_line(dynamics: DebtDynamics) -> str:
+    if dynamics.trend is DebtTrend.COMPUTED:
+        ratio = f"×{dynamics.ratio:.2f}".replace(".", ",")
+        return (
+            f"{_money(dynamics.previous, 'RUB')} ({_date(dynamics.previous_on)}) → "
+            f"{_money(dynamics.current, 'RUB')} ({_date(dynamics.current_on)}), {ratio}"
+        )
+    if dynamics.trend is DebtTrend.APPEARED:
+        return f"долг появился: {_money(dynamics.current, 'RUB')} ({_date(dynamics.current_on)})"
+    if dynamics.trend is DebtTrend.NO_DEBT:
+        return "долга нет ни сейчас, ни месяц назад"
+    if dynamics.trend is DebtTrend.NO_BASE:
+        return "нет среза месяц назад" + (f" — {dynamics.reason}" if dynamics.reason else "")
+    if dynamics.trend is DebtTrend.CONFLICT:
+        return "неизвестна до исправления — файлы противоречат друг другу"
+    return "неизвестна" + (f" — {dynamics.reason}" if dynamics.reason else "")
 
 
 def _section(snapshot: ExternalSnapshot) -> list[str]:

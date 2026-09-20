@@ -18,6 +18,8 @@ from claims_assistant.domain.analysis import FileKind, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import DataMode, ExternalSnapshot
 from claims_assistant.domain.imports import ImportIssue
+from claims_assistant.domain.indicators import InternalIndicators
+from claims_assistant.domain.interactions import InteractionRow
 from claims_assistant.domain.scoring import RULES_VERSION, Assessment, Priority
 
 DEMO_SCORE_NOTE = "Демонстрационная оценка задана заранее; правила не применялись."
@@ -94,10 +96,14 @@ class ReportRow:
     counterparty: CounterpartyRow
     assessment: Assessment
     snapshots: tuple[ExternalSnapshot, ...] = ()
+    # S4-04: the internal indicators the assessment rested on, for «Основания».
+    indicators: InternalIndicators | None = None
 
     def __post_init__(self) -> None:
         inn = self.counterparty.inn
         if self.assessment.inn != inn or any(s.inn != inn for s in self.snapshots):
+            raise ValueError("Report row mixes different INNs")
+        if self.indicators is not None and self.indicators.inn != inn:
             raise ValueError("Report row mixes different INNs")
 
 
@@ -106,11 +112,16 @@ class AnalysisReport:
     meta: ReportMeta
     rows: tuple[ReportRow, ...] = ()
     import_issues: tuple[ImportIssue, ...] = ()
+    # S4-04: the «Взаимодействия» chronology of the package (rows of report INNs only).
+    interactions: tuple[InteractionRow, ...] = ()
 
     def __post_init__(self) -> None:
         inns = [row.counterparty.inn for row in self.rows]
         if len(set(inns)) != len(inns):
             raise ValueError("One row per INN")
+        known = set(inns)
+        if any(item.inn not in known for item in self.interactions):
+            raise ValueError("Interactions must belong to report rows")
 
 
 def demo_assessment(inn: str, priority: Priority) -> Assessment:

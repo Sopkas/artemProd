@@ -559,7 +559,149 @@ async def test_report_names_the_optional_files_of_the_package(tmp_path):
     about = sheet_rows(files.read(artifact.stored_path), "О проверке")
     text = " ".join(str(cell) for row in about for cell in row if cell is not None)
     assert "Контрагенты: 2 строк, пригодных 2" in text
-    assert "Платежи за 01.06.2026–31.08.2026: загружен, в показатели пока не входит" in text
+    assert (
+        "Платежи за 01.06.2026–31.08.2026: использован — давность платежа; "
+        "пригодных строк этого вида: 1"
+    ) in text
+
+
+async def test_internal_indicators_and_chronology_reach_the_report(tmp_path):
+    """S4-04: the owner's own files drive the assessment, the report names the files
+    used, lists what is missing and shows the interactions chronology."""
+    from claims_assistant.application.check_package import accept_ledger
+    from claims_assistant.domain.analysis import FileKind
+    from claims_assistant.domain.external import Period
+    from claims_assistant.infrastructure.excel.ledgers import (
+        build_debt_history_workbook,
+        build_interactions_workbook,
+        build_payments_workbook,
+    )
+
+    repository = InMemoryAnalysisRepository()
+    files = LocalFileStorage(tmp_path / "uploads")
+    reader = OpenpyxlSheetReader()
+    rows = (
+        CounterpartyRow(
+            inn="1234567894",
+            name="ООО Ромашка",
+            debt=Decimal("200.00"),
+            cutoff_date=DAY,
+            last_payment_date=date(2026, 7, 15),
+        ),
+        CounterpartyRow(inn="7707083893", debt=Decimal("5.00"), cutoff_date=DAY),
+    )
+    accepted_run = await accept_counterparties(
+        OWNER,
+        DAY,
+        DataMode.DEMO,
+        build_counterparties_template(rows),
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    run_id = accepted_run.run.id
+    deps = dict(repository=repository, files=files, reader=reader)
+    # A full payments export up to the analysis date confirms the last payment.
+    await accept_ledger(
+        OWNER,
+        run_id,
+        FileKind.PAYMENTS,
+        build_payments_workbook([["1234567894", "P-1", date(2026, 7, 15), 50.0]]),
+        coverage=Period(date(2026, 6, 1), DAY),
+        **deps,
+    )
+    # Debt doubled against the snapshot a month before.
+    await accept_ledger(
+        OWNER,
+        run_id,
+        FileKind.DEBT_HISTORY,
+        build_debt_history_workbook([["1234567894", date(2026, 8, 1), 100.0]]),
+        coverage=None,
+        **deps,
+    )
+    await accept_ledger(
+        OWNER,
+        run_id,
+        FileKind.INTERACTIONS,
+        build_interactions_workbook(
+            [
+                ["1234567894", "I-2", date(2026, 8, 20), "Обещали оплатить.", "телефон"],
+                ["1234567894", "I-1", date(2026, 8, 1), "Направлена претензия.", None],
+            ]
+        ),
+        coverage=None,
+        **deps,
+    )
+    await repository.transition(OWNER, run_id, RunStatus.QUEUED)
+    run = await repository.claim_next()
+    outcome = await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
+    assert outcome.status == RunStatus.COMPLETED
+
+    artifact = await repository.get_report(OWNER, run.id)
+    data = files.read(artifact.stored_path)
+    priorities = {row[0]: row for row in sheet_rows(data, "Приоритеты")}
+    assert (
+        "долг вырос" in priorities["1234567894"][6].lower() or "×2" in priorities["1234567894"][6]
+    )
+    about = " ".join(str(c) for row in sheet_rows(data, "О проверке") for c in row if c is not None)
+    assert "Платежи за 01.06.2026–01.09.2026: использован — давность платежа" in about
+    assert "История долга: использован — динамика долга за месяц" in about
+    assert "Взаимодействия: использован — лист «Хронология»" in about
+    chronology = [row for row in sheet_rows(data, "Хронология") if row[0]]
+    assert [(r[0], r[2], r[3]) for r in chronology] == [
+        ("1234567894", "01.08.2026", "I-1"),
+        ("1234567894", "20.08.2026", "I-2"),
+    ]
+    assert chronology[1][5] == "Обещали оплатить."
+    quality = " ".join(
+        str(c) for row in sheet_rows(data, "Качество данных") for c in row if c is not None
+    )
+    # The second company has no history: the report says what is missing.
+    assert "7707083893" in quality
+
+
+async def test_resumed_run_builds_the_same_report_without_rereading_optional_files(tmp_path):
+    from claims_assistant.application.check_package import accept_ledger
+    from claims_assistant.domain.analysis import FileKind
+    from claims_assistant.infrastructure.excel.ledgers import build_interactions_workbook
+
+    reader = CountingReader(OpenpyxlSheetReader())
+    repository = InMemoryAnalysisRepository()
+    files = LocalFileStorage(tmp_path / "uploads")
+    accepted_run = await accept_counterparties(
+        OWNER,
+        DAY,
+        DataMode.DEMO,
+        build_counterparties_template(ROWS),
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    await accept_ledger(
+        OWNER,
+        accepted_run.run.id,
+        FileKind.INTERACTIONS,
+        build_interactions_workbook([["1234567894", "I-1", date(2026, 8, 1), "Звонок.", None]]),
+        coverage=None,
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    await repository.transition(OWNER, accepted_run.run.id, RunStatus.QUEUED)
+    run = await repository.claim_next()
+    provider = CountingProvider(DemoCompanyDataProvider())
+    await pipeline(files, repository, guard(provider), reader=reader)._import(run)
+    reads_after_import = reader.reads
+    await repository.recover_interrupted()
+    resumed = await repository.claim_next()
+    outcome = await pipeline(files, repository, guard(provider), reader=reader).process(resumed)
+    assert outcome.status == RunStatus.COMPLETED
+    assert reader.reads == reads_after_import  # neither the main nor the optional files
+    artifact = await repository.get_report(OWNER, run.id)
+    chronology = [
+        row for row in sheet_rows(files.read(artifact.stored_path), "Хронология") if row[0]
+    ]
+    assert len(chronology) == 1
 
 
 async def test_pipeline_refuses_a_package_with_a_foreign_file(tmp_path):
