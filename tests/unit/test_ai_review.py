@@ -10,7 +10,7 @@ from decimal import Decimal
 
 import pytest
 
-from claims_assistant.domain.ai_context import build_context
+from claims_assistant.domain.ai_context import ContextLimits, build_context
 from claims_assistant.domain.ai_review import (
     MAX_EXPLANATION_CHARS,
     Explanation,
@@ -63,6 +63,8 @@ def context(interactions=(), overdue=75):
         DAY,
         interactions=interactions,
         snapshots=snapshots,
+        # The answers under test quote comments, so this context carries them (S5-05).
+        limits=ContextLimits(include_comments=True),
     )
 
 
