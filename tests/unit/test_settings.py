@@ -247,3 +247,29 @@ def test_invalid_retention_settings_are_rejected(tmp_path, monkeypatch, key, raw
     monkeypatch.setenv(key, raw)
     with pytest.raises(ConfigurationError, match=key):
         Settings.load(tmp_path / "missing.env")
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, "off"), ("stub", "stub"), ("STUB", "stub")])
+def test_ai_provider_defaults_to_off(tmp_path, monkeypatch, raw, expected):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    if raw is not None:
+        monkeypatch.setenv("AI_PROVIDER", raw)
+    assert Settings.load(tmp_path / "missing.env").ai_provider == expected
+
+
+def test_unknown_ai_provider_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    with pytest.raises(ConfigurationError, match="AI_PROVIDER"):
+        Settings.load(tmp_path / "missing.env")
+
+
+def test_recommendation_provider_factory_follows_the_setting():
+    from claims_assistant.infrastructure.llm.stub import StubRecommendationProvider
+    from claims_assistant.runtime.ai import build_recommendation_provider
+
+    assert build_recommendation_provider(Settings(TOKEN, frozenset({42}))) is None
+    built = build_recommendation_provider(Settings(TOKEN, frozenset({42}), ai_provider="stub"))
+    assert isinstance(built, StubRecommendationProvider)
