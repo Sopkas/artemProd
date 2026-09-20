@@ -244,4 +244,7 @@ async def test_worker_runs_alongside_polling_and_stops_with_it(monkeypatch):
     assert isinstance(provider, app.GuardedCompanyDataProvider)
     assert options["mode"] is app.DataMode.DEMO
     assert options["limits"] == app.RunLimits(max_requests=1500, max_seconds=900.0)
+    # S5-02: no provider by default, comments not sent; the pipeline is told both.
+    assert options["explainer"] is None and options["ai_send_comments"] is False
+    assert options["ai_run_limits"] == app.run_limits(Settings(TOKEN, frozenset({42})))
     assert isinstance(workers[0][1]["notifier"], app.TelegramRunNotifier)

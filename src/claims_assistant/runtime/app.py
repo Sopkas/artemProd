@@ -10,6 +10,7 @@ from aiogram.types import BotCommandScopeAllPrivateChats
 from claims_assistant.application.analysis_pipeline import AnalysisPipeline, RunLimits
 from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.external_guard import GuardedCompanyDataProvider, GuardPolicy
+from claims_assistant.application.recommendation import AiLimits
 from claims_assistant.application.retention import RetentionSweeper
 from claims_assistant.application.worker import RunWorker
 from claims_assistant.domain.external import DataMode
@@ -24,6 +25,7 @@ from claims_assistant.presentation.telegram.handlers import create_dispatcher
 from claims_assistant.presentation.telegram.menu import bot_commands
 from claims_assistant.presentation.telegram.notifier import TelegramRunNotifier
 
+from .ai import build_recommendation_provider, run_limits
 from .settings import ConfigurationError, Settings
 
 logger = logging.getLogger(__name__)
@@ -100,6 +102,13 @@ async def run(settings: Settings) -> None:
                 business_utc_offset_hours=settings.business_utc_offset_hours,
             )
             # One worker in this process; runs left "running" by a crash go back to the queue.
+            # S5-01/S5-02: the recommendation provider, if any; every answer is stored.
+            recommendation_provider = build_recommendation_provider(settings)
+            logger.info(
+                "ai_provider=%s send_comments=%s",
+                recommendation_provider.name if recommendation_provider else "off",
+                settings.ai_send_comments,
+            )
             pipeline = AnalysisPipeline(
                 files,
                 reader,
@@ -111,6 +120,12 @@ async def run(settings: Settings) -> None:
                     max_requests=settings.external.run_request_limit,
                     max_seconds=settings.external.run_time_limit_seconds,
                 ),
+                explainer=recommendation_provider,
+                ai_limits=recommendation_provider.policy.limits
+                if recommendation_provider
+                else AiLimits(),
+                ai_run_limits=run_limits(settings),
+                ai_send_comments=settings.ai_send_comments,
             )
             notifier = TelegramRunNotifier(bot, repository, files)
             worker = RunWorker(repository, pipeline, notifier=notifier)

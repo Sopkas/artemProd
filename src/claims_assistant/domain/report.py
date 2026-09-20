@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from claims_assistant.domain.ai_review import Explanation
 from claims_assistant.domain.analysis import FileKind, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.external import DataMode, ExternalSnapshot
@@ -98,6 +99,12 @@ class ReportRow:
     snapshots: tuple[ExternalSnapshot, ...] = ()
     # S4-04: the internal indicators the assessment rested on, for «Основания».
     indicators: InternalIndicators | None = None
+    # S5-02: the accepted AI explanation of this assessment, if one was obtained; the
+    # report shows it (S5-04) or the template from the rules when it is None.
+    explanation: Explanation | None = None
+    # S5-04: why there is no model text — "rejected:<code>" / "unavailable:<code>" — or
+    # "accepted"; None when no provider was configured for the run.
+    explanation_status: str | None = None
 
     def __post_init__(self) -> None:
         inn = self.counterparty.inn
