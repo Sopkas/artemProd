@@ -290,6 +290,11 @@ def run_finished(run: AnalysisRun, summary: RunSummary | None) -> str:
             if summary.priorities.get(priority, 0)
         ]
         lines.append("Приоритеты: " + (", ".join(counts) if counts else "нет"))
+        if summary.explanations_missing:
+            lines.append(
+                f"Пояснений ИИ нет у {summary.explanations_missing} организаций — "
+                "в отчёте рекомендация по правилам."
+            )
         lines.append("Отчёт — файлом ниже; повторно: «Отчёт» или /report.")
     if run.mode is DataMode.DEMO:
         lines.append("Режим: демонстрационные данные.")

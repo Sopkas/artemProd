@@ -21,6 +21,20 @@ class ExternalLimits:
     run_request_limit: int = 1500
 
 
+@dataclass(frozen=True, slots=True)
+class AiSettings:
+    """Limits of AI explanations (S5-03): per call and per check; the architecture's
+    starting values, to be aligned with the chosen provider's tariff."""
+
+    timeout_seconds: float = 30.0
+    max_retries: int = 1
+    max_request_chars: int = 24_000
+    max_output_tokens: int = 1_000
+    run_request_limit: int = 100
+    run_token_limit: int = 400_000
+    run_time_limit_seconds: float = 600.0
+
+
 class ConfigurationError(ValueError):
     """Safe, user-facing configuration error without the rejected value."""
 
@@ -56,6 +70,7 @@ class Settings:
     # Whether the «Взаимодействия» comments may be sent to the model (S5-02/S5-05):
     # the customer's employees' and clients' words leave the premises only with consent.
     ai_send_comments: bool = False
+    ai: AiSettings = AiSettings()
 
     @classmethod
     def load(cls, env_file: Path = Path(".env")) -> "Settings":
@@ -104,6 +119,19 @@ class Settings:
         if raw_comments not in {"true", "false", "1", "0", "yes", "no"}:
             raise ConfigurationError("AI_SEND_COMMENTS: допустимы true или false.")
         ai_send_comments = raw_comments in {"true", "1", "yes"}
+        ai = AiSettings(
+            timeout_seconds=_number(values, "AI_TIMEOUT_SECONDS", 30.0, minimum=0.001),
+            max_retries=_number(values, "AI_MAX_RETRIES", 1, integer=True, minimum=0),
+            max_request_chars=_number(
+                values, "AI_MAX_REQUEST_CHARS", 24_000, integer=True, minimum=1
+            ),
+            max_output_tokens=_number(
+                values, "AI_MAX_OUTPUT_TOKENS", 1_000, integer=True, minimum=1
+            ),
+            run_request_limit=_number(values, "AI_RUN_REQUEST_LIMIT", 100, integer=True, minimum=1),
+            run_token_limit=_number(values, "AI_RUN_TOKEN_LIMIT", 400_000, integer=True, minimum=1),
+            run_time_limit_seconds=_number(values, "AI_RUN_TIME_LIMIT_SECONDS", 600.0, minimum=1),
+        )
         checko_key = (values.get("CHECKO_API_KEY") or "").strip()
         if provider == "checko" and not checko_key:
             raise ConfigurationError("Для DATA_PROVIDER=checko укажите CHECKO_API_KEY.")
@@ -136,6 +164,7 @@ class Settings:
             checko_api_key=checko_key,
             ai_provider=ai_provider,
             ai_send_comments=ai_send_comments,
+            ai=ai,
             database_path=database_path,
             storage_path=storage_path,
             external=external,
