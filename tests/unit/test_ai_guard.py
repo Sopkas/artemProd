@@ -204,3 +204,14 @@ def test_policy_and_run_limits_must_be_sane():
         AiPolicy(timeout_seconds=0)
     with pytest.raises(ValueError):
         AiRunLimits(max_tokens=0)
+
+
+def test_scoped_factory_is_checked_by_type_not_by_name():
+    from claims_assistant.application.ai_guard import ScopedExplainerFactory
+
+    assert isinstance(guarded(StubRecommendationProvider()), ScopedExplainerFactory)
+    assert not isinstance(StubRecommendationProvider(), ScopedExplainerFactory)
+
+
+def test_default_request_size_is_the_same_everywhere():
+    assert AiLimits().max_request_chars == AiPolicy().max_request_chars

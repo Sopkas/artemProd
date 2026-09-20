@@ -77,10 +77,15 @@ def explain_row(
             for p in explanation.promises
         )
         return RowExplanation(text=explanation.text, source="ai", promises=promises)
-    note = None
-    if status is not None:
-        if status.startswith("rejected:"):
-            note = f"ответ модели отклонён проверкой ({status.split(':', 1)[1]})"
-        else:
-            note = _STATUS_NOTES.get(status, "пояснение ИИ недоступно")
-    return RowExplanation(text=template_explanation(assessment), source="template", note=note)
+    return RowExplanation(
+        text=template_explanation(assessment), source="template", note=status_note(status)
+    )
+
+
+def status_note(status: str | None) -> str | None:
+    """Why the model's text is absent, in the reader's words; None without a provider."""
+    if status is None or status == "accepted":
+        return None
+    if status.startswith("rejected:"):
+        return f"ответ модели отклонён проверкой ({status.split(':', 1)[1]})"
+    return _STATUS_NOTES.get(status, "пояснение ИИ недоступно")

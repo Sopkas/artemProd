@@ -96,7 +96,7 @@ async def test_report_carries_the_model_text_and_the_template_side_by_side(tmp_p
     assert "пояснение ИИ недоступно: ответ модели отклонён проверкой (new_amount)" in first[8]
     assert second[8].startswith("ИИ: По правилам")
     quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
-    assert "Пояснение ИИ недоступно 1234567894" in quality
+    assert "ответ модели отклонён проверкой (new_amount) — 1 организация" in quality
     about = " ".join(str(c) for row in sheet_rows(data, "О проверке") for c in row if c)
     assert "принято 1, отклонено проверкой 1, недоступно 0" in about
 
@@ -114,6 +114,11 @@ async def test_report_is_built_when_the_model_is_down(tmp_path):
         assert row[8].startswith("По правилам: ") and "модель недоступна" in row[8]
     about = " ".join(str(c) for row in sheet_rows(data, "О проверке") for c in row if c)
     assert "принято 0, отклонено проверкой 0, недоступно 2" in about
+    # One quality line per reason, counted — not one per company (review B on #43).
+    quality = [
+        row for row in sheet_rows(data, "Качество данных") if row[0] == "Пояснение ИИ недоступно"
+    ]
+    assert [row[3] for row in quality] == ["модель недоступна — 2 организации"]
 
 
 async def test_report_without_a_provider_has_the_template_and_no_ai_notes(tmp_path):
@@ -128,3 +133,11 @@ async def test_report_without_a_provider_has_the_template_and_no_ai_notes(tmp_pa
     assert "Пояснение ИИ недоступно" not in quality
     about = " ".join(str(c) for row in sheet_rows(data, "О проверке") for c in row if c)
     assert "не запрашивались; в отчёте пояснения по правилам" in about
+
+
+def test_status_note_words():
+    from claims_assistant.domain.explanation import status_note
+
+    assert status_note(None) is None and status_note("accepted") is None
+    assert status_note("rejected:schema") == "ответ модели отклонён проверкой (schema)"
+    assert status_note("unavailable:rate_limited") == "модель ограничила число запросов"

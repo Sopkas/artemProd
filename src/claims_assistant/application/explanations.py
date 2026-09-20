@@ -8,6 +8,8 @@ about retries and budget), so the next attempt may still get an answer.
 
 The payload holds the raw answer text, the review result and the cost; it lives in the
 run's own storage next to the assessment it explains and is purged with the run (S6-02).
+The raw text may quote the customer's comments when they were sent: it stays in the
+run's storage and never reaches the logs.
 """
 
 import json
@@ -149,7 +151,7 @@ class StoredExplanation:
                 answer_text=_opt_str(data.get("answer_text")),
                 input_tokens=_int(data.get("input_tokens", 0)),
                 output_tokens=_int(data.get("output_tokens", 0)),
-                latency_seconds=float(data.get("latency_seconds", 0.0)),
+                latency_seconds=_number(data.get("latency_seconds", 0.0)),
                 explanation=explanation,
                 rejected=rejected,
                 error_code=_opt_str(data.get("error_code")),
@@ -180,3 +182,10 @@ def _int(value: object) -> int:
     if type(value) is not int:
         raise PayloadError("expected int")
     return value
+
+
+def _number(value: object) -> float:
+    # A JSON number only: `true` must not pass as 1.0.
+    if type(value) not in (int, float):
+        raise PayloadError("expected number")
+    return float(value)

@@ -16,7 +16,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from claims_assistant.domain.ai_context import Request
 
@@ -120,6 +120,7 @@ class AiBudget:
             self.exhausted = True
 
 
+@runtime_checkable
 class ScopedExplainerFactory(Protocol):
     """A guarded provider: one shared budget for every company of a run."""
 
@@ -193,4 +194,6 @@ class _ScopedExplainer:
         return self._budget
 
     async def explain(self, request: Request, limits: AiLimits) -> AiAnswer:
+        """``limits`` are ignored on purpose: the guard's policy sets the timeout and the
+        sizes for every call, so a caller cannot loosen them per request."""
         return await self._guard.explain_within(request, self._budget)
