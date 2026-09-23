@@ -152,7 +152,10 @@ def convert_payments(rows: list[tuple[Cell, ...]], inn: str) -> ConvertedSheet:
     """
     issues: list[ImportIssue] = []
     header_index = find_table(rows)
-    export = read_export_header(rows[:header_index] if header_index else rows[:MAX_HEADER_ROWS])
+    # ``header_index`` may be 0 — a table that starts on the first row has no block
+    # above it, and treating that as «no header found» read the payments as the block.
+    block = rows[:header_index] if header_index is not None else rows[:MAX_HEADER_ROWS]
+    export = read_export_header(block)
     if header_index is None:
         issues.append(
             issue(
