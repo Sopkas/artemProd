@@ -173,7 +173,10 @@ class OpenpyxlSheetReader:
         if kind == xlrd.XL_CELL_BOOLEAN:
             return bool(value)
         if kind == xlrd.XL_CELL_ERROR:
-            return None  # #REF!, #DIV/0! and the like carry no value to read
+            # #REF!, #DIV/0! and the like carry no value. They come back as an empty cell,
+            # so the parser reports the field as missing — with its row and column — which
+            # is what a person needs to fix the file (A on #51).
+            return None
         if kind == xlrd.XL_CELL_DATE:
             parts = xlrd.xldate_as_tuple(value, datemode)
             if parts[:3] == (0, 0, 0):
