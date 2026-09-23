@@ -126,6 +126,7 @@ def test_file_kinds_match_the_data_contracts():
         "payments",
         "interactions",
         "debt_history",
+        "debt_report",
     }
 
 

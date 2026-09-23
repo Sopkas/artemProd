@@ -55,6 +55,7 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 # The internal block never pushes the card past the Telegram limit: interactions are
 # dropped one by one (newest kept) until the whole text fits.
 _CARD_BUDGET = TELEGRAM_MESSAGE_LIMIT - 96
+_MAX_CONTRACTS = 5  # the rest are counted: the card is one Telegram message
 
 
 def format_card(check: CompanyCheck, internal: InternalContext | None = None) -> str:
@@ -95,6 +96,7 @@ def _internal(context: InternalContext, budget: int) -> list[str]:
         lines.append(
             f"  Выручка за {revenue.year}: {sign}{abs(revenue.percent):.0f} % к предыдущему году"
         )
+    lines.extend(_contract_lines(context.contracts))
     tail = [f"  Не хватает: {note}" for note in context.indicators.missing]
     if not context.interactions:
         return lines + ["  Взаимодействия: файл не загружен."] + tail
@@ -107,6 +109,29 @@ def _internal(context: InternalContext, budget: int) -> list[str]:
         if len("\n".join(lines + block + tail)) <= budget or not shown:
             return lines + block + tail
         shown = shown[1:]  # drop the oldest shown; the newest stay
+
+
+def _contract_lines(contracts) -> list[str]:
+    """Contracts of the overdue report, worst overdue first (S7-01).
+
+    The specialist calls about a contract, so the card names them instead of one total;
+    when there are many, the rest are counted rather than dropped silently.
+    """
+    if not contracts:
+        return []
+    lines = [f"  Договоры с просрочкой: {len(contracts)}"]
+    for contract in contracts[:_MAX_CONTRACTS]:
+        parts = [contract.name]
+        if contract.days is not None:
+            parts.append(f"{contract.days} дн.")
+        if contract.overdue is not None:
+            parts.append(_money(contract.overdue, "RUB"))
+        if contract.subject:
+            parts.append(contract.subject)
+        lines.append("    " + " · ".join(parts))
+    if len(contracts) > _MAX_CONTRACTS:
+        lines.append(f"    ещё {len(contracts) - _MAX_CONTRACTS}")
+    return lines
 
 
 def _interaction_line(item) -> str:

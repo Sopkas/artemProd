@@ -81,6 +81,14 @@ HISTORY_FILE_PROMPT = (
     "Отправьте файл .xlsx с листом «История долга» (до 10 МБ). "
     "Шаблон — выше.\nЧтобы вернуться к пакету, нажмите «Отмена»."
 )
+DEBT_REPORT_FILE_PROMPT = (
+    "Отправьте «Отчёт по просроченным лизинговым платежам» из 1С (.xlsx или .xls, до 10 МБ) — "
+    "так, как он выгружается, перестраивать ничего не нужно.\n"
+    "Он не заменяет файл «Контрагенты»: ИНН берутся оттуда, а из отчёта — договоры, их "
+    "просрочка и суммы. Договоры привязываются к организациям по названию; чьи названия "
+    "не совпадут, будут названы в «Качестве данных» отчёта.\n"
+    "Чтобы вернуться к пакету, нажмите «Отмена»."
+)
 INTERACTIONS_FILE_PROMPT = (
     "Отправьте файл .xlsx с листом «Взаимодействия» (до 10 МБ). "
     "Шаблон — выше.\nЧтобы вернуться к пакету, нажмите «Отмена»."
@@ -93,7 +101,10 @@ FILE_KIND_LABELS = {
     FileKind.PAYMENTS: "Платежи",
     FileKind.DEBT_HISTORY: "История долга",
     FileKind.INTERACTIONS: "Взаимодействия",
+    FileKind.DEBT_REPORT: "Отчёт по договорам",
 }
+# Both files are counted in companies, not in rows: that is what the user sees in them.
+_BY_COMPANY = frozenset({FileKind.COUNTERPARTIES, FileKind.DEBT_REPORT})
 CHECK_QUEUED_PREFIX = "Проверка поставлена в очередь"
 CHECK_CANCELLED = "Новая проверка отменена. Черновик, если он был создан, не запускается."
 STATUS_TITLE = "Последняя проверка"
@@ -166,7 +177,7 @@ def period_text(period: Period) -> str:
 
 def composition_line(kind: FileKind, rows: int, coverage: Period | None) -> str:
     label = FILE_KIND_LABELS[kind]
-    unit = "организаций" if kind is FileKind.COUNTERPARTIES else "строк"
+    unit = "организаций" if kind in _BY_COMPANY else "строк"
     text = f"{label} — {unit}: {rows}"
     if coverage is not None:
         text += f", период {period_text(coverage)}"
@@ -205,11 +216,21 @@ def ledger_summary(
     issues: tuple[ImportIssue, ...],
     duplicate: bool,
     composition: tuple[str, ...],
+    contracts: int | None = None,
 ) -> str:
     lines = [f"Файл «{FILE_KIND_LABELS[kind]}» принят"]
     if duplicate:
         lines.append(CHECK_DUPLICATE)
-    lines.append(f"Строк принято: {rows}")
+    if kind is FileKind.DEBT_REPORT:
+        # The report is read as companies with their contracts, so that is what is shown;
+        # «строк» would mean nothing to someone looking at a 1C print.
+        lines.append(f"Организаций: {rows}, договоров: {contracts or 0}")
+        lines.append(
+            "Договоры привяжутся к организациям проверки по названию — "
+            "несовпавшие будут названы в отчёте, на листе «Качество данных»."
+        )
+    else:
+        lines.append(f"Строк принято: {rows}")
     lines.extend(_issues_block(issues))
     if any(issue.severity is IssueSeverity.ERROR for issue in issues):
         lines.append("Строки с ошибками в проверку не попадут.")

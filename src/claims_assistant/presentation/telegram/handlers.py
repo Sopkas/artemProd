@@ -19,6 +19,7 @@ from claims_assistant.application.check_package import (
     PackageAccepted,
     PackageConflict,
     accept_counterparties,
+    accept_debt_report,
     accept_ledger,
     latest_run,
     launch_run,
@@ -37,7 +38,7 @@ from claims_assistant.application.report_delivery import (
     fetch_report,
 )
 from claims_assistant.domain.analysis import FileKind
-from claims_assistant.domain.external import DataMode, Period, Section
+from claims_assistant.domain.external import DataMode, FactKind, Period, Section
 from claims_assistant.domain.inn import InvalidInn
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
@@ -54,6 +55,7 @@ from . import texts
 from .access import AccessMiddleware
 from .card import format_card
 from .menu import (
+    ADD_DEBT_REPORT,
     ADD_HISTORY,
     ADD_INTERACTIONS,
     ADD_PAYMENTS,
@@ -88,6 +90,7 @@ class CheckDialog(StatesGroup):
     waiting_for_payments_file = State()
     waiting_for_history_file = State()
     waiting_for_interactions_file = State()
+    waiting_for_debt_report_file = State()
 
 
 # A dash or whitespace between the dates; a bare hyphen only after a ДД.ММ.ГГГГ date,
@@ -132,6 +135,15 @@ def _composition(run, rows: dict) -> tuple[str, ...]:
     return tuple(
         texts.composition_line(file.kind, rows.get(file.id, 0), file.coverage) for file in run.files
     )
+
+
+def _company_name(check) -> str | None:
+    """What the source calls this company; the overdue report is linked to it by name."""
+    for snapshot in check.snapshots:
+        for fact in snapshot.facts:
+            if fact.kind is FactKind.COMPANY_NAME and isinstance(fact.value, str):
+                return fact.value
+    return None
 
 
 def create_dispatcher(
@@ -215,6 +227,7 @@ def create_dispatcher(
         CheckDialog.waiting_for_payments_file: FileKind.PAYMENTS,
         CheckDialog.waiting_for_history_file: FileKind.DEBT_HISTORY,
         CheckDialog.waiting_for_interactions_file: FileKind.INTERACTIONS,
+        CheckDialog.waiting_for_debt_report_file: FileKind.DEBT_REPORT,
     }
 
     @router.message(StateFilter(*ledger_states), F.document)
@@ -222,13 +235,18 @@ def create_dispatcher(
         kind = ledger_states[await state.get_state()]
         document = message.document
         name = (document.file_name or "").lower()
-        if not name.endswith(".xlsx"):
+        # The overdue report is printed by 1C and comes in the old format too (S7-01).
+        allowed = (".xlsx", ".xls") if kind is FileKind.DEBT_REPORT else (".xlsx",)
+        if not name.endswith(allowed):
             await message.answer(texts.FILE_NOT_XLSX, reply_markup=cancel_menu())
             return
         if document.file_size is None or document.file_size > texts.MAX_UPLOAD_BYTES:
             await message.answer(texts.FILE_TOO_LARGE, reply_markup=cancel_menu())
             return
         data = await state.get_data()
+        if kind is FileKind.DEBT_REPORT:
+            await _receive_debt_report(message, state, bot, document, data)
+            return
         coverage = None
         if kind is FileKind.PAYMENTS:
             coverage = Period(
@@ -264,6 +282,45 @@ def create_dispatcher(
         composition = _composition(result.run, rows)
         await message.answer(
             texts.ledger_summary(kind, result.rows, result.issues, result.duplicate, composition),
+            reply_markup=launch_menu(),
+        )
+
+    async def _receive_debt_report(message, state, bot, document, data) -> None:
+        buffer = BytesIO()
+        await bot.download(document, destination=buffer)
+        try:
+            result = await accept_debt_report(
+                message.from_user.id,
+                data["run_id"],
+                buffer.getvalue(),
+                repository=repository,
+                files=files,
+                reader=reader,
+            )
+        except Exception as exc:
+            logger.error("debt_report_failed error_type=%s", type(exc).__name__)
+            await state.clear()
+            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
+        if not isinstance(result, LedgerAccepted):
+            await message.answer(
+                texts.ledger_rejected(FileKind.DEBT_REPORT, result.issues),
+                reply_markup=cancel_menu(),
+            )
+            return
+        rows = dict(data.get("rows", {}))
+        rows[result.file.id] = result.rows
+        await state.update_data(rows=rows)
+        await state.set_state(CheckDialog.confirming)
+        await message.answer(
+            texts.ledger_summary(
+                FileKind.DEBT_REPORT,
+                result.rows,
+                result.issues,
+                result.duplicate,
+                _composition(result.run, rows),
+                contracts=result.contracts,
+            ),
             reply_markup=launch_menu(),
         )
 
@@ -364,7 +421,13 @@ def create_dispatcher(
         try:
             finances = next((s for s in check.snapshots if s.section is Section.FINANCES), None)
             internal = await internal_context(
-                message.from_user.id, check.inn, repository, files, reader, finances=finances
+                message.from_user.id,
+                check.inn,
+                repository,
+                files,
+                reader,
+                finances=finances,
+                company_name=_company_name(check),
             )
         except Exception as exc:
             # The card is still useful without the internal block; log the type only.
@@ -385,6 +448,7 @@ def create_dispatcher(
         CheckDialog.waiting_for_payments_file,
         CheckDialog.waiting_for_history_file,
         CheckDialog.waiting_for_interactions_file,
+        CheckDialog.waiting_for_debt_report_file,
     )
 
     @router.message(optional_steps, Command("cancel"))
@@ -483,6 +547,16 @@ def create_dispatcher(
         template = BufferedInputFile(build_interactions_template(), filename="vzaimodeystviya.xlsx")
         await message.answer_document(template)
         await message.answer(texts.INTERACTIONS_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.confirming, F.text == ADD_DEBT_REPORT)
+    async def add_debt_report(message: Message, state: FSMContext) -> None:
+        # No template to send: the file is the customer's own 1C print (S7-01).
+        await state.set_state(CheckDialog.waiting_for_debt_report_file)
+        await message.answer(texts.DEBT_REPORT_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_debt_report_file, F.text)
+    async def remind_debt_report_file(message: Message) -> None:
+        await message.answer(texts.DEBT_REPORT_FILE_PROMPT, reply_markup=cancel_menu())
 
     @router.message(CheckDialog.waiting_for_file, F.text)
     async def remind_file(message: Message) -> None:

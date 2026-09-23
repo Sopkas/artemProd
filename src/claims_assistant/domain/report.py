@@ -10,13 +10,14 @@ A demo report may carry predefined demo priorities (control package, S2-06) inst
 rule results; ``ReportMeta.demo_scores`` marks that, and it is only allowed in demo mode.
 """
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from claims_assistant.domain.ai_review import Explanation
 from claims_assistant.domain.analysis import FileKind, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow
+from claims_assistant.domain.debt_report import ContractDebt
 from claims_assistant.domain.external import DataMode, ExternalSnapshot
 from claims_assistant.domain.imports import ImportIssue
 from claims_assistant.domain.indicators import InternalIndicators
@@ -30,6 +31,7 @@ FILE_KIND_TITLES = {
     FileKind.PAYMENTS: "Платежи",
     FileKind.DEBT_HISTORY: "История долга",
     FileKind.INTERACTIONS: "Взаимодействия",
+    FileKind.DEBT_REPORT: "Отчёт по договорам",
 }
 
 
@@ -121,6 +123,9 @@ class AnalysisReport:
     import_issues: tuple[ImportIssue, ...] = ()
     # S4-04: the «Взаимодействия» chronology of the package (rows of report INNs only).
     interactions: tuple[InteractionRow, ...] = ()
+    # S7-01: contracts of the customer's overdue report, by the INN they were linked to.
+    # The report itself names no INN — the link is made by company name (S7-01, A).
+    contracts: Mapping[str, tuple[ContractDebt, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         inns = [row.counterparty.inn for row in self.rows]
@@ -129,6 +134,8 @@ class AnalysisReport:
         known = set(inns)
         if any(item.inn not in known for item in self.interactions):
             raise ValueError("Interactions must belong to report rows")
+        if any(inn not in known for inn in self.contracts):
+            raise ValueError("Contracts must belong to report rows")
 
 
 def demo_assessment(inn: str, priority: Priority) -> Assessment:
