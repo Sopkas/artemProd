@@ -93,7 +93,8 @@ async def test_efrsb_records_are_read_by_their_real_field_names():
     assert second.url is None  # only the source's own https link is kept
     # The machine code is not shown and no procedure is inferred from it.
     assert all("ArbitralDecree" not in str(fact.value) for fact in snapshot.facts)
-    assert any("требует проверки" in reason for reason in snapshot.missing)
+    # S3-06: the register answers by INN, so the role in the case is not established.
+    assert any("Роль организации" in reason for reason in snapshot.missing)
 
 
 async def test_finances_are_read_beside_the_extra_blocks_of_the_live_answer():
@@ -162,7 +163,8 @@ async def test_unknown_event_type_is_kept_and_flagged_for_review():
     assert fact.value == "Сообщение неизвестного типа"
     assert snapshot.evidence[0].record_id == "SYN-1"
     assert snapshot.coverage is Coverage.PARTIAL
-    assert any("требует проверки" in reason for reason in snapshot.missing)
+    # An unrecognised type keeps the message live: unknown is «check it», not «fine».
+    assert any("Роль организации" in reason for reason in snapshot.missing)
 
 
 # --- exhausted quota ---

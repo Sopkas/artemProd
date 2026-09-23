@@ -98,9 +98,9 @@ def test_project_bankruptcy_makes_dated_facts_linked_to_source():
     ids = {e.id for e in snapshot.evidence}
     assert all(set(f.evidence_ids) <= ids for f in snapshot.facts)
     assert snapshot.evidence[0].record_id == "A-1"
-    # Messages present but their meaning is not auto-classified.
+    # Messages present, but the register does not say in which role (S3-06).
     assert snapshot.coverage == Coverage.PARTIAL
-    assert any("требует проверки" in reason for reason in snapshot.missing)
+    assert any("Роль организации" in reason for reason in snapshot.missing)
 
 
 def test_project_bankruptcy_complete_and_empty_has_no_facts():

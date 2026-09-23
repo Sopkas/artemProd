@@ -171,6 +171,7 @@ flowchart TD
 - [Архитектура и ответственность модулей](docs/architecture.md).
 - [Входные данные и отчёт](docs/data-contracts.md).
 - [Правила приоритизации](docs/scoring.md).
+- [Трактовка сообщений ЕФРСБ](docs/efrsb-events.md).
 - [Контекст и инструкция для ИИ (v1, на согласование)](docs/ai-context.md).
 - [Оценочные сценарии для ИИ](docs/ai-evals.md).
 - [Интеграции и подтверждённые возможности Checko](docs/integrations.md).

@@ -18,6 +18,8 @@ class FactKind(StrEnum):
     REVENUE = "revenue"
     NET_PROFIT = "net_profit"
     BANKRUPTCY_EVENT = "bankruptcy_event"
+    # S3-06: a message about a case that is over; kept as evidence, raises nothing.
+    BANKRUPTCY_CLOSED = "bankruptcy_closed"
 
 
 class CompanyStatus(StrEnum):
