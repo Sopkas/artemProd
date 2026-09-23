@@ -24,4 +24,5 @@ python-dotenv==1.2.3
 sqlalchemy==2.0.54
 typing-extensions==4.16.0
 typing-inspection==0.4.4
+xlrd==2.0.2
 yarl==1.24.5

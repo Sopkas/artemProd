@@ -93,7 +93,8 @@ async def test_efrsb_records_are_read_by_their_real_field_names():
     assert second.url is None  # only the source's own https link is kept
     # The machine code is not shown and no procedure is inferred from it.
     assert all("ArbitralDecree" not in str(fact.value) for fact in snapshot.facts)
-    assert any("требует проверки" in reason for reason in snapshot.missing)
+    # S3-06: the register answers by INN, so the role in the case is not established.
+    assert any("Роль организации" in reason for reason in snapshot.missing)
 
 
 async def test_finances_are_read_beside_the_extra_blocks_of_the_live_answer():
@@ -162,7 +163,8 @@ async def test_unknown_event_type_is_kept_and_flagged_for_review():
     assert fact.value == "Сообщение неизвестного типа"
     assert snapshot.evidence[0].record_id == "SYN-1"
     assert snapshot.coverage is Coverage.PARTIAL
-    assert any("требует проверки" in reason for reason in snapshot.missing)
+    # An unrecognised type keeps the message live: unknown is «check it», not «fine».
+    assert any("Роль организации" in reason for reason in snapshot.missing)
 
 
 # --- exhausted quota ---
@@ -221,3 +223,39 @@ async def test_renamed_record_fields_are_reported_not_silently_dropped():
     snapshot = await fetch(Section.BANKRUPTCY, Answer(fixture("efrsb_record_fields_changed")))
     assert snapshot.facts == ()
     assert any("без распознанной даты" in reason for reason in snapshot.missing)
+
+
+# --- entrepreneurs (S7-02) ---
+
+ENTREPRENEUR = "500100732259"  # synthetic: satisfies both control digits
+
+
+class Never:
+    """Fails the test if the section is asked about at all."""
+
+    async def request(self, *args):
+        raise AssertionError("запрос к источнику не должен уходить")
+
+
+@pytest.mark.parametrize("section", [Section.COMPANY, Section.FINANCES])
+async def test_sections_that_do_not_exist_for_an_entrepreneur_are_an_honest_gap(section):
+    """Asking the company method about a 12-digit INN would answer «не найдено», and
+    that reads as «no such person» — which is false. No request is spent either."""
+    provider = CheckoCompanyDataProvider(
+        KEY, Never(), lambda: NOW, bankruptcy_transport=Never(), finances_transport=Never()
+    )
+    (snapshot,) = await provider.fetch(CompanyDataRequest(ENTREPRENEUR, (section,)))
+    assert snapshot.status is FetchStatus.UNAVAILABLE
+    assert snapshot.error.code == "not_supported"
+    assert snapshot.coverage is Coverage.UNAVAILABLE and not is_no_risk(snapshot)
+    assert "для ИП" in snapshot.missing[0]
+
+
+async def test_the_register_of_bankruptcies_is_still_asked_about_an_entrepreneur():
+    """Individuals go bankrupt too, and the register answers by INN for them as well."""
+    transport = Answer(fixture("efrsb_empty_one_page"))
+    provider = CheckoCompanyDataProvider(
+        KEY, Never(), lambda: NOW, bankruptcy_transport=transport, finances_transport=Never()
+    )
+    (snapshot,) = await provider.fetch(CompanyDataRequest(ENTREPRENEUR, (Section.BANKRUPTCY,)))
+    assert transport.calls == 1 and snapshot.status is FetchStatus.OK

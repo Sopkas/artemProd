@@ -8,14 +8,14 @@ issue instead of an exception, so an unreadable upload yields no rows. The INNs 
 from collections.abc import Collection
 from datetime import date
 
-from claims_assistant.domain import debt_history, interactions, payments
+from claims_assistant.domain import debt_history, export_1c, interactions, payments
 from claims_assistant.domain.counterparties import ImportLimits
 from claims_assistant.domain.debt_history import DebtHistoryImport
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.interactions import InteractionsImport
 from claims_assistant.domain.payments import PaymentsImport
 
-from .imports import Sheet, SheetReader, WorkbookError
+from .imports import RawSheetReader, Sheet, SheetReader, WorkbookError
 
 
 def _read(
@@ -77,4 +77,44 @@ def import_interactions(
     header, rows = sheet
     return interactions.parse_interactions(
         header, rows, known_inns=known_inns, analysis_date=analysis_date, limits=limits
+    )
+
+
+def import_payments_export(
+    reader: RawSheetReader,
+    source: object,
+    *,
+    inn: str,
+    analysis_date: date | None,
+    limits: ImportLimits = ImportLimits(),
+) -> tuple[PaymentsImport, export_1c.ExportHeader]:
+    """The customer's own 1C print of one counterparty's payments (S4-05).
+
+    The file says nothing about the INN — the dialog does, and it is passed in. The
+    covered period comes back from the export's own header, so the user need not type it;
+    what the rows say is still checked by the contract's parser.
+    """
+    try:
+        rows = reader.read_rows(source, limits)
+    except WorkbookError as error:
+        issue = ImportIssue(
+            code=error.code,
+            severity=IssueSeverity.ERROR,
+            sheet=payments.SHEET_NAME,
+            reason=error.reason,
+        )
+        return PaymentsImport(issues=(issue,)), export_1c.ExportHeader()
+    converted = export_1c.convert_payments(list(rows), inn)
+    if not converted.rows and converted.issues:
+        return PaymentsImport(issues=converted.issues), converted.export
+    result = payments.parse_payments(
+        converted.header,
+        converted.rows,
+        known_inns={inn},
+        analysis_date=analysis_date,
+        limits=limits,
+    )
+    return (
+        PaymentsImport(rows=result.rows, issues=converted.issues + result.issues),
+        converted.export,
     )
