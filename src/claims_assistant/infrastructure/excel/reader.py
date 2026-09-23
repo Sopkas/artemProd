@@ -17,6 +17,7 @@ from claims_assistant.application.imports import (
     WorkbookTooLarge,
 )
 from claims_assistant.domain.counterparties import Cell, FormulaCell, ImportLimits
+from claims_assistant.domain.export_1c import MAX_HEADER_ROWS as MAX_EXPORT_HEADER_ROWS
 
 
 class OpenpyxlSheetReader:
@@ -59,6 +60,34 @@ class OpenpyxlSheetReader:
             raise CorruptWorkbook() from None
         if total > limits.max_unpacked_bytes:
             raise WorkbookTooLarge()
+
+    def read_rows(
+        self, source: object, limits: ImportLimits, sheet: str | None = None
+    ) -> tuple[tuple[Cell, ...], ...]:
+        """Every row of one sheet, header block included (S4-05).
+
+        The customer's own export prints a parameters block above the table and names the
+        sheet «Лист_1», so neither «the first row is the header» nor a known sheet name
+        holds; ``sheet=None`` takes the workbook's first sheet.
+        """
+        data = self._as_bytes(source)
+        self._guard_unpacked_size(data, limits)
+        try:
+            workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
+        except (InvalidFileException, zipfile.BadZipFile, KeyError, OSError, ValueError):
+            raise CorruptWorkbook() from None
+        try:
+            if sheet is not None and sheet not in workbook.sheetnames:
+                raise SheetMissing(sheet)
+            worksheet = workbook[sheet] if sheet is not None else workbook[workbook.sheetnames[0]]
+            rows = []
+            for row in worksheet.iter_rows():
+                rows.append(tuple(OpenpyxlSheetReader._cell(cell) for cell in row))
+                if len(rows) > limits.max_rows + MAX_EXPORT_HEADER_ROWS:
+                    break
+            return tuple(rows)
+        finally:
+            workbook.close()
 
     @staticmethod
     def _extract(worksheet: object, limits: ImportLimits) -> Sheet:
