@@ -1,12 +1,20 @@
-"""S2-04: openpyxl-backed sheet reader with archive-size and row guards.
+"""S2-04: sheet reader with archive-size and row guards; .xls as well since S4-05.
 
 The unpacked size is checked before openpyxl parses the archive, so a decompression
 bomb is rejected without allocating its expanded content.
+
+The customer's own exports come out of 1C in the old .xls format, so that is read too,
+through ``xlrd``. One difference cannot be papered over: **a formula inside an .xls is
+invisible to us**. The file keeps the value Excel computed last, and the library hands it
+over as if it had been typed; in an .xlsx a formula is refused, because a saved value may
+be stale. Callers tell the formats apart with ``is_legacy_xls`` and warn the user.
 """
 
 import io
 import zipfile
+from datetime import datetime, time
 
+import xlrd
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
@@ -19,12 +27,24 @@ from claims_assistant.application.imports import (
 from claims_assistant.domain.counterparties import Cell, FormulaCell, ImportLimits
 from claims_assistant.domain.export_1c import MAX_HEADER_ROWS as MAX_EXPORT_HEADER_ROWS
 
+# Compound File Binary header: every .xls — and any other OLE2 document — starts with it.
+_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def is_legacy_xls(source: bytes) -> bool:
+    """Whether these bytes are an old-format .xls rather than an .xlsx archive."""
+    return source[:8] == _OLE2_MAGIC
+
 
 class OpenpyxlSheetReader:
     """Read a named sheet from an .xlsx given as bytes, a path or a binary stream."""
 
     def read(self, source: object, sheet: str, limits: ImportLimits) -> Sheet:
         data = self._as_bytes(source)
+        if is_legacy_xls(data):
+            rows = self._legacy_rows(data, limits, sheet)
+            header = rows[0] if rows else ()
+            return header, [(index + 2, cells) for index, cells in enumerate(rows[1:])]
         self._guard_unpacked_size(data, limits)
         try:
             workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
@@ -71,6 +91,8 @@ class OpenpyxlSheetReader:
         holds; ``sheet=None`` takes the workbook's first sheet.
         """
         data = self._as_bytes(source)
+        if is_legacy_xls(data):
+            return self._legacy_rows(data, limits, sheet)
         self._guard_unpacked_size(data, limits)
         try:
             workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
@@ -103,6 +125,63 @@ class OpenpyxlSheetReader:
             if len(rows) > limits.max_rows:
                 break
         return header, rows
+
+    @staticmethod
+    def _legacy_rows(
+        data: bytes, limits: ImportLimits, sheet: str | None
+    ) -> tuple[tuple[Cell, ...], ...]:
+        """Rows of an old-format .xls; the sheet by name, or the first one."""
+        if len(data) > limits.max_unpacked_bytes:
+            raise WorkbookTooLarge()
+        try:
+            book = xlrd.open_workbook(file_contents=data, on_demand=True)
+        except Exception:  # xlrd raises its own family for every kind of broken file
+            raise CorruptWorkbook() from None
+        try:
+            if sheet is not None and sheet not in book.sheet_names():
+                raise SheetMissing(sheet)
+            worksheet = book.sheet_by_name(sheet) if sheet is not None else book.sheet_by_index(0)
+            rows = []
+            for index in range(worksheet.nrows):
+                rows.append(
+                    tuple(
+                        OpenpyxlSheetReader._legacy_cell(
+                            worksheet.cell(index, column), book.datemode
+                        )
+                        for column in range(worksheet.ncols)
+                    )
+                )
+                if len(rows) > limits.max_rows + MAX_EXPORT_HEADER_ROWS:
+                    break
+            return tuple(rows)
+        finally:
+            book.release_resources()
+
+    @staticmethod
+    def _legacy_cell(cell: object, datemode: int) -> Cell:
+        """One .xls cell in the same types an .xlsx gives: str, int, float, date, bool.
+
+        A formula is not visible here — xlrd reports the value the file carries — so an
+        .xls cannot be checked for formulas the way an .xlsx is.
+        """
+        kind, value = cell.ctype, cell.value
+        if kind == xlrd.XL_CELL_EMPTY or kind == xlrd.XL_CELL_BLANK:
+            return None
+        if kind == xlrd.XL_CELL_TEXT:
+            # A text that starts with "=" is still refused, as in an .xlsx.
+            return FormulaCell() if value.startswith("=") else value
+        if kind == xlrd.XL_CELL_BOOLEAN:
+            return bool(value)
+        if kind == xlrd.XL_CELL_ERROR:
+            return None  # #REF!, #DIV/0! and the like carry no value to read
+        if kind == xlrd.XL_CELL_DATE:
+            parts = xlrd.xldate_as_tuple(value, datemode)
+            if parts[:3] == (0, 0, 0):
+                return time(*parts[3:])
+            moment = datetime(*parts)
+            return moment.date() if parts[3:] == (0, 0, 0) else moment
+        # Numbers come back as floats; whole ones become int, as openpyxl would give.
+        return int(value) if float(value).is_integer() else value
 
     @staticmethod
     def _cell(cell: object) -> Cell:
