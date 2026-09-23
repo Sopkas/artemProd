@@ -125,23 +125,26 @@ class OpenpyxlSheetReader:
             book = xlrd.open_workbook(file_contents=data, formatting_info=True)
         except Exception:
             raise CorruptWorkbook() from None
-        if sheet is not None and sheet not in book.sheet_names():
-            raise SheetMissing(sheet)
-        worksheet = book.sheet_by_name(sheet) if sheet is not None else book.sheet_by_index(0)
-        rows: list[tuple[int, tuple[Cell, ...]]] = []
-        for index in range(worksheet.nrows):
-            cells = tuple(
-                OpenpyxlSheetReader._legacy_cell(worksheet.cell(index, column), book.datemode)
-                for column in range(worksheet.ncols)
-            )
-            indent = 0
-            if worksheet.ncols:
-                fmt = book.xf_list[worksheet.cell_xf_index(index, 0)]
-                indent = int(getattr(fmt.alignment, "indent_level", 0) or 0)
-            rows.append((indent, cells))
-            if len(rows) > limits.max_rows + MAX_EXPORT_HEADER_ROWS:
-                break
-        return tuple(rows)
+        try:
+            if sheet is not None and sheet not in book.sheet_names():
+                raise SheetMissing(sheet)
+            worksheet = book.sheet_by_name(sheet) if sheet is not None else book.sheet_by_index(0)
+            rows: list[tuple[int, tuple[Cell, ...]]] = []
+            for index in range(worksheet.nrows):
+                cells = tuple(
+                    OpenpyxlSheetReader._legacy_cell(worksheet.cell(index, column), book.datemode)
+                    for column in range(worksheet.ncols)
+                )
+                indent = 0
+                if worksheet.ncols:
+                    fmt = book.xf_list[worksheet.cell_xf_index(index, 0)]
+                    indent = int(getattr(fmt.alignment, "indent_level", 0) or 0)
+                rows.append((indent, cells))
+                if len(rows) > limits.max_rows + MAX_EXPORT_HEADER_ROWS:
+                    break
+            return tuple(rows)
+        finally:
+            book.release_resources()
 
     def read_rows(
         self, source: object, limits: ImportLimits, sheet: str | None = None
