@@ -40,6 +40,7 @@ _FACT_LABELS = {
     FactKind.REVENUE: "Выручка",
     FactKind.NET_PROFIT: "Чистая прибыль",
     FactKind.BANKRUPTCY_EVENT: "Событие",
+    FactKind.BANKRUPTCY_CLOSED: "Дело прекращено",
 }
 _COVERAGE_LABELS = {
     Coverage.COMPLETE: "проверено полностью",

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from claims_assistant.domain.external import DataMode, ExternalSnapshot
-from claims_assistant.domain.inn import validate_legal_inn
+from claims_assistant.domain.inn import validate_inn
 
 from .company_data import CompanyDataProvider, CompanyDataRequest, RequestLimits
 
@@ -35,7 +35,7 @@ async def check_company(
     limits: RequestLimits = RequestLimits(),
 ) -> CompanyCheck:
     """Raise InvalidInn for a bad INN; source failures come back inside the snapshots."""
-    inn = validate_legal_inn(raw_inn)
+    inn = validate_inn(raw_inn)
     request = CompanyDataRequest(inn=inn, limits=limits)
     snapshots = await provider.fetch(request)
     if tuple(snapshot.section for snapshot in snapshots) != request.sections:

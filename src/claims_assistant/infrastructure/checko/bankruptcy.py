@@ -26,6 +26,7 @@ from typing import Protocol
 
 import aiohttp
 
+from claims_assistant.domain import efrsb
 from claims_assistant.domain.external import (
     Coverage,
     DataMode,
@@ -162,6 +163,7 @@ def project_bankruptcy(
         if observed_on is None:
             unreadable += 1
             continue
+        kind = efrsb.classify(record.get("Тип"), record.get("ТипНаим"))
         label = _label(record)
         # The source's own identifier of the message, and the page a person can open.
         record_id = _text(record.get("GUID")) or _text(record.get("Номер"))
@@ -176,7 +178,10 @@ def project_bankruptcy(
             Fact(
                 f"efrsb-event-{index}",
                 inn,
-                FactKind.BANKRUPTCY_EVENT,
+                # S3-06: a closed case is evidence, not a reason to act today.
+                FactKind.BANKRUPTCY_EVENT
+                if efrsb.raises_priority(kind)
+                else FactKind.BANKRUPTCY_CLOSED,
                 label[:500],
                 (item.id,),
                 observed_on=observed_on,
@@ -188,9 +193,17 @@ def project_bankruptcy(
         missing.append("Выборка сообщений ЕФРСБ неполная; проверьте реестр вручную.")
     if unreadable:
         missing.append("Часть сообщений ЕФРСБ без распознанной даты не учтена.")
-    if facts:
-        # Types are not classified here; the meaning of each message needs manual review.
-        missing.append("Значение сообщений ЕФРСБ требует проверки специалистом.")
+    live = [fact for fact in facts if fact.kind is FactKind.BANKRUPTCY_EVENT]
+    if live:
+        # The register answers by INN and says nothing about the role: the company may be
+        # the creditor in someone else's case (S3-06). A procedure is confirmed by the
+        # company's own status, not by a message.
+        missing.append(
+            "Роль организации в деле о банкротстве не подтверждена: реестр отвечает по ИНН "
+            "и возвращает сообщения и там, где организация — кредитор. Проверьте по ссылке."
+        )
+    if len(facts) > len(live):
+        missing.append("Есть сообщения о прекращённых делах; они учтены как история.")
 
     coverage = Coverage.COMPLETE if not missing else Coverage.PARTIAL
     return ExternalSnapshot(

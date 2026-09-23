@@ -59,6 +59,7 @@ _FACT_TITLES = {
     FactKind.REVENUE: "Выручка",
     FactKind.NET_PROFIT: "Чистая прибыль",
     FactKind.BANKRUPTCY_EVENT: "Сообщение ЕФРСБ",
+    FactKind.BANKRUPTCY_CLOSED: "ЕФРСБ: дело прекращено",
 }
 _STATUS_TITLES = {
     CompanyStatus.ACTIVE: "действует",
