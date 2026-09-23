@@ -218,3 +218,71 @@ async def test_what_a_check_spent_is_added_to_the_month(tmp_path):
     ).process(run)
     assert spend.added == [Decimal("0.14")]  # two companies, 0,07 each
     assert spend.totals["2026-09"] == Decimal("0.14")
+
+
+async def test_a_failure_to_record_the_spend_does_not_cost_the_user_the_report(tmp_path):
+    """The money is gone either way; refusing would take the report away as well."""
+    from claims_assistant.application.analysis_repository import RepositoryError
+    from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
+    from claims_assistant.infrastructure.llm.stub import StubRecommendationProvider
+    from tests.unit.test_analysis_pipeline import NOW as RUN_NOW
+    from tests.unit.test_analysis_pipeline import OWNER, guard, pipeline
+    from tests.unit.test_explanations import package
+
+    class Broken(Spend):
+        async def add(self, month, amount):
+            raise RepositoryError("Сбой хранилища расходов ИИ.")
+
+    run, files, repository = await package(tmp_path)
+    outcome = await pipeline(
+        files,
+        repository,
+        guard(DemoCompanyDataProvider()),
+        explainer=StubRecommendationProvider(),
+        ai_spend=Broken(),
+        ai_month_limit_rub=Decimal("1000"),
+        clock=lambda: RUN_NOW,
+    ).process(run)
+    assert outcome.status.value in ("completed", "partial")
+    assert await repository.get_report(OWNER, run.id) is not None
+
+
+async def test_a_month_that_cannot_be_read_stops_the_spending(tmp_path):
+    """The opposite decision, on purpose: not knowing the balance means not spending."""
+    from claims_assistant.application.analysis_repository import RepositoryError
+    from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
+    from claims_assistant.infrastructure.llm.stub import StubRecommendationProvider
+    from tests.unit.test_analysis_pipeline import NOW as RUN_NOW
+    from tests.unit.test_analysis_pipeline import guard, pipeline
+    from tests.unit.test_explanations import package
+
+    class Unreadable(Spend):
+        async def spent(self, month):
+            raise RepositoryError("Счётчик расходов ИИ повреждён.")
+
+    run, files, repository = await package(tmp_path)
+    model = StubRecommendationProvider()
+    with pytest.raises(RepositoryError):
+        await pipeline(
+            files,
+            repository,
+            guard(DemoCompanyDataProvider()),
+            explainer=model,
+            ai_spend=Unreadable(),
+            ai_month_limit_rub=Decimal("1000"),
+            clock=lambda: RUN_NOW,
+        ).process(run)
+    assert model.requests == []
+
+
+async def test_two_writers_of_one_month_queue_instead_of_failing(tmp_path):
+    """SQLite's deferred transaction would deadlock two checks finishing together."""
+    import asyncio
+
+    repository = open_sqlite_repository(tmp_path / "claims.sqlite3")
+    try:
+        store = SqliteAiSpendStore(repository.engine)
+        await asyncio.gather(*(store.add("2026-09", Decimal("0.01")) for _ in range(8)))
+        assert await store.spent("2026-09") == Decimal("0.08")  # nothing lost, nothing doubled
+    finally:
+        repository.close()

@@ -36,6 +36,7 @@ from claims_assistant.domain.steps import RUN_SCOPE, StepResult, StepStatus
 from .ai_guard import AiBudget, AiRunLimits, ScopedExplainerFactory
 from .ai_spend import NO_MONEY_LEFT, AiSpendStore, MonthlyLimit, month_of
 from .analysis_queue import RunOutcome
+from .analysis_repository import RepositoryError
 from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
 from .explanations import EXPLANATION_STEP, StoredExplanation
@@ -495,9 +496,21 @@ class AnalysisPipeline:
         return replace(limits, max_rub=left)
 
     async def _record_spend(self, budget: AiBudget) -> None:
+        """Add what this check spent to the month — and never fail the check over it.
+
+        Reading the counter before the run is fatal on purpose: not knowing the balance
+        means not spending. Writing afterwards is the opposite case — the money is gone
+        whatever we do, and refusing to record it would also take away the report the
+        user has already paid for. So a write failure is loud in the journal and nothing
+        more (review B on #59).
+        """
         if self._ai_spend is None or budget.spent_rub <= 0:
             return
-        total = await self._ai_spend.add(month_of(self._clock()), budget.spent_rub)
+        try:
+            total = await self._ai_spend.add(month_of(self._clock()), budget.spent_rub)
+        except RepositoryError:
+            logger.error("ai_spend_not_recorded run_rub=%s", format(budget.spent_rub, "f"))
+            return
         logger.info(
             "ai_spend run_rub=%s month_rub=%s", format(budget.spent_rub, "f"), format(total, "f")
         )

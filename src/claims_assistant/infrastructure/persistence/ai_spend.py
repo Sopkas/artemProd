@@ -55,19 +55,31 @@ class SqliteAiSpendStore:
         return Decimal(0) if raw is None else _amount(raw)
 
     def _add(self, month: str, amount: Decimal) -> Decimal:
+        """Read the month and write it back under one lock.
+
+        ``BEGIN IMMEDIATE`` takes the write lock before the read: with SQLite's default
+        deferred transaction two checks finishing at the same moment would both hold a
+        read lock and one would fail to upgrade it — «database is locked» instead of a
+        queue (review B on #59). Nothing is lost either way, but a needless failure here
+        used to cost a whole check.
+        """
         stamp = datetime.now(UTC).replace(microsecond=0).isoformat()
-        with self._engine.begin() as connection:
-            raw = connection.execute(
-                select(ai_spend.c.spent_rub).where(ai_spend.c.month == month).with_for_update()
-                if connection.dialect.name != "sqlite"
-                else select(ai_spend.c.spent_rub).where(ai_spend.c.month == month)
-            ).scalar_one_or_none()
-            total = (Decimal(0) if raw is None else _amount(raw)) + amount
-            values = {"spent_rub": format(total, "f"), "updated_at": stamp}
-            if raw is None:
-                connection.execute(ai_spend.insert().values(month=month, **values))
-            else:
-                connection.execute(
-                    ai_spend.update().where(ai_spend.c.month == month).values(**values)
-                )
+        with self._engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                raw = connection.execute(
+                    select(ai_spend.c.spent_rub).where(ai_spend.c.month == month)
+                ).scalar_one_or_none()
+                total = (Decimal(0) if raw is None else _amount(raw)) + amount
+                values = {"spent_rub": format(total, "f"), "updated_at": stamp}
+                if raw is None:
+                    connection.execute(ai_spend.insert().values(month=month, **values))
+                else:
+                    connection.execute(
+                        ai_spend.update().where(ai_spend.c.month == month).values(**values)
+                    )
+            except Exception:
+                connection.exec_driver_sql("ROLLBACK")
+                raise
+            connection.exec_driver_sql("COMMIT")
         return total
