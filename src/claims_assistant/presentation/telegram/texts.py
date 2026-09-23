@@ -64,6 +64,21 @@ CHECK_CONFIRM = (
     "Нажмите «Запустить проверку». Дополнительно можно добавить файлы «Платежи», "
     "«История долга» и «Взаимодействия» или нажать «Отмена»."
 )
+PAYMENTS_SOURCE_PROMPT = (
+    "Как пришлёте платежи?\n"
+    "• «По нашему шаблону» — один файл на всех должников, период укажете вы.\n"
+    "• «Выгрузка из 1С» — печатная форма по одной организации: период возьмём из самого "
+    "файла, а вы скажете, чья это выгрузка."
+)
+EXPORT_INN_PROMPT = (
+    "Отправьте ИНН организации, по которой сделана выгрузка: в самом файле его нет, "
+    "а по названию в шапке опознать организацию нельзя.\n"
+    "ИНН должен быть из файла «Контрагенты» этой проверки."
+)
+EXPORT_FILE_PROMPT = (
+    "Отправьте файл выгрузки .xlsx (до 10 МБ) — так, как его печатает 1С, "
+    "перестраивать ничего не нужно.\nЧтобы вернуться к пакету, нажмите «Отмена»."
+)
 PAYMENTS_PERIOD_PROMPT = (
     "Укажите период, за который выгрузка платежей полная: ДД.ММ.ГГГГ–ДД.ММ.ГГГГ "
     "(например, 01.06.2026–31.08.2026).\n"
@@ -197,6 +212,27 @@ def _composition_block(composition: tuple[str, ...]) -> list[str]:
     if not composition:
         return []
     return ["Состав пакета:"] + [f"• {line}" for line in composition]
+
+
+def export_summary(export, rows: int) -> str:
+    """What the export's own header said — so a file about the wrong client is noticed."""
+    lines = []
+    if export.counterparty:
+        lines.append(f"Контрагент в файле: {export.counterparty}")
+    if export.organization:
+        lines.append(f"Организация: {export.organization}")
+    if export.period is not None:
+        lines.append(
+            "Период выгрузки из файла: "
+            f"{export.period.start.strftime('%d.%m.%Y')}–{export.period.end.strftime('%d.%m.%Y')}"
+        )
+    else:
+        lines.append(
+            "Период в файле не указан: полнота выгрузки неизвестна, "
+            "показатель по платежам останется неопределённым."
+        )
+    lines.append(f"Платежей принято: {rows}. В пакет сохранён лист «Платежи» из этой выгрузки.")
+    return "\n".join(lines)
 
 
 def ledger_summary(

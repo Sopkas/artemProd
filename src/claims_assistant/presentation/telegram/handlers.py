@@ -20,6 +20,7 @@ from claims_assistant.application.check_package import (
     PackageConflict,
     accept_counterparties,
     accept_ledger,
+    accept_payments_export,
     latest_run,
     launch_run,
 )
@@ -38,8 +39,9 @@ from claims_assistant.application.report_delivery import (
 )
 from claims_assistant.domain.analysis import FileKind
 from claims_assistant.domain.external import DataMode, Period, Section
-from claims_assistant.domain.inn import InvalidInn
+from claims_assistant.domain.inn import InvalidInn, validate_legal_inn
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
+from claims_assistant.infrastructure.excel import ledgers
 from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
 from claims_assistant.infrastructure.excel.ledgers import (
     build_debt_history_template,
@@ -61,6 +63,8 @@ from .menu import (
     CHECK_INN,
     LAUNCH,
     NEW_CHECK,
+    PAYMENTS_EXPORT,
+    PAYMENTS_TEMPLATE,
     REPORT,
     STATUS,
     TODAY,
@@ -68,6 +72,7 @@ from .menu import (
     date_menu,
     launch_menu,
     main_menu,
+    payments_source_menu,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,8 +89,11 @@ class CheckDialog(StatesGroup):
     waiting_for_file = State()
     confirming = State()
     # S4-01: optional files are added from the confirmation step and return to it.
+    waiting_for_payments_source = State()
     waiting_for_payments_period = State()
     waiting_for_payments_file = State()
+    waiting_for_export_inn = State()
+    waiting_for_export_file = State()
     waiting_for_history_file = State()
     waiting_for_interactions_file = State()
 
@@ -267,6 +275,53 @@ def create_dispatcher(
             reply_markup=launch_menu(),
         )
 
+    @router.message(CheckDialog.waiting_for_export_file, F.document)
+    async def receive_export_file(message: Message, state: FSMContext, bot: Bot) -> None:
+        document = message.document
+        if not (document.file_name or "").lower().endswith(".xlsx"):
+            await message.answer(texts.FILE_NOT_XLSX, reply_markup=cancel_menu())
+            return
+        if document.file_size is None or document.file_size > texts.MAX_UPLOAD_BYTES:
+            await message.answer(texts.FILE_TOO_LARGE, reply_markup=cancel_menu())
+            return
+        data = await state.get_data()
+        buffer = BytesIO()
+        await bot.download(document, destination=buffer)
+        try:
+            result = await accept_payments_export(
+                message.from_user.id,
+                data["run_id"],
+                buffer.getvalue(),
+                inn=data["export_inn"],
+                repository=repository,
+                files=files,
+                reader=reader,
+                sheets=ledgers,
+            )
+        except Exception as exc:
+            logger.error("export_failed error_type=%s", type(exc).__name__)
+            await state.clear()
+            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
+        if not isinstance(result, LedgerAccepted):
+            await message.answer(
+                texts.ledger_rejected(FileKind.PAYMENTS, result.issues),
+                reply_markup=cancel_menu(),
+            )
+            return
+        rows = dict(data.get("rows", {}))
+        rows[result.file.id] = result.rows
+        await state.update_data(rows=rows)
+        await state.set_state(CheckDialog.confirming)
+        composition = _composition(result.run, rows)
+        summary = texts.ledger_summary(
+            FileKind.PAYMENTS, result.rows, result.issues, result.duplicate, composition
+        )
+        await message.answer(
+            texts.export_summary(result.export, result.rows) + "\n\n" + summary,
+            reply_markup=launch_menu(),
+        )
+
     @router.message(F.document | F.photo | F.video | F.audio | F.voice | F.animation | F.video_note)
     async def attachment(message: Message, state: FSMContext) -> None:
         await state.clear()
@@ -381,8 +436,11 @@ def create_dispatcher(
         await message.answer(texts.CHECK_DATE_PROMPT, reply_markup=date_menu())
 
     optional_steps = StateFilter(
+        CheckDialog.waiting_for_payments_source,
         CheckDialog.waiting_for_payments_period,
         CheckDialog.waiting_for_payments_file,
+        CheckDialog.waiting_for_export_inn,
+        CheckDialog.waiting_for_export_file,
         CheckDialog.waiting_for_history_file,
         CheckDialog.waiting_for_interactions_file,
     )
@@ -451,8 +509,37 @@ def create_dispatcher(
 
     @router.message(CheckDialog.confirming, F.text == ADD_PAYMENTS)
     async def add_payments(message: Message, state: FSMContext) -> None:
+        await state.set_state(CheckDialog.waiting_for_payments_source)
+        await message.answer(texts.PAYMENTS_SOURCE_PROMPT, reply_markup=payments_source_menu())
+
+    @router.message(CheckDialog.waiting_for_payments_source, F.text == PAYMENTS_TEMPLATE)
+    async def payments_by_template(message: Message, state: FSMContext) -> None:
         await state.set_state(CheckDialog.waiting_for_payments_period)
         await message.answer(texts.PAYMENTS_PERIOD_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_payments_source, F.text == PAYMENTS_EXPORT)
+    async def payments_by_export(message: Message, state: FSMContext) -> None:
+        await state.set_state(CheckDialog.waiting_for_export_inn)
+        await message.answer(texts.EXPORT_INN_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_payments_source, F.text)
+    async def remind_payments_source(message: Message) -> None:
+        await message.answer(texts.PAYMENTS_SOURCE_PROMPT, reply_markup=payments_source_menu())
+
+    @router.message(CheckDialog.waiting_for_export_inn, F.text)
+    async def receive_export_inn(message: Message, state: FSMContext) -> None:
+        try:
+            inn = validate_legal_inn(message.text or "")
+        except InvalidInn as error:
+            await message.answer(str(error), reply_markup=cancel_menu())
+            return
+        await state.update_data(export_inn=inn)
+        await state.set_state(CheckDialog.waiting_for_export_file)
+        await message.answer(texts.EXPORT_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_export_file, F.text)
+    async def remind_export_file(message: Message) -> None:
+        await message.answer(texts.EXPORT_FILE_PROMPT, reply_markup=cancel_menu())
 
     @router.message(CheckDialog.waiting_for_payments_period, F.text)
     async def receive_period(message: Message, state: FSMContext) -> None:
