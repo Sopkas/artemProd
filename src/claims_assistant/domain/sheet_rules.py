@@ -11,7 +11,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
-from claims_assistant.domain.inn import InvalidInn, validate_legal_inn
+from claims_assistant.domain.inn import InvalidInn, validate_inn
 
 
 class FormulaCell:
@@ -106,7 +106,7 @@ def parse_inn(cell: Cell) -> str:
     else:
         raise CellError("inn_invalid", "ИНН должен быть числом или строкой из цифр.")
     try:
-        return validate_legal_inn(text)
+        return validate_inn(text)
     except InvalidInn as error:
         # The validator message is already safe and never repeats the raw value.
         raise CellError("inn_invalid", str(error)) from None

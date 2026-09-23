@@ -34,7 +34,7 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
-from claims_assistant.domain.inn import InvalidInn, validate_legal_inn
+from claims_assistant.domain.inn import InvalidInn, validate_inn
 from claims_assistant.domain.interactions import InteractionRow
 from claims_assistant.domain.payments import PaymentRow
 from claims_assistant.domain.scoring import Assessment, Priority, Signal
@@ -373,7 +373,7 @@ def _money(value: Any, key: str) -> Decimal:
 def _stored_inn(data: Any, key: str = "inn") -> str:
     raw = _field(data, key, str)
     try:
-        return validate_legal_inn(raw)
+        return validate_inn(raw)
     except InvalidInn:
         raise PayloadError("Stored INN is not a valid legal-entity INN") from None
 

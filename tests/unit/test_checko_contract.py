@@ -221,3 +221,39 @@ async def test_renamed_record_fields_are_reported_not_silently_dropped():
     snapshot = await fetch(Section.BANKRUPTCY, Answer(fixture("efrsb_record_fields_changed")))
     assert snapshot.facts == ()
     assert any("без распознанной даты" in reason for reason in snapshot.missing)
+
+
+# --- entrepreneurs (S7-02) ---
+
+ENTREPRENEUR = "500100732259"  # synthetic: satisfies both control digits
+
+
+class Never:
+    """Fails the test if the section is asked about at all."""
+
+    async def request(self, *args):
+        raise AssertionError("запрос к источнику не должен уходить")
+
+
+@pytest.mark.parametrize("section", [Section.COMPANY, Section.FINANCES])
+async def test_sections_that_do_not_exist_for_an_entrepreneur_are_an_honest_gap(section):
+    """Asking the company method about a 12-digit INN would answer «не найдено», and
+    that reads as «no such person» — which is false. No request is spent either."""
+    provider = CheckoCompanyDataProvider(
+        KEY, Never(), lambda: NOW, bankruptcy_transport=Never(), finances_transport=Never()
+    )
+    (snapshot,) = await provider.fetch(CompanyDataRequest(ENTREPRENEUR, (section,)))
+    assert snapshot.status is FetchStatus.UNAVAILABLE
+    assert snapshot.error.code == "not_supported"
+    assert snapshot.coverage is Coverage.UNAVAILABLE and not is_no_risk(snapshot)
+    assert "для ИП" in snapshot.missing[0]
+
+
+async def test_the_register_of_bankruptcies_is_still_asked_about_an_entrepreneur():
+    """Individuals go bankrupt too, and the register answers by INN for them as well."""
+    transport = Answer(fixture("efrsb_empty_one_page"))
+    provider = CheckoCompanyDataProvider(
+        KEY, Never(), lambda: NOW, bankruptcy_transport=transport, finances_transport=Never()
+    )
+    (snapshot,) = await provider.fetch(CompanyDataRequest(ENTREPRENEUR, (Section.BANKRUPTCY,)))
+    assert transport.calls == 1 and snapshot.status is FetchStatus.OK
