@@ -41,8 +41,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
+from claims_assistant.application.ai_guard import (  # noqa: E402
+    AiPolicy,
+    GuardedRecommendationProvider,
+)
 from claims_assistant.application.recommendation import (  # noqa: E402
-    AiLimits,
     ExplanationOutcome,
     request_explanation,
     request_size,
@@ -119,8 +122,14 @@ def judge(scenario: BenchScenario, outcome: ExplanationOutcome) -> tuple[str, ..
     return tuple(complaints)
 
 
-def _provider(key: str, model: str, structured: bool):
-    """The provider client, imported late: it arrives with S5-01 and may not be here yet."""
+def _provider(key: str, model: str, structured: bool, policy: AiPolicy):
+    """The provider client behind the same guard the pipeline puts in front of it.
+
+    Without the guard a broken TLS handshake is scored as the model's failure. A on #60
+    measured the link to the provider from his network: it drops on about half the
+    attempts, which at nine scenarios would fill the table with his channel instead of
+    anyone's answers. The guard retries exactly as production does.
+    """
     try:
         from claims_assistant.infrastructure.llm.polza import PolzaRecommendationProvider
     except ModuleNotFoundError:
@@ -128,7 +137,8 @@ def _provider(key: str, model: str, structured: bool):
             "Нет клиента провайдера (infrastructure/llm/polza.py). Замер запускается с "
             "ветки, где он есть; набор сценариев проверяется без него: --dry-run."
         ) from None
-    return PolzaRecommendationProvider(key, model=model, structured=structured)
+    inner = PolzaRecommendationProvider(key, model=model, structured=structured)
+    return GuardedRecommendationProvider(inner, policy)
 
 
 def _text_of(outcome: ExplanationOutcome) -> str:
@@ -146,10 +156,11 @@ async def run_model(
     key: str,
     repeat: int,
     structured: bool,
-    limits: AiLimits,
+    policy: AiPolicy,
     pause: float,
 ) -> list[Result]:
-    provider = _provider(key, model, structured)
+    provider = _provider(key, model, structured, policy)
+    limits = policy.limits
     results: list[Result] = []
     for scenario in scenarios:
         context = scenario.build()
@@ -207,28 +218,46 @@ class ModelSummary:
         return sum(known, Decimal(0)) if known else None
 
     @property
+    def answered(self) -> list[Result]:
+        """Calls that came back at all; a dropped connection is not a slow model."""
+        return [item for item in self.results if not item.status.startswith("unavailable")]
+
+    @property
+    def lost(self) -> int:
+        return self.total - len(self.answered)
+
+    @property
     def median_seconds(self) -> float:
-        return statistics.median(item.seconds for item in self.results) if self.results else 0.0
+        answered = self.answered
+        return statistics.median(item.seconds for item in answered) if answered else 0.0
 
     @property
     def codes(self) -> str:
         counts: dict[str, int] = {}
-        for item in self.results:
+        for item in self.answered:
             if not item.accepted:
                 counts[item.status] = counts.get(item.status, 0) + 1
         return ", ".join(f"{code} × {n}" for code, n in sorted(counts.items())) or "—"
 
 
 def report(summaries: list[ModelSummary], scenarios: tuple[BenchScenario, ...]) -> str:
-    lines = ["| Модель | Принято | Без замечаний | Отклонения | ₽ за прогон | Секунды (медиана) |"]
-    lines.append("| --- | --- | --- | --- | --- | --- |")
+    lines = [
+        "| Модель | Принято | Без замечаний | Отклонения | Связь оборвалась | "
+        "₽ за прогон | Секунды (медиана) |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
     for summary in sorted(summaries, key=lambda s: (-s.clean, s.median_seconds)):
         cost = "—" if summary.cost is None else f"{summary.cost:.3f}"
         lines.append(
             f"| `{summary.model}` | {summary.accepted}/{summary.total} | "
-            f"{summary.clean}/{summary.total} | {summary.codes} | {cost} | "
+            f"{summary.clean}/{summary.total} | {summary.codes} | {summary.lost} | {cost} | "
             f"{summary.median_seconds:.1f} |"
         )
+    lines.append("")
+    lines.append(
+        "«Связь оборвалась» — вызовы, не дошедшие до модели после повторов; медиана "
+        "считается только по дошедшим."
+    )
     lines.append("")
     lines.append("Замечания по сценариям:")
     lines.append("")
@@ -272,7 +301,12 @@ async def show_catalog(key: str, limit: int, structured_only: bool) -> None:
                 print(f"Каталог не отдан: HTTP {response.status}")
                 return
             body = await response.json()
-    models = [item for item in body.get("data", []) if isinstance(item, dict)]
+    # The endpoint ignores ?type=chat (A checked), so the filter has to be ours.
+    models = [
+        item
+        for item in body.get("data", [])
+        if isinstance(item, dict) and item.get("type") == "chat"
+    ]
     rows = []
     for item in models:
         top = item.get("top_provider") or {}
@@ -320,6 +354,9 @@ def main() -> int:
     parser.add_argument("--scenarios", help="через запятую; по умолчанию все")
     parser.add_argument("--repeat", type=int, default=1, help="прогонов на сценарий")
     parser.add_argument("--timeout", type=float, default=90.0, help="секунд на один вызов")
+    parser.add_argument(
+        "--retries", type=int, default=2, help="повторов при обрыве связи (не при плохом ответе)"
+    )
     parser.add_argument("--pause", type=float, default=0.0, help="пауза между вызовами, секунд")
     parser.add_argument(
         "--no-schema",
@@ -358,7 +395,7 @@ def main() -> int:
         return 2
 
     models = [name.strip() for name in args.models.split(",") if name.strip()]
-    limits = AiLimits(timeout_seconds=args.timeout)
+    policy = AiPolicy(timeout_seconds=args.timeout, max_retries=args.retries)
     summaries: list[ModelSummary] = []
     for model in models:
         print(f"\n{model}")
@@ -369,7 +406,7 @@ def main() -> int:
                 key=key,
                 repeat=args.repeat,
                 structured=not args.no_schema,
-                limits=limits,
+                policy=policy,
                 pause=args.pause,
             )
         )

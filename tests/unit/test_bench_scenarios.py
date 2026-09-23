@@ -139,3 +139,37 @@ def test_the_bench_table_and_the_set_stay_in_step():
         assert f"`{scenario.id}`" in section, scenario.id
     listed = section.count("\n| `")
     assert listed == len(SCENARIOS), f"в документе {listed} сценариев, в наборе {len(SCENARIOS)}"
+
+
+# Answers that are right but phrased as denials. A on #60 found that the word checks
+# punished them: «признаков банкротства нет, судебных дел не найдено» matched the bare
+# «банкрот» and «суд», so the more specific — and better — model lost the column.
+DENIALS = {
+    "nothing_alarming": "Признаков банкротства нет, судебных дел не найдено, оплаты поступают.",
+    "holes_in_the_package": "Неизвестно, погашен ли долг: в файле нет ни суммы, ни даты.",
+    "creditor_not_debtor": "Организация действует; сведений о процедуре в её отношении нет.",
+}
+
+
+@pytest.mark.parametrize("scenario_id", sorted(DENIALS))
+def test_a_denial_is_not_read_as_a_claim(scenario_id):
+    scenario = next(item for item in SCENARIOS if item.id == scenario_id)
+    _, result = _review(scenario, {"explanation": DENIALS[scenario_id]})
+    assert isinstance(result, Explanation), result
+    assert judge(scenario, _outcome(result)) == ()
+
+
+def test_on_a_conflict_even_a_correct_sounding_answer_cannot_name_the_dates():
+    """The one place where the denial cannot be saved by the word list, and should not be.
+
+    A suggested (on #60) allowing «18.06.2026 и 20.07.2026 расходятся» as a right answer.
+    It cannot pass: when the files disagree the indicator is unknown, so neither date is in
+    the context at all, and the review rejects any mention as `new_date` before the word
+    checks are reached. That is the strict-numbers limitation of S5-06 working as designed
+    — the model's way out is to say the age is not confirmed, without citing dates.
+    """
+    scenario = next(item for item in SCENARIOS if item.id == "files_disagree")
+    _, result = _review(
+        scenario, {"explanation": "Даты 18.06.2026 и 20.07.2026 расходятся, давность не ясна."}
+    )
+    assert isinstance(result, Rejected) and result.code.value == "new_date"
