@@ -94,6 +94,32 @@ def test_every_contract_keeps_its_own_overdue_and_days():
     assert first.contracts[0].subject == "Тягач"
 
 
+def test_a_contract_with_no_overdue_keeps_its_zero():
+    """Found by A on #53: Decimal(0) is falsy, so a paid-up contract took the whole
+    «Сумма» instead of its zero and inflated the counterparty's debt."""
+    rows = legend() + [
+        row(0, "Владивосток"),
+        row(2, "РОМАШКА ООО"),
+        row(4, "Дог. фин. лизинга № 1", amount=1000000, overdue=0, days=0),
+        row(4, "Дог. фин. лизинга № 2", amount=250000, overdue=250000, days=95),
+    ]
+    result = read_debt_report(rows)
+    first = result.counterparties[0]
+    assert [c.overdue for c in first.contracts] == [Decimal("0"), Decimal("250000")]
+    assert first.total_overdue == Decimal("250000")  # not 1 250 000
+    assert first.worst_days == 95
+
+
+def test_the_sum_column_is_used_when_the_report_has_only_that_one():
+    header = [None] * WIDTH
+    header[COLS["amount"]] = "Сумма"
+    header[COLS["days"]] = "Дней"
+    rows = [(0, tuple(header)), row(0, "Владивосток"), row(2, "РОМАШКА ООО")]
+    rows.append(row(4, "Дог. фин. лизинга № 1", amount=700, days=40))
+    contract = read_debt_report(rows).counterparties[0].contracts[0]
+    assert contract.overdue == Decimal("700") and contract.days == 40
+
+
 def test_the_counterparty_carries_the_sum_and_the_worst_of_its_contracts():
     first = read_debt_report(report()).counterparties[0]
     assert first.total_overdue == Decimal("1000")

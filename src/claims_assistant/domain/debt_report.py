@@ -40,7 +40,6 @@ from claims_assistant.domain.sheet_rules import (
 
 SHEET_NAME = "Отчет по ТПЗ"
 MAX_HEADER_ROWS = 20
-CONTRACT_PREFIX = "дог"
 _SKIP_PREFIXES = ("отбор", "итого", "отчет")
 # Titles of the legend rows themselves: they name the levels, they are not data.
 _LEVEL_TITLES = {"точка продаж", "контрагент", "договор лизинга"}
@@ -148,6 +147,22 @@ def _value(cells: tuple[Cell, ...], columns: dict[str, int], field: str) -> Cell
     return cells[index] if index is not None and index < len(cells) else None
 
 
+def _overdue(cells, columns, row_number, issues) -> Decimal | None:
+    """«Сумма просроченной задолженности», or «Сумма» when the report has only that one.
+
+    The two are equal in the customer's report, but a contract with **zero** overdue must
+    keep its zero: falling back on emptiness alone once turned a paid-up contract into the
+    whole «Сумма» and inflated the counterparty's debt fivefold (found by A on #53).
+    """
+    for field in ("overdue", "amount"):
+        if columns.get(field) is None:
+            continue
+        if _value(cells, columns, field) in (None, ""):
+            continue
+        return _amount(cells, columns, field, row_number, issues)
+    return None
+
+
 def _amount(cells, columns, field, row_number, issues) -> Decimal | None:
     try:
         return parse_amount(
@@ -216,8 +231,7 @@ def read_debt_report(rows: list[tuple[int, tuple[Cell, ...]]]) -> DebtReport:
             contracts.append(
                 ContractDebt(
                     name=title,
-                    overdue=_amount(cells, columns, "overdue", row_number, issues)
-                    or _amount(cells, columns, "amount", row_number, issues),
+                    overdue=_overdue(cells, columns, row_number, issues),
                     days=int(days)
                     if isinstance(days, int) and not isinstance(days, bool)
                     else None,
