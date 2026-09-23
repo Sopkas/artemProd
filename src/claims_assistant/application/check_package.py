@@ -18,7 +18,7 @@ from claims_assistant.domain.counterparties import CounterpartyRow, ImportLimits
 from claims_assistant.domain.export_1c import ExportHeader
 from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
-from claims_assistant.domain.inn import InvalidInn, validate_legal_inn
+from claims_assistant.domain.inn import InvalidInn, validate_inn
 from claims_assistant.domain.payments import SHEET_NAME as PAYMENTS_SHEET
 
 from .analysis_repository import AnalysisRepository, NewFile
@@ -252,7 +252,9 @@ async def accept_payments_export(
     run = await repository.get_run(owner_id, run_id)
     known = await package_inns(run, files, reader, limits)
     try:
-        inn = validate_legal_inn(inn)
+        # Both kinds: the customer's portfolio holds ООО and ИП alike (S7-02), and
+        # payments are not a section that exists for companies only.
+        inn = validate_inn(inn)
     except InvalidInn as error:
         return PackageRejected(issues=(_export_issue("export_inn_invalid", str(error)),))
     if inn not in known:

@@ -39,7 +39,7 @@ from claims_assistant.application.report_delivery import (
 )
 from claims_assistant.domain.analysis import FileKind
 from claims_assistant.domain.external import DataMode, Period, Section
-from claims_assistant.domain.inn import InvalidInn, validate_legal_inn
+from claims_assistant.domain.inn import InvalidInn, validate_inn
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel import ledgers
 from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
@@ -219,6 +219,10 @@ def create_dispatcher(
             reply_markup=launch_menu(),
         )
 
+    # Files made from our template are .xlsx; the customer's own prints from 1C come in
+    # either format (S4-05).
+    _SPREADSHEET = (".xlsx", ".xls")
+
     ledger_states = {
         CheckDialog.waiting_for_payments_file: FileKind.PAYMENTS,
         CheckDialog.waiting_for_history_file: FileKind.DEBT_HISTORY,
@@ -278,7 +282,9 @@ def create_dispatcher(
     @router.message(CheckDialog.waiting_for_export_file, F.document)
     async def receive_export_file(message: Message, state: FSMContext, bot: Bot) -> None:
         document = message.document
-        if not (document.file_name or "").lower().endswith(".xlsx"):
+        # A 1C print arrives in the old format as often as in the new one, and the reader
+        # tells them apart by the file's own signature, not by its name (review B on #56).
+        if not (document.file_name or "").lower().endswith(_SPREADSHEET):
             await message.answer(texts.FILE_NOT_XLSX, reply_markup=cancel_menu())
             return
         if document.file_size is None or document.file_size > texts.MAX_UPLOAD_BYTES:
@@ -529,7 +535,7 @@ def create_dispatcher(
     @router.message(CheckDialog.waiting_for_export_inn, F.text)
     async def receive_export_inn(message: Message, state: FSMContext) -> None:
         try:
-            inn = validate_legal_inn(message.text or "")
+            inn = validate_inn(message.text or "")
         except InvalidInn as error:
             await message.answer(str(error), reply_markup=cancel_menu())
             return

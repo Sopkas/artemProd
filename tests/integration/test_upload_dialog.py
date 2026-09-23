@@ -796,3 +796,39 @@ async def test_a_file_that_is_not_an_export_is_refused_without_guessing(setup, b
         dispatcher, bot, update_factory, build_counterparties_template(), name="not-an-export.xlsx"
     )
     assert "не найдена таблица" in reply.text
+
+
+async def test_an_entrepreneurs_export_is_accepted_too(setup, bot, update_factory):
+    """The portfolio holds ООО and ИП alike (S7-02); payments are not a company-only file."""
+    from decimal import Decimal
+
+    from claims_assistant.domain.counterparties import CounterpartyRow
+
+    ENTREPRENEUR = "500100732259"  # synthetic: satisfies both control digits
+    dispatcher, _ = setup
+    await start_check(dispatcher, bot, update_factory)
+    rows = (
+        CounterpartyRow(
+            inn=ENTREPRENEUR,
+            cutoff_date=date(2026, 9, 1),
+            debt=Decimal("100.00"),
+            overdue_days=30,
+            last_payment_date=date(2026, 7, 1),
+        ),
+    )
+    await send_document(dispatcher, bot, update_factory, build_counterparties_template(rows))
+    await send(dispatcher, bot, update_factory, "Добавить платежи")
+    await send(dispatcher, bot, update_factory, "Выгрузка из 1С")
+    reply = await send(dispatcher, bot, update_factory, ENTREPRENEUR)
+    assert reply.text == texts.EXPORT_FILE_PROMPT  # not «это ИНН предпринимателя»
+    reply = await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xlsx")
+    assert "Платежей принято: 2" in reply.text
+
+
+async def test_the_export_is_taken_in_the_old_format_as_well(setup, bot, update_factory):
+    """1C prints .xls, and the reader knows it by the file's signature (#51)."""
+    dispatcher, _ = await package_ready(setup, bot, update_factory)
+    await to_export(dispatcher, bot, update_factory)
+    reply = await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xls")
+    assert "Платежей принято: 2" in reply.text
+    assert ".xls" in texts.EXPORT_FILE_PROMPT
