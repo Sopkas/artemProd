@@ -17,6 +17,7 @@ from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.cache.memory import TtlSnapshotCache
 from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
+from claims_assistant.infrastructure.demo.package import PACKAGE_SCENARIOS
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.excel.report import build_report
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
@@ -80,7 +81,10 @@ async def run(settings: Settings) -> None:
             source = (
                 CheckoCompanyDataProvider(settings.checko_api_key)
                 if settings.data_provider == "checko"
-                else DemoCompanyDataProvider(settings.demo_scenario)
+                else DemoCompanyDataProvider(
+                    settings.demo_scenario,
+                    by_inn=PACKAGE_SCENARIOS if settings.demo_package else None,
+                )
             )
             # Limits, retries and a per-process cache apply to demo and live alike.
             provider = GuardedCompanyDataProvider(

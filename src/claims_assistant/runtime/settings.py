@@ -44,8 +44,11 @@ class Settings:
     token: str = field(repr=False)
     allowed_ids: frozenset[int]
     log_level: str = "INFO"
-    # Which synthetic answer the demo provider gives; the scenario is never chosen by INN.
+    # Which synthetic answer the demo provider gives to every company.
     demo_scenario: DemoScenario = DemoScenario.ORDINARY
+    # S6-04: the defence package instead — the scenario is then chosen per INN, so one
+    # report shows an ordinary debtor, an alarm, a worsening payer and a gap at once.
+    demo_package: bool = False
     # SQLite file with runs and uploaded files; created with its directory on first start.
     database_path: Path = Path("data/claims.sqlite3")
     # Directory for uploaded .xlsx packages; created on first upload.
@@ -109,6 +112,9 @@ class Settings:
         except ValueError:
             allowed = ", ".join(item.value for item in DemoScenario)
             raise ConfigurationError(f"DEMO_SCENARIO: допустимы {allowed}.") from None
+        raw_package = (values.get("DEMO_PACKAGE") or "false").strip().lower()
+        if raw_package not in {"true", "false"}:
+            raise ConfigurationError("DEMO_PACKAGE: допустимы true, false.")
         provider = (values.get("DATA_PROVIDER") or "demo").strip().lower()
         if provider not in {"demo", "checko"}:
             raise ConfigurationError("DATA_PROVIDER: допустимы demo, checko.")
@@ -160,6 +166,7 @@ class Settings:
             allowed_ids=allowed_ids,
             log_level=level,
             demo_scenario=scenario,
+            demo_package=raw_package == "true",
             data_provider=provider,
             checko_api_key=checko_key,
             ai_provider=ai_provider,
