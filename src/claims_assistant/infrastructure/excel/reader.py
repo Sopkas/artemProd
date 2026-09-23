@@ -81,6 +81,71 @@ class OpenpyxlSheetReader:
         if total > limits.max_unpacked_bytes:
             raise WorkbookTooLarge()
 
+    def read_outline(
+        self, source: object, limits: ImportLimits, sheet: str | None = None
+    ) -> tuple[tuple[int, tuple[Cell, ...]], ...]:
+        """Rows with the indent of their first cell (S7-01).
+
+        A 1C report puts its hierarchy in one column and shows the level by indenting:
+        the sales point at the left, the counterparty deeper, the contract deeper still.
+        The step differs between files (2/4 in one export, 3/6 in another), so callers
+        must rank the values rather than compare them with a constant.
+        """
+        data = self._as_bytes(source)
+        if is_legacy_xls(data):
+            return self._legacy_outline(data, limits, sheet)
+        self._guard_unpacked_size(data, limits)
+        try:
+            workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
+        except (InvalidFileException, zipfile.BadZipFile, KeyError, OSError, ValueError):
+            raise CorruptWorkbook() from None
+        try:
+            if sheet is not None and sheet not in workbook.sheetnames:
+                raise SheetMissing(sheet)
+            worksheet = workbook[sheet] if sheet is not None else workbook[workbook.sheetnames[0]]
+            rows: list[tuple[int, tuple[Cell, ...]]] = []
+            for row in worksheet.iter_rows():
+                alignment = getattr(row[0], "alignment", None) if row else None
+                indent = int(getattr(alignment, "indent", 0) or 0)
+                rows.append((indent, tuple(OpenpyxlSheetReader._cell(cell) for cell in row)))
+                if len(rows) > limits.max_rows + MAX_EXPORT_HEADER_ROWS:
+                    break
+            return tuple(rows)
+        finally:
+            workbook.close()
+
+    @staticmethod
+    def _legacy_outline(
+        data: bytes, limits: ImportLimits, sheet: str | None
+    ) -> tuple[tuple[int, tuple[Cell, ...]], ...]:
+        if len(data) > limits.max_unpacked_bytes:
+            raise WorkbookTooLarge()
+        try:
+            # formatting_info: the indent lives in the cell format, not in the value.
+            book = xlrd.open_workbook(file_contents=data, formatting_info=True)
+        except Exception:
+            raise CorruptWorkbook() from None
+        try:
+            if sheet is not None and sheet not in book.sheet_names():
+                raise SheetMissing(sheet)
+            worksheet = book.sheet_by_name(sheet) if sheet is not None else book.sheet_by_index(0)
+            rows: list[tuple[int, tuple[Cell, ...]]] = []
+            for index in range(worksheet.nrows):
+                cells = tuple(
+                    OpenpyxlSheetReader._legacy_cell(worksheet.cell(index, column), book.datemode)
+                    for column in range(worksheet.ncols)
+                )
+                indent = 0
+                if worksheet.ncols:
+                    fmt = book.xf_list[worksheet.cell_xf_index(index, 0)]
+                    indent = int(getattr(fmt.alignment, "indent_level", 0) or 0)
+                rows.append((indent, cells))
+                if len(rows) > limits.max_rows + MAX_EXPORT_HEADER_ROWS:
+                    break
+            return tuple(rows)
+        finally:
+            book.release_resources()
+
     def read_rows(
         self, source: object, limits: ImportLimits, sheet: str | None = None
     ) -> tuple[tuple[Cell, ...], ...]:

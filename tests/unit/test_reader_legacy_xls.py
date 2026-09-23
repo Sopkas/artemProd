@@ -72,3 +72,37 @@ def test_a_broken_file_and_an_oversized_one_are_refused(data):
         rows(data[:8] + b"not really a workbook")
     with pytest.raises(WorkbookTooLarge):
         rows(data, ImportLimits(max_unpacked_bytes=16))
+
+
+# --- the indent, which carries the hierarchy of a 1C report (S7-01) ---
+
+
+def test_the_indent_of_each_row_is_reported(data):
+    """Raised by A on #53: read_outline had no test of its own."""
+    outline = OpenpyxlSheetReader().read_outline(data, ImportLimits())
+    assert [indent for indent, _ in outline][:3] == [0, 0, 0]  # the fixture is flat
+    assert [cells[0] for _indent, cells in outline][1] == "1234567894"
+
+
+def test_the_indent_is_read_from_both_formats(tmp_path):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment
+
+    book = Workbook()
+    sheet = book.active
+    for index, (text, indent) in enumerate([("Точка", 0), ("Клиент", 2), ("Договор", 4)], start=1):
+        cell = sheet.cell(row=index, column=1, value=text)
+        cell.alignment = Alignment(indent=indent)
+    path = tmp_path / "outline.xlsx"
+    book.save(path)
+    outline = OpenpyxlSheetReader().read_outline(path.read_bytes(), ImportLimits())
+    assert [(indent, cells[0]) for indent, cells in outline] == [
+        (0, "Точка"),
+        (2, "Клиент"),
+        (4, "Договор"),
+    ]
+
+
+def test_an_oversized_legacy_outline_is_refused(data):
+    with pytest.raises(WorkbookTooLarge):
+        OpenpyxlSheetReader().read_outline(data, ImportLimits(max_unpacked_bytes=16))
