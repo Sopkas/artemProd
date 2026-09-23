@@ -1,6 +1,8 @@
 import socket
+import sys
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -8,6 +10,10 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import GetFile, SendDocument, SendMessage
 from aiogram.types import File, Message, Update
+
+# The repository root, so `evals/` (the model bench set, S5-07) imports like a package.
+# It is not part of the installed service: only the tests and the bench script read it.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def pytest_make_parametrize_id(config, val, argname):

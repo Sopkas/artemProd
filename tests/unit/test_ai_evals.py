@@ -271,11 +271,18 @@ def test_another_companys_interactions_never_reach_the_context():
     assert "Чужой разговор" not in body and OTHER_INN not in body
 
 
+def doc_section(heading: str) -> str:
+    """One section of docs/ai-evals.md: the document now holds two different sets."""
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "ai-evals.md").read_text("utf-8")
+    body = doc.split(heading, 1)[1]
+    return body.split("\n## ", 1)[0]
+
+
 def test_every_scenario_is_listed_in_the_document():
     """The catalogue is a deliverable: the doc and the suite must not drift apart."""
-    doc = (Path(__file__).resolve().parents[2] / "docs" / "ai-evals.md").read_text("utf-8")
+    section = doc_section("\n## Сценарии\n")
     for scenario in SCENARIOS:
-        assert f"`{scenario.id}`" in doc, scenario.id
-        assert scenario.title in doc, scenario.title
-    listed = doc.count("\n| `")
+        assert f"`{scenario.id}`" in section, scenario.id
+        assert scenario.title in section, scenario.title
+    listed = section.count("\n| `")
     assert listed == len(SCENARIOS), f"в документе {listed} сценариев, в наборе {len(SCENARIOS)}"
