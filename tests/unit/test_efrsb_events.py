@@ -38,6 +38,10 @@ def snapshot(records):
         ("Объявление о проведении торгов", EventKind.CASE),
         ("Прекращение производства по делу о банкротстве", EventKind.CLOSURE),
         ("Об отмене ранее опубликованного сообщения", EventKind.CLOSURE),
+        ("Об отказе в признании должника банкротом", EventKind.CLOSURE),
+        # Both found by A on #52 — and both from the customer's own trade.
+        ("Сообщение об отказе от исполнения договора", EventKind.CASE),
+        ("Сообщение о завершении конкурсного производства", EventKind.PROCEDURE),
         ("Нечто, чего мы раньше не видели", EventKind.OTHER),
     ],
 )
@@ -101,3 +105,19 @@ def test_closed_and_live_messages_together_keep_the_live_one():
     assert {signal.code for signal in assess(INN, [snap]).signals} == {
         "unresolved_bankruptcy_event"
     }
+
+
+def test_a_refusal_to_perform_a_contract_is_a_live_event_not_a_closed_case():
+    """«Отказ от исполнения договора» is about a lease — exactly our customer's business —
+    and silencing it because of the word «отказ» would hide the thing that matters."""
+    snap = snapshot([record("Сообщение об отказе от исполнения договора")])
+    assert snap.facts[0].kind is FactKind.BANKRUPTCY_EVENT
+    assert {s.code for s in assess(INN, [snap]).signals} == {"unresolved_bankruptcy_event"}
+
+
+def test_the_end_of_a_bankruptcy_is_not_history():
+    """After «завершение конкурсного производства» the debtor is struck off the register:
+    the strongest signal there is, and the word «завершение» must not bury it."""
+    snap = snapshot([record("Сообщение о завершении конкурсного производства")])
+    assert snap.facts[0].kind is FactKind.BANKRUPTCY_EVENT
+    assert any("Роль организации" in reason for reason in snap.missing)

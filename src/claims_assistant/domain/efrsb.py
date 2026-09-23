@@ -48,27 +48,34 @@ _CODES = {
 
 # Matched against the lowercased Russian name of the type, in this order: the first hit
 # wins, so «прекращение производства» is closure even though it also mentions a procedure.
-_NAMES: tuple[tuple[str, EventKind], ...] = (
-    ("прекращени", EventKind.CLOSURE),
-    ("отмен", EventKind.CLOSURE),
-    ("отказ", EventKind.CLOSURE),
-    ("завершени", EventKind.CLOSURE),
-    ("намерени", EventKind.INTENTION),
-    ("призна", EventKind.PROCEDURE),  # «о признании должника банкротом»
-    ("введени", EventKind.PROCEDURE),  # «о введении наблюдения»
-    ("наблюдени", EventKind.PROCEDURE),
-    ("конкурсн", EventKind.PROCEDURE),
-    ("внешне управлени", EventKind.PROCEDURE),
-    ("внешнего управления", EventKind.PROCEDURE),
-    ("финансово оздоровлени", EventKind.PROCEDURE),
-    ("финансового оздоровления", EventKind.PROCEDURE),
-    ("реструктуризаци", EventKind.PROCEDURE),
-    ("судебн", EventKind.CASE),
-    ("собрани", EventKind.CASE),
-    ("требовани", EventKind.CASE),
-    ("торг", EventKind.CASE),
-    ("оценк", EventKind.CASE),
-    ("сообщени", EventKind.OTHER),
+# Each rule is a set of stems that must all be present in the type's Russian name; the
+# first rule that matches wins. Stems, not whole words: the register inflects freely
+# («отказе от исполнения», «завершении конкурсного»).
+_RULES: tuple[tuple[tuple[str, ...], EventKind], ...] = (
+    # Two traps A found on #52, both from the customer's own trade:
+    # a refusal to perform a contract is a live event about a lease, not a closed case…
+    (("исполнени", "договор"), EventKind.CASE),
+    # …and the completion of конкурсное производство ends with the debtor struck off the
+    # register: the strongest signal there is, not history.
+    (("завершен", "конкурсн"), EventKind.PROCEDURE),
+    (("прекращ",), EventKind.CLOSURE),
+    (("отмен",), EventKind.CLOSURE),
+    (("отказ",), EventKind.CLOSURE),  # отказ в признании банкротом, во введении процедуры
+    (("завершен",), EventKind.CLOSURE),
+    (("намерени",), EventKind.INTENTION),
+    (("призна",), EventKind.PROCEDURE),  # о признании должника банкротом
+    (("введени",), EventKind.PROCEDURE),
+    (("наблюдени",), EventKind.PROCEDURE),
+    (("конкурсн",), EventKind.PROCEDURE),
+    (("внешне", "управлени"), EventKind.PROCEDURE),
+    (("внешнего", "управления"), EventKind.PROCEDURE),
+    (("оздоровлени",), EventKind.PROCEDURE),
+    (("реструктуризаци",), EventKind.PROCEDURE),
+    (("судебн",), EventKind.CASE),
+    (("собрани",), EventKind.CASE),
+    (("требовани",), EventKind.CASE),
+    (("торг",), EventKind.CASE),
+    (("оценк",), EventKind.CASE),
 )
 
 _LABELS = {
@@ -85,8 +92,8 @@ def classify(code: object, name: object) -> EventKind:
     if isinstance(code, str) and code.strip() in _CODES:
         return _CODES[code.strip()]
     text = name.strip().lower() if isinstance(name, str) else ""
-    for marker, kind in _NAMES:
-        if marker in text:
+    for stems, kind in _RULES:
+        if all(stem in text for stem in stems):
             return kind
     return EventKind.OTHER
 
