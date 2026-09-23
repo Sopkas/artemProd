@@ -80,3 +80,13 @@ report_artifacts = Table(
     Column("delivered_at", String(32), nullable=True),
     Column("delivery_error", String(500), nullable=True),
 )
+
+# S5-03: what the model cost us, by calendar month in UTC. Roubles as text — SQLite has
+# no decimal type, and money is added up as Decimal in the store.
+ai_spend = Table(
+    "ai_spend",
+    metadata,
+    Column("month", String(7), primary_key=True),
+    Column("spent_rub", String(32), nullable=False, server_default="0"),
+    Column("updated_at", String(32), nullable=False),
+)

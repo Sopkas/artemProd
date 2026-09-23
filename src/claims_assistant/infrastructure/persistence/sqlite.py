@@ -88,6 +88,11 @@ class SqliteAnalysisRepository:
         self._clock = clock
         self._closed = False
 
+    @property
+    def engine(self) -> Engine:
+        """The same database other stores of this service live in (S5-03: the AI spend)."""
+        return self._engine
+
     def close(self) -> None:
         self._closed = True
         self._engine.dispose()

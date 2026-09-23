@@ -17,8 +17,9 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Protocol
 
 from claims_assistant.domain.ai_context import ContextLimits, build_context, versions
@@ -33,6 +34,7 @@ from claims_assistant.domain.scoring import RULES_VERSION, Assessment, Priority,
 from claims_assistant.domain.steps import RUN_SCOPE, StepResult, StepStatus
 
 from .ai_guard import AiBudget, AiRunLimits, ScopedExplainerFactory
+from .ai_spend import NO_MONEY_LEFT, AiSpendStore, MonthlyLimit, month_of
 from .analysis_queue import RunOutcome
 from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
@@ -113,6 +115,10 @@ class RunSummary:
     # S5-03: companies left without an accepted AI explanation while a provider was
     # configured (model unavailable, answer rejected, AI budget exhausted).
     explanations_missing: int = 0
+    # S5-03: the month's money limit was already reached, so the model was not asked at
+    # all. Kept apart from the count above: «не спрашивали» and «спросили, не вышло» are
+    # different things for whoever reads the summary.
+    ai_month_exhausted: bool = False
 
     def to_payload(self) -> str:
         return json.dumps(
@@ -124,6 +130,7 @@ class RunSummary:
                 "priorities": {key.value: value for key, value in self.priorities.items()},
                 "budget_exhausted": self.budget_exhausted,
                 "explanations_missing": self.explanations_missing,
+                "ai_month_exhausted": self.ai_month_exhausted,
             }
         )
 
@@ -139,6 +146,7 @@ class RunSummary:
                 priorities={Priority(key): int(value) for key, value in data["priorities"].items()},
                 budget_exhausted=bool(data["budget_exhausted"]),
                 explanations_missing=int(data.get("explanations_missing", 0)),
+                ai_month_exhausted=bool(data.get("ai_month_exhausted", False)),
             )
         except (ValueError, KeyError, TypeError) as exc:
             raise PayloadError("summary payload is not readable") from exc
@@ -151,7 +159,9 @@ class RunSummary:
             reasons.append("Лимит времени или запросов проверки исчерпан.")
         if self.unchecked:
             reasons.append(f"Организаций с неполными внешними данными: {self.unchecked}.")
-        if self.explanations_missing:
+        if self.ai_month_exhausted:
+            reasons.append(NO_MONEY_LEFT)
+        elif self.explanations_missing:
             reasons.append(
                 f"Пояснений ИИ нет у {self.explanations_missing} организаций; "
                 "в отчёте — рекомендация по правилам."
@@ -196,6 +206,8 @@ class AnalysisPipeline:
         ai_limits: AiLimits = AiLimits(),
         ai_run_limits: AiRunLimits = AiRunLimits(),
         ai_send_comments: bool = False,
+        ai_spend: AiSpendStore | None = None,
+        ai_month_limit_rub: Decimal | None = None,
     ) -> None:
         self._files = files
         self._reader = reader
@@ -210,6 +222,11 @@ class AnalysisPipeline:
         # answer is stored by version; without one the report keeps the rules' next step.
         self._explainer = explainer
         self._ai_limits = ai_limits
+        # S5-03: the month's spend lives in storage, so it survives restarts and is shared
+        # by every check; the run's own money limit is in ``ai_run_limits``.
+        self._ai_spend = ai_spend
+        self._ai_month_limit = ai_month_limit_rub
+        self._ai_month_exhausted = False
         self._ai_run_limits = ai_run_limits
         self._ai_send_comments = ai_send_comments
 
@@ -384,7 +401,12 @@ class AnalysisPipeline:
                 await asyncio.to_thread(self._files.remove, previous.stored_path)
             except StorageError:
                 logger.warning("report_orphan run_id=%s", run.id)
-        summary = _summarize(report_rows, issues, explainer=self._explainer is not None)
+        summary = _summarize(
+            report_rows,
+            issues,
+            explainer=self._explainer is not None,
+            month_exhausted=self._ai_month_exhausted,
+        )
         await self._save(run, RUN_SCOPE, REPORT_STEP, REPORT_VERSION, payload=summary.to_payload())
         return summary
 
@@ -412,13 +434,22 @@ class AnalysisPipeline:
         run of the pipeline may try again (S5-03 bounds that).
         """
         outcomes: dict[str, StoredExplanation] = {}
+        self._ai_month_exhausted = False
         if self._explainer is None:
+            return outcomes
+        limits_for_run = await self._money_for_this_run()
+        if limits_for_run is None:
+            # The month the customer agreed on is spent: the model is not asked at all,
+            # and the report says so instead of showing an unexplained gap (S5-03).
+            self._ai_month_exhausted = True
+            logger.info("ai_month_exhausted run_id=%s", run.id)
             return outcomes
         # S5-03: a guarded provider gets one budget for the whole run; once it is spent
         # the remaining companies get no explanation and the check still finishes.
         explainer = self._explainer
+        budget = AiBudget.for_run(limits_for_run, self._clock())
         if isinstance(explainer, ScopedExplainerFactory):
-            explainer = explainer.scoped(AiBudget.for_run(self._ai_run_limits, self._clock()))
+            explainer = explainer.scoped(budget)
         limits = ContextLimits(include_comments=self._ai_send_comments)
         for index, row in enumerate(rows, start=1):
             context = build_context(
@@ -440,7 +471,36 @@ class AnalysisPipeline:
                         run, row.inn, EXPLANATION_STEP, stored.versions, payload=stored.to_payload()
                     )
             outcomes[row.inn] = stored
+        await self._record_spend(budget)
         return outcomes
+
+    async def _money_for_this_run(self) -> AiRunLimits | None:
+        """The run's limits with the money left this month, or None when none is left.
+
+        The month is read once, before the first question: a check that starts within the
+        limit is allowed to finish, and may overshoot the month by at most one run's
+        limit. Taking a lock around every call would buy exactness we do not need at
+        1000 ₽ a month, and would make one slow answer block the others.
+        """
+        limits = self._ai_run_limits
+        if self._ai_spend is None or self._ai_month_limit is None:
+            return limits
+        spent = await self._ai_spend.spent(month_of(self._clock()))
+        month = MonthlyLimit(limit_rub=self._ai_month_limit, spent_rub=spent)
+        if month.reached:
+            return None
+        left = month.left_rub
+        if limits.max_rub is not None:
+            left = min(left, limits.max_rub)
+        return replace(limits, max_rub=left)
+
+    async def _record_spend(self, budget: AiBudget) -> None:
+        if self._ai_spend is None or budget.spent_rub <= 0:
+            return
+        total = await self._ai_spend.add(month_of(self._clock()), budget.spent_rub)
+        logger.info(
+            "ai_spend run_rub=%s month_rub=%s", format(budget.spent_rub, "f"), format(total, "f")
+        )
 
     async def _stored_explanation(self, run, inn: str, context) -> StoredExplanation | None:
         key = explanation_key(self._explainer, context)
@@ -524,7 +584,11 @@ def _package_lines(run: AnalysisRun, package: ImportedPackage) -> tuple[str, ...
 
 
 def _summarize(
-    rows: tuple[ReportRow, ...], issues: tuple[ImportIssue, ...], *, explainer: bool = False
+    rows: tuple[ReportRow, ...],
+    issues: tuple[ImportIssue, ...],
+    *,
+    explainer: bool = False,
+    month_exhausted: bool = False,
 ) -> RunSummary:
     priorities = {priority: 0 for priority in Priority}
     checked = 0
@@ -542,6 +606,7 @@ def _summarize(
         row_errors=sum(1 for issue in issues if issue.severity is IssueSeverity.ERROR),
         priorities=priorities,
         budget_exhausted=budget_exhausted,
+        ai_month_exhausted=month_exhausted,
         explanations_missing=(
             sum(1 for row in rows if row.explanation is None) if explainer else 0
         ),
