@@ -12,6 +12,7 @@ import pytest
 
 from claims_assistant.application.contract_link import (
     link_contracts,
+    name_without_form,
     normalize_name,
     worst_days,
 )
@@ -31,18 +32,35 @@ def counterparty(name, *contracts):
 @pytest.mark.parametrize(
     "left, right",
     [
-        ("ООО «Ромашка»", "Ромашка, ООО"),
-        ('ОАО "Ромашка"', "ромашка оао"),
-        ("Данилов Максим Владимирович, ИП", "ИП Данилов Максим Владимирович"),
-        ("Ромашка   Плюс", "Ромашка Плюс"),
+        ("ООО «Ромашка»", "ООО Ромашка"),
+        ('ОАО "Ромашка"', "оао ромашка"),
+        ("Ромашка   Плюс, ООО", "ООО Ромашка Плюс"),
     ],
 )
 def test_the_same_company_printed_two_ways_is_one_name(left, right):
+    """Case, quotes and spaces differ between two prints; the form does not."""
     assert normalize_name(left) == normalize_name(right)
 
 
-def test_different_companies_stay_different():
-    assert normalize_name("ООО «Ромашка»") != normalize_name("ООО «Ромашка-Плюс»")
+def test_the_legal_form_is_part_of_the_name(left="ООО Ромашка", right="АО Ромашка"):
+    """Two different legal entities, and in a leasing portfolio such a pair is normal."""
+    assert normalize_name(left) != normalize_name(right)
+    assert name_without_form(left) == name_without_form(right)  # only the fallback key
+
+
+@pytest.mark.parametrize(
+    "printed, expected",
+    [
+        ("ООО «Ромашка»", "ромашка"),
+        ("Ромашка, ООО", "ромашка"),
+        ("ИП Данилов Максим Владимирович", "данилов максим владимирович"),
+        ("Данилов Максим Владимирович, ИП", "данилов максим владимирович"),
+        ("ИП-Сервис", "ип-сервис"),  # the form is inside the word, not the form
+        ("ООО", "ооо"),  # nothing would be left, so nothing is dropped
+    ],
+)
+def test_the_fallback_key_drops_the_form_only_where_it_is_written(printed, expected):
+    assert name_without_form(printed) == expected
 
 
 def test_contracts_go_to_the_company_the_name_points_at():
@@ -63,7 +81,7 @@ def test_a_name_no_company_of_the_check_has_is_reported_not_dropped():
 def test_two_companies_with_one_name_get_nothing():
     """A guess here would put someone else's debt into a claim letter."""
     linked = link_contracts(
-        (counterparty("ООО «Ромашка»"),), {INN_A: "Ромашка", INN_B: "«Ромашка», ООО"}
+        (counterparty("ООО «Ромашка»"),), {INN_A: "ООО Ромашка", INN_B: "«Ромашка», ООО"}
     )
     assert linked.by_inn == {} and linked.ambiguous == ("ООО «Ромашка»",)
 
@@ -71,6 +89,27 @@ def test_two_companies_with_one_name_get_nothing():
 def test_a_company_the_source_never_named_cannot_take_part():
     linked = link_contracts((counterparty("ООО «Ромашка»"),), {INN_A: None, INN_B: "Ромашка"})
     assert linked.by_inn == {INN_B: (contract(),)} and linked.unnamed == (INN_A,)
+
+
+def test_a_match_without_the_form_is_reported_for_a_human_to_glance_at():
+    """One print carries the form, the other does not — likely the same client, not surely."""
+    linked = link_contracts((counterparty("Ромашка"),), {INN_A: "ООО «Ромашка»"})
+    assert [c.name for c in linked.by_inn[INN_A]] == ["Дог-1"]
+    assert linked.without_form == ("Ромашка",) and linked.unknown == ()
+
+
+def test_the_form_decides_between_two_namesakes():
+    linked = link_contracts(
+        (counterparty("ООО «Ромашка»", contract("Дог-1")),),
+        {INN_A: "ООО Ромашка", INN_B: "АО Ромашка"},
+    )
+    assert linked.by_inn == {INN_A: (contract("Дог-1"),)}  # the exact key wins outright
+    assert linked.ambiguous == () and linked.without_form == ()
+
+
+def test_a_form_less_name_between_two_namesakes_is_attributed_to_neither():
+    linked = link_contracts((counterparty("Ромашка"),), {INN_A: "ООО Ромашка", INN_B: "АО Ромашка"})
+    assert linked.by_inn == {} and linked.ambiguous == ("Ромашка",)
 
 
 def test_contracts_of_one_company_printed_twice_are_kept_together():

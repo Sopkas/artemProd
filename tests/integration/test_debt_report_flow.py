@@ -206,7 +206,7 @@ async def test_the_card_shows_the_contracts_of_this_company(deps):
         deps["repository"],
         deps["files"],
         deps["reader"],
-        company_name=DEMO_NAME,
+        steps=deps["repository"],
     )
     assert [contract.name for contract in context.contracts] == ["Дог-1", "Дог-2"]
     card = format_card(check, context)
@@ -214,12 +214,34 @@ async def test_the_card_shows_the_contracts_of_this_company(deps):
     assert "Дог-1 · 307 дн." in card and "Экскаватор" in card
 
 
-async def test_without_the_company_name_the_card_shows_no_contracts(deps):
-    """Nothing to match against is «не знаем», not «привяжем как получится»."""
+async def test_the_card_shows_nothing_when_the_check_has_no_saved_link(deps):
+    """The card never works the link out itself: it would not see the namesakes the
+    report saw, and the call is made from the card (review B on #58)."""
     run = (await package(deps)).run
     await pipeline(deps["files"], deps["repository"], guard(NamingProvider())).process(run)
     await finish(deps, run)
     context = await internal_context(
-        OWNER, INN_1, deps["repository"], deps["files"], deps["reader"], company_name=None
+        OWNER, INN_1, deps["repository"], deps["files"], deps["reader"], steps=None
     )
     assert context.contracts == ()
+
+
+async def test_the_card_does_not_show_a_namesakes_contracts(deps):
+    """The report refuses to attribute a name two companies share; so does the card."""
+    from dataclasses import replace as _replace
+
+    run = (await package(deps)).run
+    same = {INN_1: "ООО «Ромашка»", INN_2: "ООО Ромашка"}
+
+    class Namesakes(NamingProvider):
+        async def fetch(self, request):
+            snapshots = await self._inner.fetch(request)
+            return tuple(_renamed(snapshot, same.get(request.inn)) for snapshot in snapshots)
+
+    await pipeline(deps["files"], deps["repository"], guard(Namesakes())).process(run)
+    await finish(deps, run)
+    context = await internal_context(
+        OWNER, INN_1, deps["repository"], deps["files"], deps["reader"], steps=deps["repository"]
+    )
+    assert context.contracts == ()
+    assert _replace  # the import is used by the helper above

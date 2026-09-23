@@ -17,14 +17,44 @@ from claims_assistant.domain.external import ExternalSnapshot, Period
 from claims_assistant.domain.indicators import InternalIndicators, internal_indicators
 from claims_assistant.domain.interactions import InteractionRow, chronology
 from claims_assistant.domain.report import file_labels
+from claims_assistant.domain.steps import RUN_SCOPE, StepStatus
 
-from .analysis_repository import AnalysisRepository
+from .analysis_repository import AnalysisRepository, RepositoryError
 from .check_package import FileStorage, StorageError, package_inns
-from .contract_link import link_contracts
 from .imports import SheetReader
 from .package_checks import PackageIntegrityError, review_package
+from .step_payloads import PayloadError, load_links
+from .step_store import StepStore
 
 FINISHED = frozenset({RunStatus.COMPLETED, RunStatus.PARTIAL})
+LINKS_STEP = "contracts_link"
+LINKS_VERSION = "links-v1"
+
+
+async def _linked_contracts(
+    run_id: str, inn: str, steps: StepStore | None
+) -> tuple[ContractDebt, ...]:
+    """The contracts the report tied to this company, or none at all.
+
+    None is the honest answer when the check has no saved link — a check finished before
+    the report was ever attached, or storage that cannot be read. Working the link out
+    here from a single name would let the card show a namesake's contracts, which is the
+    one mistake that matters: the call is made from the card.
+    """
+    if steps is None:
+        return ()
+    try:
+        step = await steps.get_step(run_id, RUN_SCOPE, LINKS_STEP, LINKS_VERSION)
+    except RepositoryError:
+        return ()
+    if step is None or step.status is not StepStatus.OK or step.payload is None:
+        return ()
+    try:
+        return load_links(step.payload).get(inn, ())
+    except PayloadError:
+        return ()
+
+
 _NEWEST_RUNS = 5  # how many of the owner's finished checks are searched for the INN
 
 
@@ -55,15 +85,16 @@ async def internal_context(
     reader: SheetReader,
     *,
     finances: ExternalSnapshot | None = None,
-    company_name: str | None = None,
+    steps: StepStore | None = None,
     limits: ImportLimits = ImportLimits(),
 ) -> InternalContext | None:
     """Indicators and chronology of ``inn`` from the owner's newest finished check, or None.
 
     ``finances`` is the card's fresh external snapshot of the finances section, so the
-    revenue indicator is computed from the same facts the card shows. ``company_name`` is
-    what the source calls this company: the overdue report (S7-01) names no INN, so its
-    contracts are tied to the card by name, exactly as the report does it.
+    revenue indicator is computed from the same facts the card shows. ``steps`` gives the
+    check's saved results: the contracts of the overdue report (S7-01) are shown as the
+    **report** tied them, because only the report knew every company of the check and
+    could refuse to attribute a name two of them share (review B on #58).
     """
     runs = [run for run in await repository.list_runs(owner_id) if run.status in FINISHED]
     for run in runs[:_NEWEST_RUNS]:
@@ -87,10 +118,9 @@ async def internal_context(
             finances,
         )
         interactions = chronology(review.interactions).get(inn, ())
-        # The overdue report names companies, not INNs; the card links them the same way
-        # the report does, and shows nothing when the name did not match (S7-01).
-        linked = link_contracts(review.contracts, {inn: company_name})
-        contracts = sorted(linked.by_inn.get(inn, ()), key=lambda c: (-(c.days or 0), c.name))
+        contracts = sorted(
+            await _linked_contracts(run.id, inn, steps), key=lambda c: (-(c.days or 0), c.name)
+        )
         return InternalContext(
             run=run,
             row=row,

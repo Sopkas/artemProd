@@ -38,7 +38,7 @@ from claims_assistant.application.report_delivery import (
     fetch_report,
 )
 from claims_assistant.domain.analysis import FileKind
-from claims_assistant.domain.external import DataMode, FactKind, Period, Section
+from claims_assistant.domain.external import DataMode, Period, Section
 from claims_assistant.domain.inn import InvalidInn
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
@@ -135,15 +135,6 @@ def _composition(run, rows: dict) -> tuple[str, ...]:
     return tuple(
         texts.composition_line(file.kind, rows.get(file.id, 0), file.coverage) for file in run.files
     )
-
-
-def _company_name(check) -> str | None:
-    """What the source calls this company; the overdue report is linked to it by name."""
-    for snapshot in check.snapshots:
-        for fact in snapshot.facts:
-            if fact.kind is FactKind.COMPANY_NAME and isinstance(fact.value, str):
-                return fact.value
-    return None
 
 
 def create_dispatcher(
@@ -427,7 +418,7 @@ def create_dispatcher(
                 files,
                 reader,
                 finances=finances,
-                company_name=_company_name(check),
+                steps=repository,
             )
         except Exception as exc:
             # The card is still useful without the internal block; log the type only.

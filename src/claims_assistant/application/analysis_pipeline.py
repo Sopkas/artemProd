@@ -60,6 +60,7 @@ from .step_payloads import (
     ImportedPackage,
     PayloadError,
     dump_import,
+    dump_links,
     dump_snapshots,
     load_import,
     load_snapshots,
@@ -76,6 +77,8 @@ REPORT_WRITE_FAILED = "Не удалось сохранить файл отчё�
 STEP_UNREADABLE = "Сохранённый шаг проверки не читается; запустите проверку заново."
 
 IMPORT_STEP = "import"
+LINKS_STEP = "contracts_link"
+LINKS_VERSION = "links-v1"
 IMPORT_VERSION = "package-v4"  # v1: counts; v2: rows and issues; v3: every file; v4: contracts
 FETCH_STEP = "external_fetch"
 FETCH_VERSION = "sections-v1"
@@ -350,6 +353,12 @@ class AnalysisPipeline:
         # what did not match is a finding of the report, not a silent loss.
         linked = link_contracts(package.contracts, _company_names(rows, snapshots))
         issues = issues + _contract_issues(linked)
+        if package.contracts:
+            # Saved so the card shows the same answer instead of working it out again
+            # from one company's name, where two namesakes look alike (review B on #58).
+            await self._save(
+                run, RUN_SCOPE, LINKS_STEP, LINKS_VERSION, payload=dump_links(linked.by_inn)
+            )
         explanations = await self._explain(
             run, rows, assessments, indicators, snapshots, chronology(interactions)
         )
@@ -524,6 +533,14 @@ def _contract_issues(linked: LinkedContracts) -> tuple[ImportIssue, ...]:
                 "contracts_owner_ambiguous",
                 f"Договоры {_companies(len(linked.ambiguous))} не отнесены: "
                 "в проверке есть несколько организаций с таким же названием.",
+            )
+        )
+    if linked.without_form:
+        issues.append(
+            _issue(
+                "contracts_matched_without_form",
+                f"Договоры {_companies(len(linked.without_form))} привязаны по названию "
+                "без учёта правовой формы — проверьте, те ли это организации.",
             )
         )
     if linked.unnamed:
