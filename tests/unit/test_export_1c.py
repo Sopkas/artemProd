@@ -114,6 +114,26 @@ def test_the_covered_period_comes_from_the_export_header():
     assert run(rows)[1].period is None
 
 
+def test_a_table_that_starts_on_the_first_row_has_no_header_block():
+    """Found by A on #50: index 0 is falsy, so the payments themselves were read as the
+    parameters block and gave a period and a counterparty out of nowhere."""
+    rows = [
+        TITLES,
+        (
+            "02.09.2024",
+            "Поступление 00БП-1 от 02.09.2024",
+            "",
+            "Дата начала: 01.01.2020",
+            "",
+            1000,
+            None,
+        ),
+    ]
+    result, export = run(rows)
+    assert [row.payment_id for row in result.rows] == ["00БП-1"]
+    assert export.period is None and export.counterparty is None
+
+
 def test_the_totals_row_is_not_a_payment():
     result, _ = run()
     assert len(result.rows) == 2
