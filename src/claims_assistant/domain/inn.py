@@ -82,8 +82,10 @@ def validate_inn(raw: str) -> str:
 def validate_legal_inn(raw: str) -> str:
     """Only a company's INN; an entrepreneur's is refused with a clear reason.
 
-    Kept for the places that genuinely need a legal entity; the import and the card take
-    both kinds through ``validate_inn``.
+    Nothing in the product calls this today — the import, the card and the stored payloads
+    all take both kinds through ``validate_inn``. It stays for the sections that exist for
+    companies only (the company card and the accounting statements, S7-02): when their
+    method is wired, that is where a legal entity has to be required rather than assumed.
     """
     # The kind is judged before the checksum: «this is an entrepreneur» is the useful
     # answer here, not «the control digit does not match».
