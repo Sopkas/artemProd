@@ -22,6 +22,14 @@ from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 Sheet = tuple[tuple[Cell, ...], Iterable[tuple[int, tuple[Cell, ...]]]]
 
 
+class RawSheetReader(Protocol):
+    """Reads a sheet as it is, header block and all (S4-05: the customer's own export)."""
+
+    def read_rows(
+        self, source: object, limits: ImportLimits, sheet: str | None = None
+    ) -> tuple[tuple[Cell, ...], ...]: ...
+
+
 class WorkbookError(Exception):
     """Reader failure with a stable code and user-safe reason; never carries contents."""
 
