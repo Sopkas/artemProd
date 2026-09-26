@@ -11,6 +11,8 @@ ADD_PAYMENTS = "Добавить платежи"
 ADD_HISTORY = "Добавить историю долга"
 ADD_INTERACTIONS = "Добавить взаимодействия"
 ADD_DEBT_REPORT = "Добавить отчёт по договорам"
+PAYMENTS_TEMPLATE = "По нашему шаблону"
+PAYMENTS_EXPORT = "Выгрузка из 1С"
 
 
 def _keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
@@ -38,6 +40,11 @@ def launch_menu() -> ReplyKeyboardMarkup:
     return _keyboard(
         [[LAUNCH], [ADD_PAYMENTS, ADD_HISTORY], [ADD_INTERACTIONS, ADD_DEBT_REPORT], [CANCEL]]
     )
+
+
+def payments_source_menu() -> ReplyKeyboardMarkup:
+    """Payments come either in our template or as the customer's own 1C print (S4-05)."""
+    return _keyboard([[PAYMENTS_TEMPLATE, PAYMENTS_EXPORT], [CANCEL]])
 
 
 def bot_commands() -> list[BotCommand]:
