@@ -64,6 +64,21 @@ CHECK_CONFIRM = (
     "Нажмите «Запустить проверку». Дополнительно можно добавить файлы «Платежи», "
     "«История долга» и «Взаимодействия» или нажать «Отмена»."
 )
+PAYMENTS_SOURCE_PROMPT = (
+    "Как пришлёте платежи?\n"
+    "• «По нашему шаблону» — один файл на всех должников, период укажете вы.\n"
+    "• «Выгрузка из 1С» — печатная форма по одной организации: период возьмём из самого "
+    "файла, а вы скажете, чья это выгрузка."
+)
+EXPORT_INN_PROMPT = (
+    "Отправьте ИНН организации, по которой сделана выгрузка: в самом файле его нет, "
+    "а по названию в шапке опознать организацию нельзя.\n"
+    "ИНН должен быть из файла «Контрагенты» этой проверки."
+)
+EXPORT_FILE_PROMPT = (
+    "Отправьте файл выгрузки .xlsx (до 10 МБ) — так, как его печатает 1С, "
+    "перестраивать ничего не нужно.\nЧтобы вернуться к пакету, нажмите «Отмена»."
+)
 PAYMENTS_PERIOD_PROMPT = (
     "Укажите период, за который выгрузка платежей полная: ДД.ММ.ГГГГ–ДД.ММ.ГГГГ "
     "(например, 01.06.2026–31.08.2026).\n"
@@ -81,6 +96,14 @@ HISTORY_FILE_PROMPT = (
     "Отправьте файл .xlsx с листом «История долга» (до 10 МБ). "
     "Шаблон — выше.\nЧтобы вернуться к пакету, нажмите «Отмена»."
 )
+DEBT_REPORT_FILE_PROMPT = (
+    "Отправьте «Отчёт по просроченным лизинговым платежам» из 1С (.xlsx или .xls, до 10 МБ) — "
+    "так, как он выгружается, перестраивать ничего не нужно.\n"
+    "Он не заменяет файл «Контрагенты»: ИНН берутся оттуда, а из отчёта — договоры, их "
+    "просрочка и суммы. Договоры привязываются к организациям по названию; чьи названия "
+    "не совпадут, будут названы в «Качестве данных» отчёта.\n"
+    "Чтобы вернуться к пакету, нажмите «Отмена»."
+)
 INTERACTIONS_FILE_PROMPT = (
     "Отправьте файл .xlsx с листом «Взаимодействия» (до 10 МБ). "
     "Шаблон — выше.\nЧтобы вернуться к пакету, нажмите «Отмена»."
@@ -93,7 +116,10 @@ FILE_KIND_LABELS = {
     FileKind.PAYMENTS: "Платежи",
     FileKind.DEBT_HISTORY: "История долга",
     FileKind.INTERACTIONS: "Взаимодействия",
+    FileKind.DEBT_REPORT: "Отчёт по договорам",
 }
+# Both files are counted in companies, not in rows: that is what the user sees in them.
+_BY_COMPANY = frozenset({FileKind.COUNTERPARTIES, FileKind.DEBT_REPORT})
 CHECK_QUEUED_PREFIX = "Проверка поставлена в очередь"
 CHECK_CANCELLED = "Новая проверка отменена. Черновик, если он был создан, не запускается."
 STATUS_TITLE = "Последняя проверка"
@@ -166,7 +192,7 @@ def period_text(period: Period) -> str:
 
 def composition_line(kind: FileKind, rows: int, coverage: Period | None) -> str:
     label = FILE_KIND_LABELS[kind]
-    unit = "организаций" if kind is FileKind.COUNTERPARTIES else "строк"
+    unit = "организаций" if kind in _BY_COMPANY else "строк"
     text = f"{label} — {unit}: {rows}"
     if coverage is not None:
         text += f", период {period_text(coverage)}"
@@ -199,17 +225,48 @@ def _composition_block(composition: tuple[str, ...]) -> list[str]:
     return ["Состав пакета:"] + [f"• {line}" for line in composition]
 
 
+def export_summary(export, rows: int) -> str:
+    """What the export's own header said — so a file about the wrong client is noticed."""
+    lines = []
+    if export.counterparty:
+        lines.append(f"Контрагент в файле: {export.counterparty}")
+    if export.organization:
+        lines.append(f"Организация: {export.organization}")
+    if export.period is not None:
+        lines.append(
+            "Период выгрузки из файла: "
+            f"{export.period.start.strftime('%d.%m.%Y')}–{export.period.end.strftime('%d.%m.%Y')}"
+        )
+    else:
+        lines.append(
+            "Период в файле не указан: полнота выгрузки неизвестна, "
+            "показатель по платежам останется неопределённым."
+        )
+    lines.append(f"Платежей принято: {rows}. В пакет сохранён лист «Платежи» из этой выгрузки.")
+    return "\n".join(lines)
+
+
 def ledger_summary(
     kind: FileKind,
     rows: int,
     issues: tuple[ImportIssue, ...],
     duplicate: bool,
     composition: tuple[str, ...],
+    contracts: int | None = None,
 ) -> str:
     lines = [f"Файл «{FILE_KIND_LABELS[kind]}» принят"]
     if duplicate:
         lines.append(CHECK_DUPLICATE)
-    lines.append(f"Строк принято: {rows}")
+    if kind is FileKind.DEBT_REPORT:
+        # The report is read as companies with their contracts, so that is what is shown;
+        # «строк» would mean nothing to someone looking at a 1C print.
+        lines.append(f"Организаций: {rows}, договоров: {contracts or 0}")
+        lines.append(
+            "Договоры привяжутся к организациям проверки по названию — "
+            "несовпавшие будут названы в отчёте, на листе «Качество данных»."
+        )
+    else:
+        lines.append(f"Строк принято: {rows}")
     lines.extend(_issues_block(issues))
     if any(issue.severity is IssueSeverity.ERROR for issue in issues):
         lines.append("Строки с ошибками в проверку не попадут.")

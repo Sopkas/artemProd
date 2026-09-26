@@ -22,6 +22,7 @@ from claims_assistant.domain.external import (
     ProviderError,
     Section,
 )
+from claims_assistant.domain.inn import InnKind, inn_kind
 from claims_assistant.infrastructure.checko import bankruptcy, finances
 from claims_assistant.infrastructure.checko.errors import InvalidResponse, NotFound, is_not_found
 
@@ -79,6 +80,13 @@ def _http_error(http_status: int) -> tuple[FetchStatus, str, str] | None:
 _API_ERROR = "Checko отклонил запрос; проверьте доступ и лимиты в кабинете."
 _INVALID = "Ответ Checko не соответствует ожидаемому формату."
 _NOT_FOUND = "Организация с таким ИНН не найдена в источнике."
+# S7-02: an entrepreneur is a different record in the source, behind a different method
+# we have not been able to check yet. Asking the company method about a 12-digit INN
+# would answer «не найдено», which reads as «no such person» — and that is not true.
+_ENTREPRENEUR = (
+    "Раздел доступен только для организаций; для ИП нужен отдельный метод источника, "
+    "он пока не подключён."
+)
 
 
 def _failure(
@@ -213,7 +221,25 @@ class CheckoCompanyDataProvider:
         }
         return tuple([await handlers[section](request, fetched_at) for section in request.sections])
 
+    def _entrepreneur_gap(
+        self, request: CompanyDataRequest, section: Section, fetched_at: datetime
+    ) -> ExternalSnapshot | None:
+        """A section we cannot ask about for an entrepreneur; an honest gap, not a «no»."""
+        if inn_kind(request.inn) is InnKind.LEGAL:
+            return None
+        return _failure(
+            request.inn,
+            section,
+            fetched_at,
+            FetchStatus.UNAVAILABLE,
+            "not_supported",
+            _ENTREPRENEUR,
+        )
+
     async def _company(self, request: CompanyDataRequest, fetched_at: datetime) -> ExternalSnapshot:
+        gap = self._entrepreneur_gap(request, Section.COMPANY, fetched_at)
+        if gap is not None:
+            return gap
         status, code, message = (
             FetchStatus.UNAVAILABLE,
             "network_error",
@@ -287,6 +313,10 @@ class CheckoCompanyDataProvider:
     async def _finances(
         self, request: CompanyDataRequest, fetched_at: datetime
     ) -> ExternalSnapshot:
+        # An entrepreneur files no accounting statements at all: there is nothing to ask for.
+        gap = self._entrepreneur_gap(request, Section.FINANCES, fetched_at)
+        if gap is not None:
+            return gap
         status, code, message = (
             FetchStatus.UNAVAILABLE,
             "network_error",

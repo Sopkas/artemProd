@@ -41,6 +41,10 @@ class FileKind(StrEnum):
     PAYMENTS = "payments"
     INTERACTIONS = "interactions"
     DEBT_HISTORY = "debt_history"
+    # S7-01: the customer's own «Отчет по просроченным лизинговым платежам». It does not
+    # replace «Контрагенты» — there is no INN in it — but adds the contracts behind a
+    # company's debt (decision of 23.09.2026, docs/data-contracts.md).
+    DEBT_REPORT = "debt_report"
 
 
 def _utc(value: datetime, field: str) -> datetime:
