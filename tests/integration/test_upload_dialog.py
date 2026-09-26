@@ -22,6 +22,7 @@ LAUNCH_MENU = [
     "Добавить платежи",
     "Добавить историю долга",
     "Добавить взаимодействия",
+    "Добавить отчёт по договорам",
     "Отмена",
 ]
 
@@ -450,6 +451,9 @@ async def test_payments_need_a_period_then_a_file_and_show_the_composition(
 
     dispatcher, repository = await package_ready(setup, bot, update_factory)
     reply = await send(dispatcher, bot, update_factory, "Добавить платежи")
+    assert reply.text == texts.PAYMENTS_SOURCE_PROMPT
+    assert buttons(reply) == ["По нашему шаблону", "Выгрузка из 1С", "Отмена"]
+    reply = await send(dispatcher, bot, update_factory, "По нашему шаблону")
     assert reply.text == texts.PAYMENTS_PERIOD_PROMPT and buttons(reply) == ["Отмена"]
 
     documents_before = len([c for c in bot.session.calls if isinstance(c, SendDocument)])
@@ -487,6 +491,7 @@ async def test_payments_need_a_period_then_a_file_and_show_the_composition(
 async def test_bad_period_is_asked_again(setup, bot, update_factory, text):
     dispatcher, _ = await package_ready(setup, bot, update_factory)
     await send(dispatcher, bot, update_factory, "Добавить платежи")
+    await send(dispatcher, bot, update_factory, "По нашему шаблону")
     reply = await send(dispatcher, bot, update_factory, text)
     assert reply.text == texts.PAYMENTS_PERIOD_INVALID
 
@@ -547,6 +552,7 @@ async def test_same_ledger_twice_is_reported_not_duplicated(setup, bot, update_f
 async def test_launch_with_a_full_package_queues_all_files(setup, bot, update_factory):
     dispatcher, repository = await package_ready(setup, bot, update_factory)
     await send(dispatcher, bot, update_factory, "Добавить платежи")
+    await send(dispatcher, bot, update_factory, "По нашему шаблону")
     await send(dispatcher, bot, update_factory, "01.06.2026–31.08.2026")
     payments = payments_file([[INN_1, "P-1", date(2026, 7, 15), 100.0]])
     await send_document(dispatcher, bot, update_factory, payments, name="p.xlsx")
@@ -639,6 +645,7 @@ async def test_launch_reports_cross_file_findings_once(setup, bot, update_factor
     same = [INN_1, "P-1", date(2026, 7, 15), 100.0]
     for name in ("p1.xlsx", "p2.xlsx"):
         await send(dispatcher, bot, update_factory, "Добавить платежи")
+        await send(dispatcher, bot, update_factory, "По нашему шаблону")
         await send(dispatcher, bot, update_factory, "01.06.2026–31.08.2026")
         rows = [same] if name == "p1.xlsx" else [same, [INN_1, "P-9", date(2026, 8, 1), 1.0]]
         await send_document(dispatcher, bot, update_factory, payments_file(rows), name=name)
@@ -670,3 +677,159 @@ async def test_launch_is_blocked_when_the_package_is_malformed(setup, bot, updat
     assert "больше одного файла «Контрагенты»" in reply.text
     assert buttons(reply) == LAUNCH_MENU
     assert (await repository.list_runs(OWNER))[0].status == RunStatus.DRAFT
+
+
+# --- the customer's own 1C export of payments (S4-05, presentation) ---------------
+
+
+def export_file(rows=None, *, start="01.06.2026 0:00:00", end="31.08.2026 9:38:50"):
+    """The print as 1C lays it out: a parameters block, the titles lower down, a total."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    rows = rows or [
+        ("15.07.2026", "Поступление на расчетный счет 00БП-036835 от 15.07.2026 17:00:38", 100.0),
+        ("01.08.2026", "Поступление на расчетный счет 00БП-036902 от 01.08.2026 10:05:11", 5.0),
+    ]
+    sheet = [
+        [None, None, None, None],
+        ["Параметры:", "Контрагент: РОМАШКА ООО", None, None],
+        [None, "Организация: НАША ФИРМА ООО", None, None],
+        [None, f"Дата начала: {start}", None, None],
+        [None, f"Дата окончания: {end}", None, None],
+        ["Дата", "Документ", "Поступление", "Списание"],
+        *[[day, document, amount, None] for day, document, amount in rows],
+        ["Итого", sum(amount for _, _, amount in rows), None, None],
+    ]
+    book = Workbook()
+    book.active.title = "Лист_1"  # 1C names it so; the reader takes the first sheet
+    for line in sheet:
+        book.active.append(line)
+    buffer = BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
+async def to_export(dispatcher, bot, update_factory, inn=None):
+    reply = await send(dispatcher, bot, update_factory, "Добавить платежи")
+    assert "Выгрузка из 1С" in buttons(reply)
+    reply = await send(dispatcher, bot, update_factory, "Выгрузка из 1С")
+    assert reply.text == texts.EXPORT_INN_PROMPT
+    return await send(dispatcher, bot, update_factory, inn or INN_1)
+
+
+async def test_the_export_is_accepted_for_the_organization_the_user_named(
+    setup, bot, update_factory
+):
+    """The file names no INN: the dialog does, and the period comes out of the file."""
+    from claims_assistant.domain.analysis import FileKind
+    from claims_assistant.domain.external import Period
+
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    reply = await to_export(dispatcher, bot, update_factory)
+    assert reply.text == texts.EXPORT_FILE_PROMPT
+
+    reply = await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xlsx")
+    assert "Контрагент в файле: РОМАШКА ООО" in reply.text  # the wrong client gets noticed
+    assert "Организация: НАША ФИРМА ООО" in reply.text
+    assert "Период выгрузки из файла: 01.06.2026–31.08.2026" in reply.text  # not asked for
+    assert "Платежей принято: 2" in reply.text
+    assert "Файл «Платежи» принят" in reply.text
+    assert "• Платежи — строк: 2, период 01.06.2026–31.08.2026" in reply.text
+    assert buttons(reply) == LAUNCH_MENU
+
+    run = (await repository.list_runs(OWNER))[0]
+    (payments,) = [file for file in run.files if file.kind is FileKind.PAYMENTS]
+    assert payments.coverage == Period(date(2026, 6, 1), date(2026, 8, 31))
+
+
+async def test_the_stored_file_is_the_export_translated_into_our_sheet(
+    setup, bot, update_factory, tmp_path
+):
+    """The package is read by the contract later on, so the print is not kept as it is."""
+    from claims_assistant.application.ledger_imports import import_payments
+    from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
+
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    await to_export(dispatcher, bot, update_factory)
+    await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xlsx")
+
+    run = (await repository.list_runs(OWNER))[0]
+    stored = [file for file in run.files if file.kind.value == "payments"][0]
+    data = LocalFileStorage(tmp_path / "uploads").read(stored.stored_path)
+    result = import_payments(
+        OpenpyxlSheetReader(), data, known_inns={INN_1, INN_2}, analysis_date=date(2026, 9, 1)
+    )
+    assert [row.payment_id for row in result.rows] == ["00БП-036835", "00БП-036902"]
+    assert all(row.inn == INN_1 for row in result.rows)  # whose file it was is remembered
+
+
+async def test_an_export_for_an_organization_outside_the_package_is_refused(
+    setup, bot, update_factory
+):
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    reply = await to_export(dispatcher, bot, update_factory, inn="7736050003")
+    assert reply.text == texts.EXPORT_FILE_PROMPT
+    reply = await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xlsx")
+    assert "нет в файле «Контрагенты»" in reply.text
+    assert not [
+        file
+        for file in (await repository.list_runs(OWNER))[0].files
+        if file.kind.value == "payments"
+    ]
+
+
+async def test_a_wrong_inn_is_asked_again_without_repeating_it(setup, bot, update_factory):
+    dispatcher, _ = await package_ready(setup, bot, update_factory)
+    await send(dispatcher, bot, update_factory, "Добавить платежи")
+    await send(dispatcher, bot, update_factory, "Выгрузка из 1С")
+    reply = await send(dispatcher, bot, update_factory, "1234")
+    assert "10 цифр" in reply.text and "1234" not in reply.text
+    reply = await send(dispatcher, bot, update_factory, INN_1)
+    assert reply.text == texts.EXPORT_FILE_PROMPT
+
+
+async def test_a_file_that_is_not_an_export_is_refused_without_guessing(setup, bot, update_factory):
+    dispatcher, _ = await package_ready(setup, bot, update_factory)
+    await to_export(dispatcher, bot, update_factory)
+    reply = await send_document(
+        dispatcher, bot, update_factory, build_counterparties_template(), name="not-an-export.xlsx"
+    )
+    assert "не найдена таблица" in reply.text
+
+
+async def test_an_entrepreneurs_export_is_accepted_too(setup, bot, update_factory):
+    """The portfolio holds ООО and ИП alike (S7-02); payments are not a company-only file."""
+    from decimal import Decimal
+
+    from claims_assistant.domain.counterparties import CounterpartyRow
+
+    ENTREPRENEUR = "500100732259"  # synthetic: satisfies both control digits
+    dispatcher, _ = setup
+    await start_check(dispatcher, bot, update_factory)
+    rows = (
+        CounterpartyRow(
+            inn=ENTREPRENEUR,
+            cutoff_date=date(2026, 9, 1),
+            debt=Decimal("100.00"),
+            overdue_days=30,
+            last_payment_date=date(2026, 7, 1),
+        ),
+    )
+    await send_document(dispatcher, bot, update_factory, build_counterparties_template(rows))
+    await send(dispatcher, bot, update_factory, "Добавить платежи")
+    await send(dispatcher, bot, update_factory, "Выгрузка из 1С")
+    reply = await send(dispatcher, bot, update_factory, ENTREPRENEUR)
+    assert reply.text == texts.EXPORT_FILE_PROMPT  # not «это ИНН предпринимателя»
+    reply = await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xlsx")
+    assert "Платежей принято: 2" in reply.text
+
+
+async def test_the_export_is_taken_in_the_old_format_as_well(setup, bot, update_factory):
+    """1C prints .xls, and the reader knows it by the file's signature (#51)."""
+    dispatcher, _ = await package_ready(setup, bot, update_factory)
+    await to_export(dispatcher, bot, update_factory)
+    reply = await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xls")
+    assert "Платежей принято: 2" in reply.text
+    assert ".xls" in texts.EXPORT_FILE_PROMPT

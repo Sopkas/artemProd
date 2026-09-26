@@ -28,6 +28,7 @@ from typing import TypeVar
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow, ImportLimits
 from claims_assistant.domain.debt_history import DebtSnapshot
+from claims_assistant.domain.debt_report import CounterpartyDebt, read_debt_report
 from claims_assistant.domain.external import Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.indicators import (
@@ -38,9 +39,11 @@ from claims_assistant.domain.indicators import (
 )
 from claims_assistant.domain.interactions import InteractionRow, chronology
 from claims_assistant.domain.payments import PaymentRow
+from claims_assistant.domain.plural import of_companies as _companies
 
 from .check_package import FileStorage, StorageError
-from .imports import SheetReader, import_counterparties
+from .contract_link import normalize_name
+from .imports import OutlineReader, SheetReader, import_counterparties
 from .ledger_imports import import_debt_history, import_interactions, import_payments
 
 PACKAGE_SHEET = "Пакет"
@@ -61,6 +64,9 @@ class PackageReview:
     history: tuple[DebtSnapshot, ...]
     interactions: tuple[InteractionRow, ...]
     issues: tuple[ImportIssue, ...]  # every file's issues plus the cross-file ones
+    # S7-01: the counterparties of the customer's overdue report with their contracts.
+    # They carry no INN: linking to the rows above happens by name, later (contract_link).
+    contracts: tuple[CounterpartyDebt, ...] = ()
     # INN → {DEBT_HISTORY_CONFLICT, LAST_PAYMENT_CONFLICT}: which indicator is unknown
     # for which company because the files contradict each other.
     conflicts: Mapping[str, frozenset[str]] = field(default_factory=dict)
@@ -143,12 +149,6 @@ def _merge_by_key(
                     )
                 )
     return list(accepted.values()), issues
-
-
-def _companies(count: int) -> str:
-    if count % 10 == 1 and count % 100 != 11:
-        return f"{count} организации"
-    return f"{count} организаций"
 
 
 def date_conflicts(
@@ -253,6 +253,9 @@ async def review_package(
         if file.kind is FileKind.PAYMENTS and file.coverage is not None:
             covered[file.id] = (file.coverage.start, file.coverage.end)
 
+    contracts, contract_issues = await _read_debt_reports(run, files, reader, limits)
+    issues.extend(contract_issues)
+
     payments, more = _merge_by_key(
         parsed[FileKind.PAYMENTS],
         lambda p: (p.inn, p.payment_id),
@@ -290,9 +293,54 @@ async def review_package(
         payments=tuple(payments),
         history=tuple(history),
         interactions=ordered_interactions,
+        contracts=contracts,
         issues=tuple(issues),
         conflicts=conflicts,
     )
+
+
+async def _read_debt_reports(
+    run: AnalysisRun,
+    files: FileStorage,
+    reader: SheetReader,
+    limits: ImportLimits,
+) -> tuple[tuple[CounterpartyDebt, ...], list[ImportIssue]]:
+    """The customer's overdue reports of this package, counterparty by counterparty.
+
+    The file is read by the indents of its own rows, so the reader has to be able to give
+    them; a reader that cannot is a wiring mistake, not a bad file.
+
+    A counterparty named in two reports keeps the contracts of the first one: two prints
+    of the same client are two views of one debt, and adding them up would double it.
+    """
+    attached = [file for file in run.files if file.kind is FileKind.DEBT_REPORT]
+    if not attached:
+        return (), []
+    if not isinstance(reader, OutlineReader):
+        raise TypeError("A debt report needs a reader that returns row indents")
+    issues: list[ImportIssue] = []
+    counterparties: list[CounterpartyDebt] = []
+    seen: dict[str, str] = {}  # normalised name → the file that brought it first
+    for file in attached:
+        data = await asyncio.to_thread(files.read, file.stored_path)
+        rows = await asyncio.to_thread(reader.read_outline, data, limits)
+        result = await asyncio.to_thread(read_debt_report, list(rows))
+        issues.extend(_tag(result.issues, file.id))
+        for counterparty in result.counterparties:
+            key = normalize_name(counterparty.name)
+            if key in seen:
+                issues.append(
+                    _package_issue(
+                        "debt_report_duplicate_across_files",
+                        IssueSeverity.WARNING,
+                        f"Контрагент «{counterparty.name}» есть в двух отчётах по договорам; "
+                        "договоры взяты из первого.",
+                    )
+                )
+                continue
+            seen[key] = file.id
+            counterparties.append(counterparty)
+    return tuple(counterparties), issues
 
 
 __all__ = [

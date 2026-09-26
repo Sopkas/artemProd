@@ -25,10 +25,18 @@ from typing import Protocol
 from claims_assistant.domain.ai_context import ContextLimits, build_context, versions
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
 from claims_assistant.domain.counterparties import CounterpartyRow
-from claims_assistant.domain.external import DataMode, ExternalSnapshot, FetchStatus, Section
+from claims_assistant.domain.debt_report import SHEET_NAME as DEBT_REPORT_SHEET
+from claims_assistant.domain.external import (
+    DataMode,
+    ExternalSnapshot,
+    FactKind,
+    FetchStatus,
+    Section,
+)
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.indicators import package_indicators
 from claims_assistant.domain.interactions import InteractionRow, chronology
+from claims_assistant.domain.plural import of_companies as _companies
 from claims_assistant.domain.report import AnalysisReport, ReportMeta, ReportRow, file_labels
 from claims_assistant.domain.scoring import RULES_VERSION, Assessment, Priority, assess
 from claims_assistant.domain.steps import RUN_SCOPE, StepResult, StepStatus
@@ -39,6 +47,7 @@ from .analysis_queue import RunOutcome
 from .analysis_repository import RepositoryError
 from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
+from .contract_link import LinkedContracts, link_contracts
 from .explanations import EXPLANATION_STEP, StoredExplanation
 from .external_guard import BUDGET_EXHAUSTED, TRANSIENT_CODES, RunBudget
 from .imports import SheetReader
@@ -54,6 +63,7 @@ from .step_payloads import (
     ImportedPackage,
     PayloadError,
     dump_import,
+    dump_links,
     dump_snapshots,
     load_import,
     load_snapshots,
@@ -70,7 +80,9 @@ REPORT_WRITE_FAILED = "Не удалось сохранить файл отчё�
 STEP_UNREADABLE = "Сохранённый шаг проверки не читается; запустите проверку заново."
 
 IMPORT_STEP = "import"
-IMPORT_VERSION = "package-v3"  # v1: counts; v2: rows and issues; v3: every file of the package
+LINKS_STEP = "contracts_link"
+LINKS_VERSION = "links-v1"
+IMPORT_VERSION = "package-v4"  # v1: counts; v2: rows and issues; v3: every file; v4: contracts
 FETCH_STEP = "external_fetch"
 FETCH_VERSION = "sections-v1"
 REPORT_STEP = "report"
@@ -271,6 +283,7 @@ class AnalysisPipeline:
             payments=review.payments,
             history=review.history,
             interactions=review.interactions,
+            contracts=review.contracts,
         )
         await self._save(run, RUN_SCOPE, IMPORT_STEP, IMPORT_VERSION, payload=dump_import(package))
         return package
@@ -354,6 +367,16 @@ class AnalysisPipeline:
         }
         known = {row.inn for row in rows}
         interactions = tuple(item for item in package.interactions if item.inn in known)
+        # S7-01: the overdue report names companies, not INNs — the link is by name, and
+        # what did not match is a finding of the report, not a silent loss.
+        linked = link_contracts(package.contracts, _company_names(rows, snapshots))
+        issues = issues + _contract_issues(linked)
+        if package.contracts:
+            # Saved so the card shows the same answer instead of working it out again
+            # from one company's name, where two namesakes look alike (review B on #58).
+            await self._save(
+                run, RUN_SCOPE, LINKS_STEP, LINKS_VERSION, payload=dump_links(linked.by_inn)
+            )
         explanations = await self._explain(
             run, rows, assessments, indicators, snapshots, chronology(interactions)
         )
@@ -386,7 +409,11 @@ class AnalysisPipeline:
             ai_version=self._ai_version(),
         )
         report = AnalysisReport(
-            meta=meta, rows=report_rows, import_issues=issues, interactions=interactions
+            meta=meta,
+            rows=report_rows,
+            import_issues=issues,
+            interactions=interactions,
+            contracts=linked.by_inn,
         )
         data = await asyncio.to_thread(self._build_report, report)
         previous = await self._repository.get_report(run.owner_id, run.id)
@@ -544,6 +571,66 @@ class AnalysisPipeline:
                 error=error,
             )
         )
+
+
+def _company_names(
+    rows: tuple[CounterpartyRow, ...], snapshots: dict[str, tuple[ExternalSnapshot, ...]]
+) -> dict[str, str | None]:
+    """INN → the company name the source gave, or None when it gave none (S7-01)."""
+    names: dict[str, str | None] = {}
+    for row in rows:
+        name = None
+        for snapshot in snapshots.get(row.inn, ()):
+            for fact in snapshot.facts:
+                if fact.kind is FactKind.COMPANY_NAME and isinstance(fact.value, str):
+                    name = fact.value
+                    break
+        names[row.inn] = name
+    return names
+
+
+def _contract_issues(linked: LinkedContracts) -> tuple[ImportIssue, ...]:
+    """What the overdue report said about companies we could not recognise."""
+    issues = []
+    if linked.unknown:
+        issues.append(
+            _issue(
+                "contracts_owner_unknown",
+                f"Договоры {_companies(len(linked.unknown))} из отчёта по договорам "
+                "не отнесены ни к одной организации проверки: названия не совпали.",
+            )
+        )
+    if linked.ambiguous:
+        issues.append(
+            _issue(
+                "contracts_owner_ambiguous",
+                f"Договоры {_companies(len(linked.ambiguous))} не отнесены: "
+                "в проверке есть несколько организаций с таким же названием.",
+            )
+        )
+    if linked.without_form:
+        issues.append(
+            _issue(
+                "contracts_matched_without_form",
+                f"Договоры {_companies(len(linked.without_form))} привязаны по названию "
+                "без учёта правовой формы — проверьте, те ли это организации.",
+            )
+        )
+    if linked.unnamed:
+        issues.append(
+            _issue(
+                "contracts_name_missing",
+                f"У {_companies(len(linked.unnamed))} нет названия от источника, "
+                "поэтому договоры из отчёта к ним не привязывались.",
+            )
+        )
+    return tuple(issues)
+
+
+def _issue(code: str, reason: str) -> ImportIssue:
+    return ImportIssue(
+        code=code, severity=IssueSeverity.WARNING, sheet=DEBT_REPORT_SHEET, reason=reason
+    )
 
 
 def _hit_budget(snapshot: ExternalSnapshot) -> bool:

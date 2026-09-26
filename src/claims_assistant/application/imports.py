@@ -7,7 +7,7 @@ to the caller, so an unreadable upload simply yields no usable rows.
 
 from collections.abc import Iterable
 from datetime import date
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from claims_assistant.domain.counterparties import (
     SHEET_NAME,
@@ -20,6 +20,15 @@ from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 
 # (header cells, iterable of (excel row number, row cells)).
 Sheet = tuple[tuple[Cell, ...], Iterable[tuple[int, tuple[Cell, ...]]]]
+
+
+@runtime_checkable
+class OutlineReader(Protocol):
+    """Reads rows with the indent of the first cell (S7-01: the 1C report's hierarchy)."""
+
+    def read_outline(
+        self, source: object, limits: ImportLimits, sheet: str | None = None
+    ) -> tuple[tuple[int, tuple[Cell, ...]], ...]: ...
 
 
 class RawSheetReader(Protocol):
