@@ -19,7 +19,9 @@ from claims_assistant.application.check_package import (
     PackageAccepted,
     PackageConflict,
     accept_counterparties,
+    accept_debt_report,
     accept_ledger,
+    accept_payments_export,
     latest_run,
     launch_run,
 )
@@ -38,8 +40,9 @@ from claims_assistant.application.report_delivery import (
 )
 from claims_assistant.domain.analysis import FileKind
 from claims_assistant.domain.external import DataMode, Period, Section
-from claims_assistant.domain.inn import InvalidInn
+from claims_assistant.domain.inn import InvalidInn, validate_inn
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
+from claims_assistant.infrastructure.excel import ledgers
 from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
 from claims_assistant.infrastructure.excel.ledgers import (
     build_debt_history_template,
@@ -54,6 +57,7 @@ from . import texts
 from .access import AccessMiddleware
 from .card import format_card
 from .menu import (
+    ADD_DEBT_REPORT,
     ADD_HISTORY,
     ADD_INTERACTIONS,
     ADD_PAYMENTS,
@@ -61,6 +65,8 @@ from .menu import (
     CHECK_INN,
     LAUNCH,
     NEW_CHECK,
+    PAYMENTS_EXPORT,
+    PAYMENTS_TEMPLATE,
     REPORT,
     STATUS,
     TODAY,
@@ -68,6 +74,7 @@ from .menu import (
     date_menu,
     launch_menu,
     main_menu,
+    payments_source_menu,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,10 +91,14 @@ class CheckDialog(StatesGroup):
     waiting_for_file = State()
     confirming = State()
     # S4-01: optional files are added from the confirmation step and return to it.
+    waiting_for_payments_source = State()
     waiting_for_payments_period = State()
     waiting_for_payments_file = State()
+    waiting_for_export_inn = State()
+    waiting_for_export_file = State()
     waiting_for_history_file = State()
     waiting_for_interactions_file = State()
+    waiting_for_debt_report_file = State()
 
 
 # A dash or whitespace between the dates; a bare hyphen only after a ДД.ММ.ГГГГ date,
@@ -211,10 +222,15 @@ def create_dispatcher(
             reply_markup=launch_menu(),
         )
 
+    # Files made from our template are .xlsx; the customer's own prints from 1C come in
+    # either format (S4-05).
+    _SPREADSHEET = (".xlsx", ".xls")
+
     ledger_states = {
         CheckDialog.waiting_for_payments_file: FileKind.PAYMENTS,
         CheckDialog.waiting_for_history_file: FileKind.DEBT_HISTORY,
         CheckDialog.waiting_for_interactions_file: FileKind.INTERACTIONS,
+        CheckDialog.waiting_for_debt_report_file: FileKind.DEBT_REPORT,
     }
 
     @router.message(StateFilter(*ledger_states), F.document)
@@ -222,13 +238,18 @@ def create_dispatcher(
         kind = ledger_states[await state.get_state()]
         document = message.document
         name = (document.file_name or "").lower()
-        if not name.endswith(".xlsx"):
+        # The overdue report is printed by 1C and comes in the old format too (S7-01).
+        allowed = (".xlsx", ".xls") if kind is FileKind.DEBT_REPORT else (".xlsx",)
+        if not name.endswith(allowed):
             await message.answer(texts.FILE_NOT_XLSX, reply_markup=cancel_menu())
             return
         if document.file_size is None or document.file_size > texts.MAX_UPLOAD_BYTES:
             await message.answer(texts.FILE_TOO_LARGE, reply_markup=cancel_menu())
             return
         data = await state.get_data()
+        if kind is FileKind.DEBT_REPORT:
+            await _receive_debt_report(message, state, bot, document, data)
+            return
         coverage = None
         if kind is FileKind.PAYMENTS:
             coverage = Period(
@@ -264,6 +285,94 @@ def create_dispatcher(
         composition = _composition(result.run, rows)
         await message.answer(
             texts.ledger_summary(kind, result.rows, result.issues, result.duplicate, composition),
+            reply_markup=launch_menu(),
+        )
+
+    async def _receive_debt_report(message, state, bot, document, data) -> None:
+        buffer = BytesIO()
+        await bot.download(document, destination=buffer)
+        try:
+            result = await accept_debt_report(
+                message.from_user.id,
+                data["run_id"],
+                buffer.getvalue(),
+                repository=repository,
+                files=files,
+                reader=reader,
+            )
+        except Exception as exc:
+            logger.error("debt_report_failed error_type=%s", type(exc).__name__)
+            await state.clear()
+            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
+        if not isinstance(result, LedgerAccepted):
+            await message.answer(
+                texts.ledger_rejected(FileKind.DEBT_REPORT, result.issues),
+                reply_markup=cancel_menu(),
+            )
+            return
+        rows = dict(data.get("rows", {}))
+        rows[result.file.id] = result.rows
+        await state.update_data(rows=rows)
+        await state.set_state(CheckDialog.confirming)
+        await message.answer(
+            texts.ledger_summary(
+                FileKind.DEBT_REPORT,
+                result.rows,
+                result.issues,
+                result.duplicate,
+                _composition(result.run, rows),
+                contracts=result.contracts,
+            ),
+            reply_markup=launch_menu(),
+        )
+
+    @router.message(CheckDialog.waiting_for_export_file, F.document)
+    async def receive_export_file(message: Message, state: FSMContext, bot: Bot) -> None:
+        document = message.document
+        # A 1C print arrives in the old format as often as in the new one, and the reader
+        # tells them apart by the file's own signature, not by its name (review B on #56).
+        if not (document.file_name or "").lower().endswith(_SPREADSHEET):
+            await message.answer(texts.FILE_NOT_XLSX, reply_markup=cancel_menu())
+            return
+        if document.file_size is None or document.file_size > texts.MAX_UPLOAD_BYTES:
+            await message.answer(texts.FILE_TOO_LARGE, reply_markup=cancel_menu())
+            return
+        data = await state.get_data()
+        buffer = BytesIO()
+        await bot.download(document, destination=buffer)
+        try:
+            result = await accept_payments_export(
+                message.from_user.id,
+                data["run_id"],
+                buffer.getvalue(),
+                inn=data["export_inn"],
+                repository=repository,
+                files=files,
+                reader=reader,
+                sheets=ledgers,
+            )
+        except Exception as exc:
+            logger.error("export_failed error_type=%s", type(exc).__name__)
+            await state.clear()
+            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
+        if not isinstance(result, LedgerAccepted):
+            await message.answer(
+                texts.ledger_rejected(FileKind.PAYMENTS, result.issues),
+                reply_markup=cancel_menu(),
+            )
+            return
+        rows = dict(data.get("rows", {}))
+        rows[result.file.id] = result.rows
+        await state.update_data(rows=rows)
+        await state.set_state(CheckDialog.confirming)
+        composition = _composition(result.run, rows)
+        summary = texts.ledger_summary(
+            FileKind.PAYMENTS, result.rows, result.issues, result.duplicate, composition
+        )
+        await message.answer(
+            texts.export_summary(result.export, result.rows) + "\n\n" + summary,
             reply_markup=launch_menu(),
         )
 
@@ -364,7 +473,13 @@ def create_dispatcher(
         try:
             finances = next((s for s in check.snapshots if s.section is Section.FINANCES), None)
             internal = await internal_context(
-                message.from_user.id, check.inn, repository, files, reader, finances=finances
+                message.from_user.id,
+                check.inn,
+                repository,
+                files,
+                reader,
+                finances=finances,
+                steps=repository,
             )
         except Exception as exc:
             # The card is still useful without the internal block; log the type only.
@@ -381,10 +496,14 @@ def create_dispatcher(
         await message.answer(texts.CHECK_DATE_PROMPT, reply_markup=date_menu())
 
     optional_steps = StateFilter(
+        CheckDialog.waiting_for_payments_source,
         CheckDialog.waiting_for_payments_period,
         CheckDialog.waiting_for_payments_file,
+        CheckDialog.waiting_for_export_inn,
+        CheckDialog.waiting_for_export_file,
         CheckDialog.waiting_for_history_file,
         CheckDialog.waiting_for_interactions_file,
+        CheckDialog.waiting_for_debt_report_file,
     )
 
     @router.message(optional_steps, Command("cancel"))
@@ -451,8 +570,37 @@ def create_dispatcher(
 
     @router.message(CheckDialog.confirming, F.text == ADD_PAYMENTS)
     async def add_payments(message: Message, state: FSMContext) -> None:
+        await state.set_state(CheckDialog.waiting_for_payments_source)
+        await message.answer(texts.PAYMENTS_SOURCE_PROMPT, reply_markup=payments_source_menu())
+
+    @router.message(CheckDialog.waiting_for_payments_source, F.text == PAYMENTS_TEMPLATE)
+    async def payments_by_template(message: Message, state: FSMContext) -> None:
         await state.set_state(CheckDialog.waiting_for_payments_period)
         await message.answer(texts.PAYMENTS_PERIOD_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_payments_source, F.text == PAYMENTS_EXPORT)
+    async def payments_by_export(message: Message, state: FSMContext) -> None:
+        await state.set_state(CheckDialog.waiting_for_export_inn)
+        await message.answer(texts.EXPORT_INN_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_payments_source, F.text)
+    async def remind_payments_source(message: Message) -> None:
+        await message.answer(texts.PAYMENTS_SOURCE_PROMPT, reply_markup=payments_source_menu())
+
+    @router.message(CheckDialog.waiting_for_export_inn, F.text)
+    async def receive_export_inn(message: Message, state: FSMContext) -> None:
+        try:
+            inn = validate_inn(message.text or "")
+        except InvalidInn as error:
+            await message.answer(str(error), reply_markup=cancel_menu())
+            return
+        await state.update_data(export_inn=inn)
+        await state.set_state(CheckDialog.waiting_for_export_file)
+        await message.answer(texts.EXPORT_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_export_file, F.text)
+    async def remind_export_file(message: Message) -> None:
+        await message.answer(texts.EXPORT_FILE_PROMPT, reply_markup=cancel_menu())
 
     @router.message(CheckDialog.waiting_for_payments_period, F.text)
     async def receive_period(message: Message, state: FSMContext) -> None:
@@ -483,6 +631,16 @@ def create_dispatcher(
         template = BufferedInputFile(build_interactions_template(), filename="vzaimodeystviya.xlsx")
         await message.answer_document(template)
         await message.answer(texts.INTERACTIONS_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.confirming, F.text == ADD_DEBT_REPORT)
+    async def add_debt_report(message: Message, state: FSMContext) -> None:
+        # No template to send: the file is the customer's own 1C print (S7-01).
+        await state.set_state(CheckDialog.waiting_for_debt_report_file)
+        await message.answer(texts.DEBT_REPORT_FILE_PROMPT, reply_markup=cancel_menu())
+
+    @router.message(CheckDialog.waiting_for_debt_report_file, F.text)
+    async def remind_debt_report_file(message: Message) -> None:
+        await message.answer(texts.DEBT_REPORT_FILE_PROMPT, reply_markup=cancel_menu())
 
     @router.message(CheckDialog.waiting_for_file, F.text)
     async def remind_file(message: Message) -> None:

@@ -28,6 +28,7 @@ from claims_assistant.domain.external import (
     FactKind,
 )
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.plural import companies as _companies
 from claims_assistant.domain.report import DEMO_SCORE_NOTE, AnalysisReport, ReportRow
 from claims_assistant.domain.scoring import (
     INTERNAL_DEBT,
@@ -37,7 +38,14 @@ from claims_assistant.domain.scoring import (
     report_order_key,
 )
 
-SHEETS = ("Приоритеты", "Основания", "Качество данных", "О проверке", "Хронология")
+SHEETS = (
+    "Приоритеты",
+    "Основания",
+    "Качество данных",
+    "О проверке",
+    "Хронология",
+    "Договоры",
+)
 _MAX_CELL = 32_767  # Excel's limit for one cell
 
 PRIORITY_LABELS = {
@@ -198,9 +206,23 @@ def _priorities(report: AnalysisReport) -> list[tuple[object, ...]]:
             _reasons(row, demo),
             "Рекомендация в демо не формируется." if demo else row.assessment.next_step,
             *_explanation_cells(row, demo),
+            *_contract_cells(report, row),
         )
         for row in _ordered(report)
     ]
+
+
+def _contract_cells(report: AnalysisReport, row: ReportRow) -> tuple[object, ...]:
+    """How many contracts of the overdue report belong here and the worst of them.
+
+    Empty when the report was not attached: an empty cell says «не знаем», while a zero
+    would say «просрочки по договорам нет» — and that is a different claim (S7-01).
+    """
+    contracts = report.contracts.get(row.counterparty.inn, ())
+    if not contracts:
+        return (None, None)
+    days = [contract.days for contract in contracts if contract.days is not None]
+    return (len(contracts), max(days) if days else None)
 
 
 def _explanation_cells(row: ReportRow, demo_scores: bool) -> tuple[str, str]:
@@ -323,12 +345,29 @@ def _quality(report: AnalysisReport) -> list[tuple[object, ...]]:
     return rows or [("Замечаний нет", None, None, None)]
 
 
-def _companies(count: int) -> str:
-    if count % 10 == 1 and count % 100 != 11:
-        return f"{count} организация"
-    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
-        return f"{count} организации"
-    return f"{count} организаций"
+def _contracts(report: AnalysisReport) -> list[tuple[object, ...]]:
+    """Contracts of the customer's overdue report, worst overdue first within a company.
+
+    The claims specialist calls about a contract, not about a sum (S7-01), so each one
+    keeps its own days and amount instead of being folded into the company's total.
+    """
+    rows: list[tuple[object, ...]] = []
+    for row in _ordered(report):
+        contracts = report.contracts.get(row.counterparty.inn, ())
+        for contract in sorted(contracts, key=lambda c: (-(c.days or 0), c.name)):
+            rows.append(
+                (
+                    row.counterparty.inn,
+                    _company_name(row),
+                    contract.name,
+                    contract.days,
+                    contract.overdue,
+                    contract.subject,
+                    contract.due_until,
+                    contract.note,
+                )
+            )
+    return rows or [("Договоры не приложены", None, None, None, None, None, None, None)]
 
 
 def _chronology(report: AnalysisReport) -> list[tuple[object, ...]]:
@@ -420,9 +459,11 @@ def build_report(report: AnalysisReport) -> bytes:
             "Следующий шаг",
             "Пояснение",
             "Обещания оплаты",
+            "Договоров",
+            "Худшая просрочка по договору, дн.",
         ),
         _priorities(report),
-        (14, 34, 16, 12, 20, 36, 60, 44, 80, 30),
+        (14, 34, 16, 12, 20, 36, 60, 44, 80, 30, 12, 20),
     )
     _table(
         workbook.create_sheet(SHEETS[1]),
@@ -460,12 +501,29 @@ def build_report(report: AnalysisReport) -> bytes:
         _chronology(report),
         (14, 34, 12, 20, 14, 80),
     )
+    _table(
+        workbook.create_sheet(SHEETS[5]),
+        _title(report, SHEETS[5]),
+        (
+            "ИНН",
+            "Название",
+            "Договор",
+            "Дней просрочки",
+            "Сумма просрочки, ₽",
+            "Предмет лизинга",
+            "Срок действия до",
+            "Примечание",
+        ),
+        _contracts(report),
+        (14, 34, 28, 16, 20, 40, 18, 40),
+    )
     # INN columns stay textual so leading digits are shown as written.
     for sheet, column in (
         (priorities, "A"),
         (workbook[SHEETS[1]], "B"),
         (workbook[SHEETS[2]], "B"),
         (workbook[SHEETS[4]], "A"),
+        (workbook[SHEETS[5]], "A"),
     ):
         for cell in sheet[column][2:]:
             cell.number_format = "@"

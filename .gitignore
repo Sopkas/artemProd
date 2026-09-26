@@ -32,6 +32,7 @@ dist/
 /uploads/
 /reports/
 /examples/demo/
+/evals/results/
 /logs/
 *.db
 *.db-*
