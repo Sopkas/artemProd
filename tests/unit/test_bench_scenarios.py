@@ -192,3 +192,20 @@ def test_a_cut_off_answer_is_the_models_result_not_a_lost_connection():
     assert summary.lost == 2
     assert summary.codes == "unavailable:truncated × 1"
     assert summary.median_seconds == 2.5
+
+
+def test_a_saved_catalogue_answers_for_the_models_it_lists(tmp_path):
+    """The link to the catalogue drops half the time: the bench can read one saved copy,
+    so every model is measured against the same snapshot of what it accepts."""
+    from claims_assistant.infrastructure.llm.polza import ModelParameters
+    from evals.bench import saved_parameters
+    from tests.unit.test_polza_provider import GPT_5_MINI, GPT_41_MINI
+
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps({"data": [GPT_41_MINI, GPT_5_MINI]}), encoding="utf-8")
+    catalogue = saved_parameters(path)
+    assert catalogue("openai/gpt-5-mini") == ModelParameters(
+        temperature=False, response_format=True, reasoning=True
+    )
+    assert catalogue("openai/gpt-4.1-mini").temperature is True
+    assert catalogue("no-such/model") is None

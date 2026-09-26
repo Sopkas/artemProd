@@ -135,18 +135,37 @@ def _polza():
     return polza
 
 
+def saved_parameters(path: Path):
+    """A saved copy of the catalogue (the body of ``GET /api/v1/models``).
+
+    One snapshot for every model of the run: the comparison does not depend on which of
+    the flaky catalogue calls happened to get through, and the snapshot's date says what
+    the models accepted when they were measured.
+    """
+    polza = _polza()
+    body = json.loads(Path(path).read_text(encoding="utf-8"))
+    entries = body.get("data", []) if isinstance(body, dict) else body
+    by_id = {
+        entry["id"]: entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    return lambda model: polza.parameters_from_catalog(by_id.get(model))
+
+
 async def model_parameters(model: str, attempts: int = 6):
     """What the model accepts, from its catalogue entry — read before any money is spent.
 
     Sending a model a parameter it does not take gets a 400, which the table would show as
     «модель не подошла» when it was our request that did not fit. The link drops often
-    (26.09: an answer in 4–8 s, or nothing until the timeout), so the entry is asked for
-    several times with a short wait; a model it cannot be read for is not measured.
+    (26.09: an answer in 7–20 s, or nothing at all), so the entry is asked for several
+    times; a model it cannot be read for is not measured. ``--catalog-file`` avoids the
+    network altogether.
     """
     polza = _polza()
     transport = polza.AiohttpChatTransport()
     for _ in range(attempts):
-        found = await polza.lookup_parameters(transport, model, 15.0)
+        found = await polza.lookup_parameters(transport, model, 30.0)
         if found is not None:
             return found
     return None
@@ -215,8 +234,9 @@ async def run_model(
     pause: float,
     effort: str,
     errors: Path,
+    saved=None,
 ) -> list[Result] | None:
-    parameters = await model_parameters(model)
+    parameters = saved(model) if saved is not None else await model_parameters(model)
     if parameters is None:
         print("  каталог не ответил или модели в нём нет — модель не замерялась", flush=True)
         return None
@@ -432,6 +452,10 @@ def main() -> int:
         choices=["none", "minimal", "low", "medium", "high"],
         help="уровень рассуждений для моделей, которые рассуждают (как в продакшене — low)",
     )
+    parser.add_argument(
+        "--catalog-file",
+        help="сохранённый ответ GET /api/v1/models: один снимок каталога на все модели",
+    )
     parser.add_argument("--dry-run", action="store_true", help="собрать контексты, ничего не звать")
     parser.add_argument("--catalog", action="store_true", help="показать модели провайдера")
     parser.add_argument("--limit", type=int, default=20, help="сколько моделей показать")
@@ -468,7 +492,9 @@ def main() -> int:
     out = Path(args.out)
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     errors = out / f"{stamp}-errors.jsonl"
+    saved = saved_parameters(Path(args.catalog_file)) if args.catalog_file else None
     summaries: list[ModelSummary] = []
+    skipped: list[str] = []
     for model in models:
         print(f"\n{model}")
         results = asyncio.run(
@@ -482,9 +508,12 @@ def main() -> int:
                 pause=args.pause,
                 effort=args.reasoning,
                 errors=errors,
+                saved=saved,
             )
         )
-        if results is not None:
+        if results is None:
+            skipped.append(model)
+        else:
             summaries.append(ModelSummary(model=model, results=results))
 
     text = report(summaries, chosen)
@@ -503,6 +532,10 @@ def main() -> int:
     print(f"\nПодробности: {out / f'{stamp}.json'}")
     if errors.exists():
         print(f"Отказы провайдера, как он их объяснил: {errors}")
+    if skipped:
+        # Not a success: a table without the model is not a measurement of it.
+        print(f"Не замерялись: {', '.join(skipped)}")
+        return 3
     return 0
 
 
