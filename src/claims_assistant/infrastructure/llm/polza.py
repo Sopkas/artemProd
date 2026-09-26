@@ -26,6 +26,8 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
@@ -45,6 +47,11 @@ logger = logging.getLogger(__name__)
 PROVIDER_NAME = "polza"
 DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_URL = "https://polza.ai/api/v1/chat/completions"
+CATALOG_URL = "https://polza.ai/api/v1/models"  # public: GET /<model id>, no key
+CATALOG_TIMEOUT_SECONDS = 15.0  # it comes out of the explanation's own timeout
+# The task is to explain facts already given, not to solve anything: a low effort keeps a
+# reasoning model inside the output limit and the price.
+REASONING_EFFORT = "low"
 MAX_RESPONSE_BYTES = 1024 * 1024  # an explanation is a few hundred bytes; this is slack
 
 # The answer shape of S5-06, as a JSON schema the provider can enforce. «quote» is left
@@ -122,12 +129,64 @@ _MESSAGES = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class ModelParameters:
+    """What one model accepts, as the provider's catalogue lists it.
+
+    Read on 26.09.2026: all 331 chat models take ``max_tokens``, but 90 of them — the
+    newest — answer 400 to a ``temperature``, 88 take no ``response_format``, and 179
+    reason before they answer, spending the same ``max_tokens`` on it. A request built
+    for one model is therefore not a request for another.
+    """
+
+    temperature: bool
+    response_format: bool
+    reasoning: bool
+
+
+# While the catalogue has not answered: only what every model accepts. The schema stays
+# with the setting (AI_RESPONSE_FORMAT), as it was before the catalogue was read.
+UNKNOWN_PARAMETERS = ModelParameters(temperature=False, response_format=True, reasoning=False)
+
+
+def parameters_from_catalog(entry: object) -> ModelParameters | None:
+    """The parameters of a catalogue entry; None when the entry says nothing readable."""
+    top = entry.get("top_provider") if isinstance(entry, dict) else None
+    supported = top.get("supported_parameters") if isinstance(top, dict) else None
+    if not isinstance(supported, list):
+        return None
+    names = {item for item in supported if isinstance(item, str)}
+    return ModelParameters(
+        temperature="temperature" in names,
+        response_format="response_format" in names,
+        # The effort travels in the «reasoning» object (a top-level reasoning_effort is
+        # ignored, docs «Reasoning Tokens»), and 96 of the 179 reasoning models list only
+        # «reasoning». A level a model does not know is normalised or dropped, not refused.
+        reasoning="reasoning" in names,
+    )
+
+
+async def lookup_parameters(
+    transport: "ChatTransport", model: str, timeout: float, *, url: str = CATALOG_URL
+) -> ModelParameters | None:
+    """One model's entry in the public catalogue (no key needed); None when unreadable."""
+    try:
+        status, body = await transport.fetch(f"{url}/{model}", timeout)
+    except (TimeoutError, asyncio.TimeoutError, aiohttp.ClientError, OSError, _TooLarge):
+        return None
+    return parameters_from_catalog(body) if status == 200 else None
+
+
 class ChatTransport(Protocol):
-    """One HTTP call; the adapter knows nothing about the library behind it."""
+    """The HTTP calls; the adapter knows nothing about the library behind them."""
 
     async def request(
         self, key: str, url: str, payload: dict[str, Any], timeout: float
     ) -> tuple[int, object]: ...
+
+    async def fetch(self, url: str, timeout: float) -> tuple[int, object]:
+        """A GET without the key: the catalogue is public."""
+        ...
 
 
 class AiohttpChatTransport:
@@ -143,15 +202,26 @@ class AiohttpChatTransport:
             async with session.post(
                 url, json=payload, headers=headers, allow_redirects=False
             ) as response:
-                body = bytearray()
-                async for chunk in response.content.iter_chunked(65536):
-                    body.extend(chunk)
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        raise _TooLarge()
-                try:
-                    return response.status, json.loads(body)
-                except (ValueError, UnicodeError):
-                    return response.status, None
+                return response.status, await _read(response)
+
+    async def fetch(self, url: str, timeout: float) -> tuple[int, object]:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=timeout), trust_env=False
+        ) as session:
+            async with session.get(url, allow_redirects=False) as response:
+                return response.status, await _read(response)
+
+
+async def _read(response: aiohttp.ClientResponse) -> object:
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(65536):
+        body.extend(chunk)
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise _TooLarge()
+    try:
+        return json.loads(body)
+    except (ValueError, UnicodeError):
+        return None
 
 
 class _TooLarge(Exception):
@@ -184,7 +254,13 @@ class PolzaRecommendationProvider:
         url: str = DEFAULT_URL,
         transport: ChatTransport | None = None,
         structured: bool = True,
+        parameters: ModelParameters | None = None,
+        reasoning_effort: str = REASONING_EFFORT,
+        on_failure: Callable[[int, object], None] | None = None,
     ) -> None:
+        """``parameters`` — what the model accepts, when the caller already knows it;
+        otherwise the catalogue is asked on the first call. ``on_failure`` receives the
+        status and body of a refused request: for choosing a model, never for the log."""
         if not api_key:
             raise ValueError("polza.ai API key is required")
         self.model = model
@@ -192,11 +268,35 @@ class PolzaRecommendationProvider:
         self._url = url
         self._transport = transport or AiohttpChatTransport()
         self._structured = structured
+        self._parameters = parameters
+        self._effort = reasoning_effort
+        self._on_failure = on_failure
 
-    def _payload(self, request: Request, limits: AiLimits) -> dict[str, Any]:
-        instruction = (
-            request.instruction if self._structured else f"{request.instruction}\n{_JSON_ONLY}"
+    async def _model_parameters(self, limits: AiLimits) -> ModelParameters:
+        if self._parameters is not None:
+            return self._parameters
+        timeout = min(limits.timeout_seconds, CATALOG_TIMEOUT_SECONDS)
+        found = await lookup_parameters(self._transport, self.model, timeout)
+        if found is None:
+            # Not remembered: the catalogue is asked again with the next call.
+            logger.info("ai_catalog provider=%s model=%s found=no", self.name, self.model)
+            return UNKNOWN_PARAMETERS
+        logger.info(
+            "ai_catalog provider=%s model=%s temperature=%s response_format=%s reasoning=%s",
+            self.name,
+            self.model,
+            found.temperature,
+            found.response_format,
+            found.reasoning,
         )
+        self._parameters = found
+        return found
+
+    def _payload(
+        self, request: Request, limits: AiLimits, parameters: ModelParameters
+    ) -> dict[str, Any]:
+        structured = self._structured and parameters.response_format
+        instruction = request.instruction if structured else f"{request.instruction}\n{_JSON_ONLY}"
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -204,9 +304,12 @@ class PolzaRecommendationProvider:
                 {"role": "user", "content": json.dumps(request.context, ensure_ascii=False)},
             ],
             "max_tokens": limits.max_output_tokens,
-            "temperature": 0,  # the same context must give the same explanation
         }
-        if self._structured:
+        if parameters.temperature:
+            payload["temperature"] = 0  # the same context must give the same explanation
+        if parameters.reasoning:
+            payload["reasoning"] = {"effort": self._effort}
+        if structured:
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -218,7 +321,7 @@ class PolzaRecommendationProvider:
         return payload
 
     async def explain(self, request: Request, limits: AiLimits) -> AiAnswer:
-        payload = self._payload(request, limits)
+        payload = self._payload(request, limits, await self._model_parameters(limits))
         started = time.monotonic()
         try:
             status, body = await self._transport.request(
@@ -241,6 +344,8 @@ class PolzaRecommendationProvider:
             logger.info(
                 "ai_call provider=%s model=%s http=%s code=%s", self.name, self.model, status, code
             )
+            if self._on_failure is not None:
+                self._on_failure(status, body)
             raise AiUnavailable(code, _MESSAGES[code])
         return self._answer(body, latency)
 

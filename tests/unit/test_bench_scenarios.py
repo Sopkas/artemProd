@@ -173,3 +173,22 @@ def test_on_a_conflict_even_a_correct_sounding_answer_cannot_name_the_dates():
         scenario, {"explanation": "Даты 18.06.2026 и 20.07.2026 расходятся, давность не ясна."}
     )
     assert isinstance(result, Rejected) and result.code.value == "new_date"
+
+
+def test_a_cut_off_answer_is_the_models_result_not_a_lost_connection():
+    """«Связь оборвалась» is the channel; an answer stopped by our length limit came back
+    and was paid for — it belongs with the model's other failures, and in its median."""
+    from evals.bench import ModelSummary, Result
+
+    summary = ModelSummary(
+        "m",
+        [
+            Result("m", "a", 1, "accepted", 2.0, 100),
+            Result("m", "b", 1, "unavailable:truncated", 3.0, 100),
+            Result("m", "c", 1, "unavailable:unavailable", 60.0, 100),
+            Result("m", "d", 1, "unavailable:timeout", 90.0, 100),
+        ],
+    )
+    assert summary.lost == 2
+    assert summary.codes == "unavailable:truncated × 1"
+    assert summary.median_seconds == 2.5

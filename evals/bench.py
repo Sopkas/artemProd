@@ -55,6 +55,8 @@ from evals.scenarios import SCENARIOS, BenchScenario  # noqa: E402
 
 CATALOG_URL = "https://polza.ai/api/v1/models"
 RESULTS = ROOT / "evals" / "results"
+# What never reached the model, after the guard's retries: the channel, not the model.
+LOST = frozenset({"unavailable:unavailable", "unavailable:timeout", "unavailable:rate_limited"})
 
 
 @dataclass(slots=True)
@@ -122,7 +124,60 @@ def judge(scenario: BenchScenario, outcome: ExplanationOutcome) -> tuple[str, ..
     return tuple(complaints)
 
 
-def _provider(key: str, model: str, structured: bool, policy: AiPolicy):
+def _polza():
+    try:
+        from claims_assistant.infrastructure.llm import polza
+    except ModuleNotFoundError:
+        raise SystemExit(
+            "Нет клиента провайдера (infrastructure/llm/polza.py). Замер запускается с "
+            "ветки, где он есть; набор сценариев проверяется без него: --dry-run."
+        ) from None
+    return polza
+
+
+async def model_parameters(model: str, attempts: int = 6):
+    """What the model accepts, from its catalogue entry — read before any money is spent.
+
+    Sending a model a parameter it does not take gets a 400, which the table would show as
+    «модель не подошла» when it was our request that did not fit. The link drops often
+    (26.09: an answer in 4–8 s, or nothing until the timeout), so the entry is asked for
+    several times with a short wait; a model it cannot be read for is not measured.
+    """
+    polza = _polza()
+    transport = polza.AiohttpChatTransport()
+    for _ in range(attempts):
+        found = await polza.lookup_parameters(transport, model, 15.0)
+        if found is not None:
+            return found
+    return None
+
+
+def _describe(parameters, effort: str) -> str:
+    yes = {True: "да", False: "нет"}
+    reasoning = f"да, effort={effort}" if parameters.reasoning else "нет"
+    return (
+        f"температура 0: {yes[parameters.temperature]}; схема ответа: "
+        f"{yes[parameters.response_format]}; рассуждения: {reasoning}"
+    )
+
+
+def _error_log(path: Path, model: str):
+    """The provider's own words for a refused request, kept next to the results.
+
+    They never go to the log (they may echo our request); here they are what tells a
+    model that failed from a request that did not fit it.
+    """
+
+    def write(status: int, body: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = {"model": model, "http": status, "body": body}
+        with path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
+
+    return write
+
+
+def _provider(key, model, structured, policy, parameters, effort, errors: Path):
     """The provider client behind the same guard the pipeline puts in front of it.
 
     Without the guard a broken TLS handshake is scored as the model's failure. A on #60
@@ -130,14 +185,14 @@ def _provider(key: str, model: str, structured: bool, policy: AiPolicy):
     attempts, which at nine scenarios would fill the table with his channel instead of
     anyone's answers. The guard retries exactly as production does.
     """
-    try:
-        from claims_assistant.infrastructure.llm.polza import PolzaRecommendationProvider
-    except ModuleNotFoundError:
-        raise SystemExit(
-            "Нет клиента провайдера (infrastructure/llm/polza.py). Замер запускается с "
-            "ветки, где он есть; набор сценариев проверяется без него: --dry-run."
-        ) from None
-    inner = PolzaRecommendationProvider(key, model=model, structured=structured)
+    inner = _polza().PolzaRecommendationProvider(
+        key,
+        model=model,
+        structured=structured,
+        parameters=parameters,
+        reasoning_effort=effort,
+        on_failure=_error_log(errors, model),
+    )
     return GuardedRecommendationProvider(inner, policy)
 
 
@@ -158,8 +213,15 @@ async def run_model(
     structured: bool,
     policy: AiPolicy,
     pause: float,
-) -> list[Result]:
-    provider = _provider(key, model, structured, policy)
+    effort: str,
+    errors: Path,
+) -> list[Result] | None:
+    parameters = await model_parameters(model)
+    if parameters is None:
+        print("  каталог не ответил или модели в нём нет — модель не замерялась", flush=True)
+        return None
+    print(f"  {_describe(parameters, effort)}", flush=True)
+    provider = _provider(key, model, structured, policy, parameters, effort, errors)
     limits = policy.limits
     results: list[Result] = []
     for scenario in scenarios:
@@ -219,8 +281,9 @@ class ModelSummary:
 
     @property
     def answered(self) -> list[Result]:
-        """Calls that came back at all; a dropped connection is not a slow model."""
-        return [item for item in self.results if not item.status.startswith("unavailable")]
+        """Calls that came back at all; a dropped connection is not a slow model. A cut-off
+        answer did come back — and was paid for — so it counts as the model's."""
+        return [item for item in self.results if item.status not in LOST]
 
     @property
     def lost(self) -> int:
@@ -363,6 +426,12 @@ def main() -> int:
         action="store_true",
         help="без response_format: для моделей, которые строгую схему не принимают",
     )
+    parser.add_argument(
+        "--reasoning",
+        default="low",
+        choices=["none", "minimal", "low", "medium", "high"],
+        help="уровень рассуждений для моделей, которые рассуждают (как в продакшене — low)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="собрать контексты, ничего не звать")
     parser.add_argument("--catalog", action="store_true", help="показать модели провайдера")
     parser.add_argument("--limit", type=int, default=20, help="сколько моделей показать")
@@ -396,6 +465,9 @@ def main() -> int:
 
     models = [name.strip() for name in args.models.split(",") if name.strip()]
     policy = AiPolicy(timeout_seconds=args.timeout, max_retries=args.retries)
+    out = Path(args.out)
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    errors = out / f"{stamp}-errors.jsonl"
     summaries: list[ModelSummary] = []
     for model in models:
         print(f"\n{model}")
@@ -408,16 +480,17 @@ def main() -> int:
                 structured=not args.no_schema,
                 policy=policy,
                 pause=args.pause,
+                effort=args.reasoning,
+                errors=errors,
             )
         )
-        summaries.append(ModelSummary(model=model, results=results))
+        if results is not None:
+            summaries.append(ModelSummary(model=model, results=results))
 
     text = report(summaries, chosen)
     print("\n" + text)
 
-    out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     (out / f"{stamp}.json").write_text(
         json.dumps(
             [item.to_dict() for summary in summaries for item in summary.results],
@@ -428,6 +501,8 @@ def main() -> int:
     )
     (out / f"{stamp}.md").write_text(text + "\n", encoding="utf-8")
     print(f"\nПодробности: {out / f'{stamp}.json'}")
+    if errors.exists():
+        print(f"Отказы провайдера, как он их объяснил: {errors}")
     return 0
 
 
