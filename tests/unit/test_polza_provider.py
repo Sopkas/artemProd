@@ -6,6 +6,7 @@ docs/ai-provider.md), including the error body and the usage block with its pric
 """
 
 import json
+from decimal import Decimal
 
 import pytest
 
@@ -190,8 +191,33 @@ async def test_an_answer_cut_off_by_the_length_limit_is_not_passed_on():
     body["choices"][0]["finish_reason"] = "length"
     with pytest.raises(AiUnavailable) as failure:
         await provider(Transport(200, body)).explain(build_request(context()), LIMITS)
-    assert failure.value.code is AiErrorCode.UNAVAILABLE
+    # Its own code, not «unavailable»: a lost connection is worth a retry, a cut-off
+    # answer is not — the same request stops at the same length and is paid for again.
+    assert failure.value.code is AiErrorCode.TRUNCATED
     assert "обрезан" in failure.value.message
+    # The call was paid for all the same; what it cost travels with the failure.
+    spent = failure.value.spent
+    assert spent is not None
+    assert (spent.input_tokens, spent.output_tokens) == (99, 38)
+    assert spent.cost_rub == Decimal("0.0044424")
+
+
+async def test_a_model_stopped_while_still_reasoning_is_cut_off_too():
+    """A reasoning model can use the whole limit on its reasoning: the text is then empty,
+    and that is still a cut-off, not an answer we failed to parse."""
+    body = answer("")
+    body["choices"][0]["finish_reason"] = "length"
+    body["usage"] = {"prompt_tokens": 1200, "completion_tokens": 500, "cost_rub": 0.09}
+    with pytest.raises(AiUnavailable) as failure:
+        await provider(Transport(200, body)).explain(build_request(context()), LIMITS)
+    assert failure.value.code is AiErrorCode.TRUNCATED
+    assert failure.value.spent.cost_rub == Decimal("0.09")
+
+
+async def test_a_failure_before_any_answer_costs_nothing():
+    with pytest.raises(AiUnavailable) as failure:
+        await provider(Transport(503, {"error": {}})).explain(build_request(context()), LIMITS)
+    assert failure.value.spent is None
 
 
 @pytest.mark.parametrize("usage", [{}, {"prompt_tokens": "99"}, {"prompt_tokens": -5}, None])

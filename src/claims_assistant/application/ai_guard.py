@@ -190,6 +190,8 @@ class GuardedRecommendationProvider:
                 error = AiUnavailable(AiErrorCode.TIMEOUT, "Модель не ответила в срок.")
             except AiUnavailable as failure:
                 error = failure
+                if failure.spent is not None:
+                    budget.charge(failure.spent)  # paid for, though it gave no answer
             else:
                 budget.charge(answer)
                 return answer

@@ -246,12 +246,6 @@ class PolzaRecommendationProvider:
 
     def _answer(self, body: object, latency: float) -> AiAnswer:
         text = _content(body)
-        if text is None:
-            raise AiUnavailable(AiErrorCode.UNAVAILABLE, "Ответ провайдера ИИ не разобран.")
-        if _truncated(body):
-            # A cut-off answer is not a bad answer: it is no answer, and saying so keeps
-            # «модель ответила плохо» and «мы не дали ей договорить» apart in the report.
-            raise AiUnavailable(AiErrorCode.UNAVAILABLE, "Ответ модели обрезан лимитом длины.")
         usage = body.get("usage") if isinstance(body, dict) else None
         usage = usage if isinstance(usage, dict) else {}
         logger.info(
@@ -263,8 +257,8 @@ class PolzaRecommendationProvider:
             usage.get("cost_rub"),
             latency,
         )
-        return AiAnswer(
-            text=text,
+        received = AiAnswer(
+            text=text or "",
             provider=self.name,
             model=str(body.get("model") or self.model) if isinstance(body, dict) else self.model,
             input_tokens=_count(usage, "prompt_tokens"),
@@ -272,6 +266,17 @@ class PolzaRecommendationProvider:
             latency_seconds=latency,
             cost_rub=_price(usage),
         )
+        if _truncated(body):
+            # A cut-off answer is not a bad answer: it is no answer, and saying so keeps
+            # «модель ответила плохо» and «мы не дали ей договорить» apart in the report.
+            # Checked before the text: a reasoning model can spend the whole limit on its
+            # reasoning and return nothing. Either way the call was paid for.
+            raise AiUnavailable(
+                AiErrorCode.TRUNCATED, "Ответ модели обрезан лимитом длины.", spent=received
+            )
+        if text is None:
+            raise AiUnavailable(AiErrorCode.UNAVAILABLE, "Ответ провайдера ИИ не разобран.")
+        return received
 
 
 def _choice(body: object) -> dict[str, Any] | None:

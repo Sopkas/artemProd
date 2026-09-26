@@ -36,15 +36,23 @@ class AiErrorCode(StrEnum):
     RATE_LIMITED = "rate_limited"
     REFUSED = "refused"  # the provider declined the request (policy, auth, bad request)
     BUDGET = "budget"  # our own limit: request too large or spend exhausted
+    # The model answered but stopped at our output limit. Not retried: the same request
+    # stops at the same length and is paid for again.
+    TRUNCATED = "truncated"
 
 
 class AiUnavailable(RuntimeError):
-    """An expected provider failure; ``message`` is safe to log and show."""
+    """An expected provider failure; ``message`` is safe to log and show.
 
-    def __init__(self, code: AiErrorCode, message: str) -> None:
+    ``spent`` is set when the call was paid for although it gave no usable answer (a
+    cut-off one): the tokens and the price, so the run budget is charged all the same.
+    """
+
+    def __init__(self, code: AiErrorCode, message: str, *, spent: "AiAnswer | None" = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.spent = spent
 
 
 @dataclass(frozen=True, slots=True)
