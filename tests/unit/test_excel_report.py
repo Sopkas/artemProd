@@ -103,6 +103,8 @@ def test_file_reads_back_with_four_sheets_and_a_fixed_layout():
         "Следующий шаг",
         "Пояснение",
         "Обещания оплаты",
+        "Договоров",
+        "Худшая просрочка по договору, дн.",
     ]
     assert priorities.freeze_panes == "A3"
 

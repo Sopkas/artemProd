@@ -15,16 +15,42 @@ from typing import Protocol
 
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow, ImportLimits
+from claims_assistant.domain.debt_report import SHEET_NAME as DEBT_REPORT_SHEET
+from claims_assistant.domain.debt_report import read_debt_report
+from claims_assistant.domain.export_1c import ExportHeader
 from claims_assistant.domain.external import DataMode, Period
-from claims_assistant.domain.imports import ImportIssue
+from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.inn import InvalidInn, validate_inn
+from claims_assistant.domain.payments import SHEET_NAME as PAYMENTS_SHEET
 
 from .analysis_repository import AnalysisRepository, NewFile
-from .imports import SheetReader, import_counterparties
-from .ledger_imports import import_debt_history, import_interactions, import_payments
+from .imports import (
+    OutlineReader,
+    RawSheetReader,
+    SheetReader,
+    WorkbookError,
+    import_counterparties,
+)
+from .ledger_imports import (
+    import_debt_history,
+    import_interactions,
+    import_payments,
+    import_payments_export,
+)
 
 
 class StorageError(RuntimeError):
     """File storage failure or an unsafe path; never carries file contents."""
+
+
+class PaymentsSheetWriter(Protocol):
+    """Writes the «Платежи» sheet of the contract; the infrastructure supplies it.
+
+    An export is stored translated (see ``accept_payments_export``), and the application
+    layer may not reach for a workbook library of its own.
+    """
+
+    def build_payments_workbook(self, rows: list[list[object]]) -> bytes: ...
 
 
 class FileStorage(Protocol):
@@ -57,6 +83,11 @@ class LedgerAccepted:
     rows: int
     issues: tuple[ImportIssue, ...]
     duplicate: bool
+    # S7-01: how many contracts came with the overdue report's counterparties.
+    contracts: int = 0
+    # Set when the payments came as the customer's own 1C print (S4-05): what its header
+    # said about the file, so the dialog can show whose export was accepted.
+    export: ExportHeader | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +234,130 @@ async def accept_ledger(
     return LedgerAccepted(
         run=run, file=stored, rows=len(result.rows), issues=result.issues, duplicate=duplicate
     )
+
+
+async def accept_debt_report(
+    owner_id: int,
+    run_id: str,
+    data: bytes,
+    *,
+    repository: AnalysisRepository,
+    files: FileStorage,
+    reader: SheetReader,
+    limits: ImportLimits = ImportLimits(),
+) -> LedgerAccepted | PackageRejected:
+    """Attach the customer's «Отчет по просроченным лизинговым платежам» (S7-01).
+
+    It does not replace «Контрагенты» and is not checked against its INNs here: the report
+    names no INN at all. Its counterparties are tied to the check by company name when the
+    report is built, and what did not match is said there (decision of 23.09.2026).
+
+    The file is read by the indents of its own rows, so the reader must be able to give
+    them; one that cannot is a wiring mistake, not a bad file.
+    """
+    run = await repository.get_run(owner_id, run_id)
+    if not isinstance(reader, OutlineReader):
+        raise TypeError("A debt report needs a reader that returns row indents")
+    try:
+        rows = await asyncio.to_thread(reader.read_outline, data, limits)
+    except WorkbookError as error:
+        return PackageRejected(
+            issues=(
+                ImportIssue(
+                    code=error.code,
+                    severity=IssueSeverity.ERROR,
+                    sheet=DEBT_REPORT_SHEET,
+                    reason=error.reason,
+                ),
+            )
+        )
+    result = await asyncio.to_thread(read_debt_report, list(rows))
+    if not result.counterparties:
+        return PackageRejected(issues=result.issues)
+    stored, duplicate = await _store(
+        owner_id, run, FileKind.DEBT_REPORT, data, None, repository, files
+    )
+    run = await repository.get_run(owner_id, run.id)
+    return LedgerAccepted(
+        run=run,
+        file=stored,
+        rows=len(result.counterparties),
+        issues=result.issues,
+        duplicate=duplicate,
+        contracts=result.contracts,
+    )
+
+
+async def accept_payments_export(
+    owner_id: int,
+    run_id: str,
+    data: bytes,
+    *,
+    inn: str,
+    repository: AnalysisRepository,
+    files: FileStorage,
+    reader: RawSheetReader,
+    sheets: PaymentsSheetWriter,
+    limits: ImportLimits = ImportLimits(),
+) -> LedgerAccepted | PackageRejected:
+    """Attach the customer's own 1C print of one counterparty's payments (S4-05).
+
+    The export says nothing about the INN — the dialog does, and it must be one of the
+    «Контрагенты» file's own, or the payments would belong to nobody. The period comes
+    from the export's header, so the user vouches for nothing they did not see.
+
+    What is stored is the export translated into the «Платежи» sheet, not the print
+    itself: everything downstream — the package review, the pipeline, the report — reads
+    the package by the contract, and a check resumed a day later must not depend on the
+    shape of the file it came from. The summary says so in as many words.
+    """
+    run = await repository.get_run(owner_id, run_id)
+    known = await package_inns(run, files, reader, limits)
+    try:
+        # Both kinds: the customer's portfolio holds ООО and ИП alike (S7-02), and
+        # payments are not a section that exists for companies only.
+        inn = validate_inn(inn)
+    except InvalidInn as error:
+        return PackageRejected(issues=(_export_issue("export_inn_invalid", str(error)),))
+    if inn not in known:
+        return PackageRejected(
+            issues=(
+                _export_issue(
+                    "export_inn_not_in_package",
+                    "Этой организации нет в файле «Контрагенты» проверки.",
+                ),
+            )
+        )
+    result, export = await asyncio.to_thread(
+        import_payments_export,
+        reader,
+        data,
+        inn=inn,
+        analysis_date=run.analysis_date,
+        limits=limits,
+    )
+    if not result.rows:
+        return PackageRejected(issues=result.issues)
+    sheet = await asyncio.to_thread(
+        sheets.build_payments_workbook,
+        [[row.inn, row.payment_id, row.paid_on, row.amount] for row in result.rows],
+    )
+    stored, duplicate = await _store(
+        owner_id, run, FileKind.PAYMENTS, sheet, export.period, repository, files
+    )
+    run = await repository.get_run(owner_id, run.id)
+    return LedgerAccepted(
+        run=run,
+        file=stored,
+        rows=len(result.rows),
+        issues=result.issues,
+        duplicate=duplicate,
+        export=export,
+    )
+
+
+def _export_issue(code: str, reason: str) -> ImportIssue:
+    return ImportIssue(code=code, severity=IssueSeverity.ERROR, sheet=PAYMENTS_SHEET, reason=reason)
 
 
 async def launch_run(owner_id: int, run_id: str, repository: AnalysisRepository) -> AnalysisRun:
