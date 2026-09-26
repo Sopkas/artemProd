@@ -12,9 +12,13 @@ errors never echo the payload.
 
 import json
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
+from typing import Any
 
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.debt_history import DebtSnapshot
+from claims_assistant.domain.debt_report import ContractDebt, CounterpartyDebt
 from claims_assistant.domain.external import ExternalSnapshot
 from claims_assistant.domain.imports import ImportIssue
 from claims_assistant.domain.interactions import InteractionRow
@@ -40,8 +44,10 @@ __all__ = [
     "ImportedPackage",
     "PayloadError",
     "dump_import",
+    "dump_links",
     "dump_snapshots",
     "load_import",
+    "load_links",
     "load_snapshots",
 ]
 
@@ -56,6 +62,9 @@ class ImportedPackage:
     payments: tuple[PaymentRow, ...] = ()
     history: tuple[DebtSnapshot, ...] = ()
     interactions: tuple[InteractionRow, ...] = ()
+    # S7-01: the overdue report's counterparties with their contracts, before they are
+    # linked to an INN — the link is made by name when the report is built.
+    contracts: tuple[CounterpartyDebt, ...] = ()
 
 
 def dump_import(package: ImportedPackage) -> str:
@@ -67,6 +76,7 @@ def dump_import(package: ImportedPackage) -> str:
             "payments": [payment_row_to_dict(row) for row in package.payments],
             "history": [debt_snapshot_to_dict(row) for row in package.history],
             "interactions": [interaction_row_to_dict(row) for row in package.interactions],
+            "contracts": [_counterparty_debt_to_dict(row) for row in package.contracts],
         },
         ensure_ascii=False,
     )
@@ -83,6 +93,9 @@ def load_import(payload: str) -> ImportedPackage:
             payments=tuple(payment_row_from_dict(item) for item in data["payments"]),
             history=tuple(debt_snapshot_from_dict(item) for item in data["history"]),
             interactions=tuple(interaction_row_from_dict(item) for item in data["interactions"]),
+            contracts=tuple(
+                _counterparty_debt_from_dict(item) for item in data.get("contracts", ())
+            ),
         )
     except PayloadError:
         raise
@@ -90,6 +103,117 @@ def load_import(payload: str) -> ImportedPackage:
         # ArithmeticError: Decimal("abc") raises InvalidOperation, not ValueError.
         raise PayloadError("import payload is not readable") from exc
     return package
+
+
+def dump_links(by_inn: dict[str, tuple[ContractDebt, ...]]) -> str:
+    """Whose contracts are whose, as the report decided it (S7-01).
+
+    Stored so the card reads the same answer instead of working it out again from less:
+    it knows one company's name, and could not tell two namesakes apart (review B on #58).
+    """
+    return json.dumps(
+        {
+            "schema": SCHEMA,
+            "contracts": {
+                inn: [_contract_to_dict(contract) for contract in contracts]
+                for inn, contracts in by_inn.items()
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def load_links(payload: str) -> dict[str, tuple[ContractDebt, ...]]:
+    try:
+        data = json.loads(payload)
+        if data.get("schema") != SCHEMA:
+            raise PayloadError("contract link payload has another schema")
+        return {
+            inn: tuple(_contract_from_dict(item) for item in contracts)
+            for inn, contracts in data["contracts"].items()
+        }
+    except PayloadError:
+        raise
+    except (ValueError, ArithmeticError, KeyError, TypeError, AttributeError) as exc:
+        raise PayloadError("contract link payload is not readable") from exc
+
+
+# --- the overdue report (S7-01) ----------------------------------------------------
+# Kept here rather than in ``domain/serialization`` because the report's rows are new and
+# B moved the package codecs there himself (#39); moving these two is his call.
+
+
+def _counterparty_debt_to_dict(row: CounterpartyDebt) -> dict[str, Any]:
+    return {
+        "name": row.name,
+        "inn": row.inn,
+        "group": row.group,
+        "note": row.note,
+        "contracts": [_contract_to_dict(contract) for contract in row.contracts],
+    }
+
+
+def _contract_to_dict(contract: ContractDebt) -> dict[str, Any]:
+    return {
+        "name": contract.name,
+        "overdue": None if contract.overdue is None else format(contract.overdue, "f"),
+        "days": contract.days,
+        "due_until": None if contract.due_until is None else contract.due_until.isoformat(),
+        "subject": contract.subject,
+        "note": contract.note,
+    }
+
+
+def _contract_from_dict(item: Any) -> ContractDebt:
+    if not isinstance(item, dict):
+        raise PayloadError("contract must be an object")
+    return ContractDebt(
+        name=_text(item, "name"),
+        overdue=None if item.get("overdue") is None else Decimal(str(item["overdue"])),
+        days=None if item.get("days") is None else _whole(item["days"]),
+        due_until=None
+        if item.get("due_until") is None
+        else date.fromisoformat(str(item["due_until"])),
+        subject=_optional_text(item, "subject"),
+        note=_optional_text(item, "note"),
+    )
+
+
+def _counterparty_debt_from_dict(data: Any) -> CounterpartyDebt:
+    if not isinstance(data, dict):
+        raise PayloadError("contract payload must be an object")
+    contracts = data.get("contracts") or ()
+    if not isinstance(contracts, list):
+        raise PayloadError("contracts must be a list")
+    return CounterpartyDebt(
+        name=_text(data, "name"),
+        inn=_optional_text(data, "inn"),
+        group=_optional_text(data, "group"),
+        note=_optional_text(data, "note"),
+        contracts=tuple(_contract_from_dict(item) for item in contracts),
+    )
+
+
+def _text(data: Any, key: str) -> str:
+    value = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(value, str) or not value:
+        raise PayloadError(f"{key} must be a non-empty string")
+    return value
+
+
+def _optional_text(data: Any, key: str) -> str | None:
+    value = data.get(key) if isinstance(data, dict) else None
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PayloadError(f"{key} must be a string")
+    return value
+
+
+def _whole(value: Any) -> int:
+    if type(value) is not int:
+        raise PayloadError("days must be an integer")
+    return value
 
 
 # --- external fetch step -----------------------------------------------------------

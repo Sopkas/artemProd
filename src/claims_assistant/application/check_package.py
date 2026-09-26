@@ -15,6 +15,8 @@ from typing import Protocol
 
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow, ImportLimits
+from claims_assistant.domain.debt_report import SHEET_NAME as DEBT_REPORT_SHEET
+from claims_assistant.domain.debt_report import read_debt_report
 from claims_assistant.domain.export_1c import ExportHeader
 from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
@@ -22,7 +24,13 @@ from claims_assistant.domain.inn import InvalidInn, validate_inn
 from claims_assistant.domain.payments import SHEET_NAME as PAYMENTS_SHEET
 
 from .analysis_repository import AnalysisRepository, NewFile
-from .imports import RawSheetReader, SheetReader, import_counterparties
+from .imports import (
+    OutlineReader,
+    RawSheetReader,
+    SheetReader,
+    WorkbookError,
+    import_counterparties,
+)
 from .ledger_imports import (
     import_debt_history,
     import_interactions,
@@ -75,6 +83,8 @@ class LedgerAccepted:
     rows: int
     issues: tuple[ImportIssue, ...]
     duplicate: bool
+    # S7-01: how many contracts came with the overdue report's counterparties.
+    contracts: int = 0
     # Set when the payments came as the customer's own 1C print (S4-05): what its header
     # said about the file, so the dialog can show whose export was accepted.
     export: ExportHeader | None = None
@@ -223,6 +233,58 @@ async def accept_ledger(
     run = await repository.get_run(owner_id, run.id)
     return LedgerAccepted(
         run=run, file=stored, rows=len(result.rows), issues=result.issues, duplicate=duplicate
+    )
+
+
+async def accept_debt_report(
+    owner_id: int,
+    run_id: str,
+    data: bytes,
+    *,
+    repository: AnalysisRepository,
+    files: FileStorage,
+    reader: SheetReader,
+    limits: ImportLimits = ImportLimits(),
+) -> LedgerAccepted | PackageRejected:
+    """Attach the customer's «Отчет по просроченным лизинговым платежам» (S7-01).
+
+    It does not replace «Контрагенты» and is not checked against its INNs here: the report
+    names no INN at all. Its counterparties are tied to the check by company name when the
+    report is built, and what did not match is said there (decision of 23.09.2026).
+
+    The file is read by the indents of its own rows, so the reader must be able to give
+    them; one that cannot is a wiring mistake, not a bad file.
+    """
+    run = await repository.get_run(owner_id, run_id)
+    if not isinstance(reader, OutlineReader):
+        raise TypeError("A debt report needs a reader that returns row indents")
+    try:
+        rows = await asyncio.to_thread(reader.read_outline, data, limits)
+    except WorkbookError as error:
+        return PackageRejected(
+            issues=(
+                ImportIssue(
+                    code=error.code,
+                    severity=IssueSeverity.ERROR,
+                    sheet=DEBT_REPORT_SHEET,
+                    reason=error.reason,
+                ),
+            )
+        )
+    result = await asyncio.to_thread(read_debt_report, list(rows))
+    if not result.counterparties:
+        return PackageRejected(issues=result.issues)
+    stored, duplicate = await _store(
+        owner_id, run, FileKind.DEBT_REPORT, data, None, repository, files
+    )
+    run = await repository.get_run(owner_id, run.id)
+    return LedgerAccepted(
+        run=run,
+        file=stored,
+        rows=len(result.counterparties),
+        issues=result.issues,
+        duplicate=duplicate,
+        contracts=result.contracts,
     )
 
 

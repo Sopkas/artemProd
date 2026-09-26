@@ -10,6 +10,7 @@ LAUNCH = "Запустить проверку"
 ADD_PAYMENTS = "Добавить платежи"
 ADD_HISTORY = "Добавить историю долга"
 ADD_INTERACTIONS = "Добавить взаимодействия"
+ADD_DEBT_REPORT = "Добавить отчёт по договорам"
 PAYMENTS_TEMPLATE = "По нашему шаблону"
 PAYMENTS_EXPORT = "Выгрузка из 1С"
 
@@ -36,7 +37,9 @@ def date_menu() -> ReplyKeyboardMarkup:
 
 def launch_menu() -> ReplyKeyboardMarkup:
     """Package confirmation: launch, or add the optional files first (S4-01)."""
-    return _keyboard([[LAUNCH], [ADD_PAYMENTS, ADD_HISTORY], [ADD_INTERACTIONS, CANCEL]])
+    return _keyboard(
+        [[LAUNCH], [ADD_PAYMENTS, ADD_HISTORY], [ADD_INTERACTIONS, ADD_DEBT_REPORT], [CANCEL]]
+    )
 
 
 def payments_source_menu() -> ReplyKeyboardMarkup:
