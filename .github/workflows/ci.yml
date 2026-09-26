@@ -1,17 +1,12 @@
 name: CI
 
-# Minutes cost money on a private repository: the free plan has 2000 a month, every job is
-# billed in whole minutes, and a Windows minute counts twice. In September 2026 the old
-# setup ran each change twice (push + pull_request) with a Windows job every time — about
-# 12 billed minutes per push — and the quota ran out on the 23rd. So:
+# A pull request is checked once, on the pull_request event; push runs only for main.
+# Running on both would check every push to a PR branch twice: concurrency does not cancel
+# the pair, because push and pull_request runs have different refs.
+# A change that touches only documentation is not checked.
 #
-# - a pull request is checked once, on the pull_request event; push runs only for main;
-# - the Windows job (4 of the 6 minutes of a full run) runs after merge, on the manual
-#   button, or on a pull request labelled «windows» — the developer on Windows runs the
-#   same checks locally before every push anyway;
-# - a change that touches only documentation is not checked at all.
-#
-# A pull request push now costs about 2 minutes instead of 12.
+# If the repository ever becomes private again, minutes will cost money (a Windows minute
+# counts twice): the recipe for cutting them is in the description of PR #62.
 on:
   push:
     branches: [main]
@@ -19,8 +14,6 @@ on:
       - "docs/**"
       - "**/*.md"
   pull_request:
-    # «labeled» so that putting the «windows» label on a PR runs the Windows job for it.
-    types: [opened, synchronize, reopened, labeled]
     paths-ignore:
       - "docs/**"
       - "**/*.md"
@@ -43,16 +36,16 @@ env:
 jobs:
   checks:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    # Adding some other label to a PR must not re-run the whole suite.
-    if: github.event.action != 'labeled' || github.event.label.name == 'windows'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        # Ubuntu 3.12 and 3.14 — the oldest and the newest supported Python — always;
-        # Windows 3.13 everywhere except a pull request without the «windows» label.
-        include: ${{ fromJSON(github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'windows') && '[{"os":"ubuntu-latest","python-version":"3.12"},{"os":"ubuntu-latest","python-version":"3.14"}]' || '[{"os":"ubuntu-latest","python-version":"3.12"},{"os":"ubuntu-latest","python-version":"3.14"},{"os":"windows-latest","python-version":"3.13"}]') }}
+        os: [ubuntu-latest]
+        python-version: ["3.12", "3.14"]
+        include:
+          - os: windows-latest
+            python-version: "3.13"
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -209,7 +209,7 @@ Copy-Item .env.example .env
 .\.venv\Scripts\python.exe -m claims_assistant
 ```
 
-Для проверок на Windows используйте `.\.venv\Scripts\python.exe -m pytest -q`, `.\.venv\Scripts\python.exe -m ruff check src tests`, `.\.venv\Scripts\python.exe -m ruff format --check src tests` и `.\.venv\Scripts\python.exe -m pip check`. Python 3.13 выбран по подтверждённой установке коллеги; в CI есть проверка Windows на этой версии — она идёт после merge в `main`, по ручному запуску и на PR с меткой `windows` (минуты Windows на приватном репозитории стоят вдвое, см. `.github/workflows/ci.yml`). При повторной установке существующий `.env` сохраняйте.
+Для проверок на Windows используйте `.\.venv\Scripts\python.exe -m pytest -q`, `.\.venv\Scripts\python.exe -m ruff check src tests`, `.\.venv\Scripts\python.exe -m ruff format --check src tests` и `.\.venv\Scripts\python.exe -m pip check`. Python 3.13 выбран по подтверждённой установке коллеги; в CI добавлена проверка Windows на этой версии. При повторной установке существующий `.env` сохраняйте.
 
 Набор разработки включает зависимости приложения и закреплённые инструменты сборки. Для обновления зависимостей нужно согласованно обновлять оба файла требований и повторять проверки.
 
