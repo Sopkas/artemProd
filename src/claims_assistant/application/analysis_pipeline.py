@@ -46,7 +46,7 @@ from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
 from .contract_link import LinkedContracts, link_contracts
 from .explanations import EXPLANATION_STEP, StoredExplanation
-from .external_guard import BUDGET_EXHAUSTED, TRANSIENT_CODES, RunBudget
+from .external_guard import BUDGET_EXHAUSTED, SOURCE_LIMIT, TRANSIENT_CODES, RunBudget
 from .imports import SheetReader
 from .internal_context import payment_periods
 from .package_checks import PackageIntegrityError, PackageReview, review_package
@@ -125,6 +125,9 @@ class RunSummary:
     # S5-03: companies left without an accepted AI explanation while a provider was
     # configured (model unavailable, answer rejected, AI budget exhausted).
     explanations_missing: int = 0
+    # The source said its request limit was spent (429 after the guard's retries): the rest
+    # of the check was not asked; the user is told to come back tomorrow.
+    source_limited: bool = False
 
     def to_payload(self) -> str:
         return json.dumps(
@@ -136,6 +139,7 @@ class RunSummary:
                 "priorities": {key.value: value for key, value in self.priorities.items()},
                 "budget_exhausted": self.budget_exhausted,
                 "explanations_missing": self.explanations_missing,
+                "source_limited": self.source_limited,
             }
         )
 
@@ -151,6 +155,7 @@ class RunSummary:
                 priorities={Priority(key): int(value) for key, value in data["priorities"].items()},
                 budget_exhausted=bool(data["budget_exhausted"]),
                 explanations_missing=int(data.get("explanations_missing", 0)),
+                source_limited=bool(data.get("source_limited", False)),
             )
         except (ValueError, KeyError, TypeError) as exc:
             raise PayloadError("summary payload is not readable") from exc
@@ -161,6 +166,11 @@ class RunSummary:
             reasons.append(f"Строк с ошибками: {self.row_errors}; они исключены из проверки.")
         if self.budget_exhausted:
             reasons.append("Лимит времени или запросов проверки исчерпан.")
+        if self.source_limited:
+            reasons.append(
+                "Источник данных исчерпал лимит запросов, дальше его не спрашивали; "
+                "повторите проверку завтра."
+            )
         if self.unchecked:
             reasons.append(f"Организаций с неполными внешними данными: {self.unchecked}.")
         if self.explanations_missing:
@@ -378,7 +388,10 @@ class AnalysisPipeline:
         # The oldest answer among the sections: cached snapshots keep their own
         # fetched_at, so every external fact in the report is at least this fresh.
         fetched = [
-            s.fetched_at for group in snapshots.values() for s in group if not _hit_budget(s)
+            s.fetched_at
+            for group in snapshots.values()
+            for s in group
+            if not _hit_budget(s) and not _hit_source_limit(s)
         ]
         meta = ReportMeta(
             run_id=run.id,
@@ -564,6 +577,13 @@ def _hit_budget(snapshot: ExternalSnapshot) -> bool:
     return snapshot.error is not None and snapshot.error.code == BUDGET_EXHAUSTED
 
 
+def _hit_source_limit(snapshot: ExternalSnapshot) -> bool:
+    """The source's own limit: its 429 after the retries, or the guard's placeholder."""
+    return snapshot.status is FetchStatus.RATE_LIMITED or (
+        snapshot.error is not None and snapshot.error.code == SOURCE_LIMIT
+    )
+
+
 def _is_open(snapshot: ExternalSnapshot) -> bool:
     """Not a final answer: the budget placeholder or a transient source failure."""
     if _hit_budget(snapshot) or snapshot.status is FetchStatus.RATE_LIMITED:
@@ -616,12 +636,15 @@ def _summarize(
     priorities = {priority: 0 for priority in Priority}
     checked = 0
     budget_exhausted = False
+    source_limited = False
     for row in rows:
         priorities[row.assessment.priority] += 1
         if all(snapshot.status is FetchStatus.OK for snapshot in row.snapshots):
             checked += 1
         if any(_hit_budget(snapshot) for snapshot in row.snapshots):
             budget_exhausted = True
+        if any(_hit_source_limit(snapshot) for snapshot in row.snapshots):
+            source_limited = True
     return RunSummary(
         companies=len(rows),
         checked=checked,
@@ -629,6 +652,7 @@ def _summarize(
         row_errors=sum(1 for issue in issues if issue.severity is IssueSeverity.ERROR),
         priorities=priorities,
         budget_exhausted=budget_exhausted,
+        source_limited=source_limited,
         explanations_missing=(
             sum(1 for row in rows if row.explanation is None) if explainer else 0
         ),

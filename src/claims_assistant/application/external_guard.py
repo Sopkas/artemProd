@@ -29,6 +29,11 @@ from .company_data import CompanyDataProvider, CompanyDataRequest, RequestLimits
 BUDGET_EXHAUSTED = "budget_exhausted"
 BUDGET_MESSAGE = "Лимит времени или запросов проверки исчерпан; раздел не проверен."
 TRANSIENT_CODES = frozenset({"timeout", "network_error", "http_error", "rate_limited"})
+SOURCE_LIMIT = "source_limit"
+SOURCE_LIMIT_MESSAGE = (
+    "Источник данных ответил, что лимит запросов исчерпан; раздел не проверен. "
+    "Повторите проверку позже."
+)
 
 
 def _now() -> datetime:
@@ -67,6 +72,9 @@ class RunBudget:
     deadline: datetime
     used: int = 0
     exhausted: bool = field(default=False, init=False)
+    # The source itself said «enough» (still 429 after the retries): on the free tariff
+    # that is the daily limit, and every next company of this check would get the same.
+    source_closed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if self.max_requests <= 0:
@@ -142,6 +150,11 @@ class GuardedCompanyDataProvider:
             else:
                 pending.append(section)
 
+        if budget.source_closed:
+            for section in pending:
+                results[section] = _source_limited(request.inn, section, self._mode, self._clock())
+            pending = []
+
         attempt = 0
         while pending:
             granted = budget.take(len(pending), self._clock())
@@ -177,6 +190,8 @@ class GuardedCompanyDataProvider:
             )
             pending = retry
 
+        if any(snapshot.status is FetchStatus.RATE_LIMITED for snapshot in results.values()):
+            budget.source_closed = True
         return tuple(results[section] for section in request.sections)
 
 
@@ -193,6 +208,20 @@ def _is_transient(snapshot: ExternalSnapshot) -> bool:
     if snapshot.status is FetchStatus.RATE_LIMITED:
         return True
     return snapshot.error is not None and snapshot.error.code in TRANSIENT_CODES
+
+
+def _source_limited(inn: str, section: Section, mode: DataMode, now: datetime) -> ExternalSnapshot:
+    return ExternalSnapshot(
+        inn=inn,
+        section=section,
+        source="guard",
+        mode=mode,
+        fetched_at=now,
+        status=FetchStatus.RATE_LIMITED,
+        coverage=Coverage.UNAVAILABLE,
+        missing=(SOURCE_LIMIT_MESSAGE,),
+        error=ProviderError(SOURCE_LIMIT, SOURCE_LIMIT_MESSAGE),
+    )
 
 
 def _exhausted(inn: str, section: Section, mode: DataMode, now: datetime) -> ExternalSnapshot:

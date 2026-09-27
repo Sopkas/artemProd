@@ -8,6 +8,8 @@ import pytest
 from claims_assistant.application.company_data import CompanyDataRequest, RequestLimits
 from claims_assistant.application.external_guard import (
     BUDGET_EXHAUSTED,
+    SOURCE_LIMIT,
+    SOURCE_LIMIT_MESSAGE,
     GuardedCompanyDataProvider,
     GuardPolicy,
     RunBudget,
@@ -329,3 +331,42 @@ async def test_exhausted_sections_follow_the_provider_mode(clock, sleeps):
     from claims_assistant.application.check_company import CompanyCheck
 
     CompanyCheck(INN, snapshots)  # mixed modes would raise here
+
+
+# --- the source's own limit (free tariff: 100 requests a day) ---------------------------
+
+LIMITED = {section: (FetchStatus.RATE_LIMITED, "rate_limited") for section in Section}
+
+
+async def test_a_source_still_rate_limited_after_retries_is_not_asked_again_in_the_run(
+    clock, sleeps
+):
+    """Once the source answers 429 even after the retries, every next company would get the
+    same: the rest of the check does not ask it, and each section says why."""
+    inner = ScriptedProvider([LIMITED, LIMITED])  # the call and its one retry
+    scoped = guard(inner, clock, sleeps, max_retries=1).scoped(RunBudget.unlimited())
+    first = await scoped.fetch(CompanyDataRequest(INN))
+    assert all(s.status is FetchStatus.RATE_LIMITED for s in first)
+    second = await scoped.fetch(CompanyDataRequest(OTHER))
+    assert len(inner.calls) == 2  # nothing was asked for the second company
+    assert [s.error.code for s in second] == [SOURCE_LIMIT] * 3
+    assert all(s.missing == (SOURCE_LIMIT_MESSAGE,) for s in second)
+
+
+async def test_a_rate_limit_the_retry_got_past_does_not_close_the_source(clock, sleeps):
+    inner = ScriptedProvider([{Section.COMPANY: (FetchStatus.RATE_LIMITED, "rate_limited")}])
+    scoped = guard(inner, clock, sleeps, max_retries=1).scoped(RunBudget.unlimited())
+    await scoped.fetch(CompanyDataRequest(INN))
+    second = await scoped.fetch(CompanyDataRequest(OTHER))
+    assert all(s.status is FetchStatus.OK for s in second)
+    assert len(inner.calls) == 3
+
+
+async def test_a_closed_source_stays_closed_only_for_that_run(clock, sleeps):
+    """The card (/inn) has its own budget: it asks again, and may well be told «429»."""
+    inner = ScriptedProvider([LIMITED, LIMITED])
+    provider = guard(inner, clock, sleeps, max_retries=1)
+    await provider.scoped(RunBudget.unlimited()).fetch(CompanyDataRequest(INN))
+    card = await provider.fetch(CompanyDataRequest(OTHER))
+    assert len(inner.calls) == 3
+    assert all(s.status is FetchStatus.OK for s in card)
