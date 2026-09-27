@@ -128,3 +128,11 @@ def test_worst_days_ignores_contracts_that_do_not_say():
     assert worst_days(contracts) == 307
     assert worst_days((ContractDebt(name="Дог", due_until=date(2026, 1, 1)),)) is None
     assert worst_days(()) is None
+
+
+def test_without_a_debt_report_nobody_is_reported_unnamed():
+    """Found on the live source (27.09.2026): an INN Checko does not know gets no name, and
+    «Качество данных» warned that the overdue report's contracts were not tied to it —
+    in a check that had no overdue report at all."""
+    linked = link_contracts((), {INN_A: None, INN_B: "Ромашка"})
+    assert linked.unnamed == ()
