@@ -1,6 +1,7 @@
 import os
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from aiogram.utils.token import TokenValidationError, validate_token
@@ -33,6 +34,23 @@ class AiSettings:
     run_request_limit: int = 100
     run_token_limit: int = 400_000
     run_time_limit_seconds: float = 600.0
+    # S5-03, decision of 23.09.2026: the customer agreed on 1000 ₽ a month. The run limit
+    # keeps one check from eating the month in a single go — at the measured 0,06–0,11 ₽
+    # per company, 50 ₽ is a package of several hundred organizations.
+    run_rub_limit: Decimal = Decimal("50")
+    month_rub_limit: Decimal = Decimal("1000")
+
+
+def _money(values: dict[str, str | None], key: str, default: str) -> Decimal:
+    """A rouble limit from the environment; never a float — this number is money."""
+    raw = (values.get(key) or default).strip().replace(",", ".")
+    try:
+        amount = Decimal(raw)
+    except InvalidOperation:
+        raise ConfigurationError(f"{key}: укажите сумму в рублях, например 1000.") from None
+    if amount <= 0:
+        raise ConfigurationError(f"{key}: сумма должна быть больше нуля.")
+    return amount
 
 
 class ConfigurationError(ValueError):
@@ -65,8 +83,15 @@ class Settings:
     data_provider: str = "demo"
     checko_api_key: str = field(default="", repr=False)
     # AI explanations (S5-01): "off" — no provider at all; "stub" — the stand-in model
-    # (no network). A real provider is added only after the customer confirms it.
+    # (no network); "polza" — the polza.ai aggregator chosen on 23.09.2026, which needs
+    # AI_API_KEY and takes AI_MODEL.
     ai_provider: str = "off"
+    ai_api_key: str = field(default="", repr=False)
+    ai_model: str = ""
+    # Whether the model is asked for a strict JSON schema. The Russian-hosted models of
+    # the aggregator do not support it (docs/ai-provider.md), and then the shape is only
+    # checked by the review (S5-06), not enforced by the provider.
+    ai_structured: bool = True
     # Whether the «Взаимодействия» comments may be sent to the model (S5-02/S5-05):
     # the customer's employees' and clients' words leave the premises only with consent.
     ai_send_comments: bool = False
@@ -113,8 +138,15 @@ class Settings:
         if provider not in {"demo", "checko"}:
             raise ConfigurationError("DATA_PROVIDER: допустимы demo, checko.")
         ai_provider = (values.get("AI_PROVIDER") or "off").strip().lower()
-        if ai_provider not in {"off", "stub"}:
-            raise ConfigurationError("AI_PROVIDER: допустимы off, stub.")
+        if ai_provider not in {"off", "stub", "polza"}:
+            raise ConfigurationError("AI_PROVIDER: допустимы off, stub, polza.")
+        ai_api_key = (values.get("AI_API_KEY") or "").strip()
+        if ai_provider == "polza" and not ai_api_key:
+            raise ConfigurationError("Для AI_PROVIDER=polza укажите AI_API_KEY.")
+        ai_model = (values.get("AI_MODEL") or "").strip()
+        raw_structured = (values.get("AI_RESPONSE_FORMAT") or "json_schema").strip().lower()
+        if raw_structured not in {"json_schema", "none"}:
+            raise ConfigurationError("AI_RESPONSE_FORMAT: допустимы json_schema, none.")
         raw_comments = (values.get("AI_SEND_COMMENTS") or "false").strip().lower()
         if raw_comments not in {"true", "false", "1", "0", "yes", "no"}:
             raise ConfigurationError("AI_SEND_COMMENTS: допустимы true или false.")
@@ -131,6 +163,8 @@ class Settings:
             run_request_limit=_number(values, "AI_RUN_REQUEST_LIMIT", 100, integer=True, minimum=1),
             run_token_limit=_number(values, "AI_RUN_TOKEN_LIMIT", 400_000, integer=True, minimum=1),
             run_time_limit_seconds=_number(values, "AI_RUN_TIME_LIMIT_SECONDS", 600.0, minimum=1),
+            run_rub_limit=_money(values, "AI_RUN_RUB_LIMIT", "50"),
+            month_rub_limit=_money(values, "AI_MONTH_RUB_LIMIT", "1000"),
         )
         checko_key = (values.get("CHECKO_API_KEY") or "").strip()
         if provider == "checko" and not checko_key:
@@ -163,6 +197,9 @@ class Settings:
             data_provider=provider,
             checko_api_key=checko_key,
             ai_provider=ai_provider,
+            ai_api_key=ai_api_key,
+            ai_model=ai_model,
+            ai_structured=raw_structured == "json_schema",
             ai_send_comments=ai_send_comments,
             ai=ai,
             database_path=database_path,

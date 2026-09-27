@@ -276,6 +276,40 @@ def test_recommendation_provider_factory_follows_the_setting():
     assert built.name == "stub" and built.policy.max_retries == 1
 
 
+def test_polza_needs_a_key_and_takes_a_model(tmp_path, monkeypatch):
+    """S5-01: a provider configured without its key must not start the service silently."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("AI_PROVIDER", "polza")
+    with pytest.raises(ConfigurationError, match="AI_API_KEY"):
+        Settings.load(tmp_path / "missing.env")
+    monkeypatch.setenv("AI_API_KEY", "pza_test")
+    monkeypatch.setenv("AI_MODEL", "sber/gigachat-2")
+    monkeypatch.setenv("AI_RESPONSE_FORMAT", "none")
+    settings = Settings.load(tmp_path / "missing.env")
+    assert settings.ai_model == "sber/gigachat-2" and settings.ai_structured is False
+    assert "pza_test" not in repr(settings)  # the key never shows up in a log line
+
+
+def test_an_unknown_response_format_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("AI_RESPONSE_FORMAT", "yaml")
+    with pytest.raises(ConfigurationError, match="AI_RESPONSE_FORMAT"):
+        Settings.load(tmp_path / "missing.env")
+
+
+def test_the_factory_builds_the_polza_client_behind_the_guard():
+    from claims_assistant.infrastructure.llm.polza import DEFAULT_MODEL, PolzaRecommendationProvider
+    from claims_assistant.runtime.ai import build_recommendation_provider
+
+    built = build_recommendation_provider(
+        Settings(TOKEN, frozenset({42}), ai_provider="polza", ai_api_key="pza_test")
+    )
+    assert isinstance(built.inner, PolzaRecommendationProvider)
+    assert built.name == "polza" and built.model == DEFAULT_MODEL
+
+
 def test_ai_limits_defaults_and_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
