@@ -209,3 +209,32 @@ def test_a_saved_catalogue_answers_for_the_models_it_lists(tmp_path):
     )
     assert catalogue("openai/gpt-4.1-mini").temperature is True
     assert catalogue("no-such/model") is None
+
+
+def test_a_cut_off_answer_is_counted_in_the_money_of_the_run():
+    """A cut-off answer was paid for (26.09: 1000 tokens, 0,58 ₽ each at one model) and the
+    table must show it; a call that never reached the model cost nothing."""
+    from decimal import Decimal
+
+    from claims_assistant.application.recommendation import (
+        AiAnswer,
+        AiErrorCode,
+        AiUnavailable,
+        ExplanationOutcome,
+    )
+    from evals.bench import spent_of
+
+    paid = AiAnswer(
+        text="",
+        provider="polza",
+        model="m",
+        input_tokens=1813,
+        output_tokens=1000,
+        latency_seconds=5.0,
+        cost_rub=Decimal("0.57764"),
+    )
+    cut = AiUnavailable(AiErrorCode.TRUNCATED, "Ответ модели обрезан.", spent=paid)
+    lost = AiUnavailable(AiErrorCode.UNAVAILABLE, "Провайдер ИИ недоступен.")
+    assert spent_of(ExplanationOutcome("polza", "m", "v", error=cut)) is paid
+    assert spent_of(ExplanationOutcome("polza", "m", "v", error=lost)) is None
+    assert spent_of(ExplanationOutcome("polza", "m", "v", answer=paid)) is paid

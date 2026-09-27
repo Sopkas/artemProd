@@ -215,6 +215,17 @@ def _provider(key, model, structured, policy, parameters, effort, errors: Path):
     return GuardedRecommendationProvider(inner, policy)
 
 
+def spent_of(outcome: ExplanationOutcome):
+    """What the call was paid for: the answer, or a cut-off one that came with no answer.
+
+    A cut-off answer travels in the failure (``AiUnavailable.spent``); counting only
+    ``outcome.answer`` left its tokens and roubles out of the table.
+    """
+    if outcome.answer is not None:
+        return outcome.answer
+    return outcome.error.spent if outcome.error is not None else None
+
+
 def _text_of(outcome: ExplanationOutcome) -> str:
     if outcome.explanation is not None:
         return outcome.explanation.text
@@ -251,7 +262,7 @@ async def run_model(
             started = time.monotonic()
             outcome = await request_explanation(provider, context, limits)
             seconds = time.monotonic() - started
-            answer = outcome.answer
+            answer = spent_of(outcome)
             result = Result(
                 model=model,
                 scenario=scenario.id,
