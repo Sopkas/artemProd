@@ -21,6 +21,7 @@ from claims_assistant.domain.indicators import (
     PaymentRecency,
     PaymentStatus,
 )
+from claims_assistant.domain.manual_checks import MANUAL_CHECKS
 
 DEMO_BANNER = "ДЕМО: синтетические данные, не сведения о реальной организации."
 
@@ -68,7 +69,12 @@ def format_card(check: CompanyCheck, internal: InternalContext | None = None) ->
     for snapshot in check.snapshots:
         lines.append("")
         lines.extend(_section(snapshot))
-    footer = ["", "Карточка показывает полученные факты и полноту проверки без оценки очерёдности."]
+    footer = [
+        "",
+        *(check.line() for check in MANUAL_CHECKS),
+        "",
+        "Карточка показывает полученные факты и полноту проверки без оценки очерёдности.",
+    ]
     if internal is None:
         return "\n".join(lines + footer)
     budget = _CARD_BUDGET - len("\n".join(lines + footer)) - 1
