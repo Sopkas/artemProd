@@ -19,6 +19,7 @@ from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDat
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.excel.report import build_report
+from claims_assistant.infrastructure.persistence.ai_spend import SqliteAiSpendStore
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
 from claims_assistant.infrastructure.storage.local import LocalFileStorage
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
@@ -126,6 +127,10 @@ async def run(settings: Settings) -> None:
                 else AiLimits(),
                 ai_run_limits=run_limits(settings),
                 ai_send_comments=settings.ai_send_comments,
+                # S5-03: the month's spend lives next to the runs, so a restart does not
+                # hand the model a fresh budget.
+                ai_spend=_spend_store(repository),
+                ai_month_limit_rub=settings.ai.month_rub_limit,
             )
             notifier = TelegramRunNotifier(bot, repository, files)
             worker = RunWorker(repository, pipeline, notifier=notifier)
@@ -155,6 +160,17 @@ async def run(settings: Settings) -> None:
     finally:
         await bot.session.close()
         logger.info("bot_stopped")
+
+
+def _spend_store(repository: object) -> SqliteAiSpendStore | None:
+    """The monthly AI spend on the same database, when there is one (S5-03).
+
+    A repository without a database — in tests, or a future in-memory one — has no place
+    to keep a month that outlives the process, and saying so is better than pretending:
+    the run's own money limit still holds.
+    """
+    engine = getattr(repository, "engine", None)
+    return SqliteAiSpendStore(engine) if engine is not None else None
 
 
 def check(settings: Settings) -> int:

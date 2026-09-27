@@ -52,4 +52,5 @@ def run_limits(settings: Settings) -> AiRunLimits:
         max_requests=settings.ai.run_request_limit,
         max_tokens=settings.ai.run_token_limit,
         max_seconds=settings.ai.run_time_limit_seconds,
+        max_rub=settings.ai.run_rub_limit,
     )

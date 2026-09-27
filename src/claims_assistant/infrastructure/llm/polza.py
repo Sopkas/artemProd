@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 import aiohttp
@@ -269,6 +270,7 @@ class PolzaRecommendationProvider:
             input_tokens=_count(usage, "prompt_tokens"),
             output_tokens=_count(usage, "completion_tokens"),
             latency_seconds=latency,
+            cost_rub=_price(usage),
         )
 
 
@@ -291,6 +293,21 @@ def _content(body: object) -> str | None:
 def _truncated(body: object) -> bool:
     choice = _choice(body)
     return choice is not None and choice.get("finish_reason") == "length"
+
+
+def _price(usage: dict[str, Any]) -> Decimal | None:
+    """What this call cost, as the provider reported it; None when it did not.
+
+    The value comes as a JSON number, and money must not be added up in binary floats:
+    it is converted through its own text so 0.0044424 stays 0.0044424.
+    """
+    value = usage.get("cost_rub")
+    if type(value) not in (int, float) or value < 0:
+        return None
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return None
 
 
 def _count(usage: dict[str, Any], key: str) -> int:

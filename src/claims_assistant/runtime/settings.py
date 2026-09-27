@@ -1,6 +1,7 @@
 import os
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from aiogram.utils.token import TokenValidationError, validate_token
@@ -33,6 +34,23 @@ class AiSettings:
     run_request_limit: int = 100
     run_token_limit: int = 400_000
     run_time_limit_seconds: float = 600.0
+    # S5-03, decision of 23.09.2026: the customer agreed on 1000 ₽ a month. The run limit
+    # keeps one check from eating the month in a single go — at the measured 0,06–0,11 ₽
+    # per company, 50 ₽ is a package of several hundred organizations.
+    run_rub_limit: Decimal = Decimal("50")
+    month_rub_limit: Decimal = Decimal("1000")
+
+
+def _money(values: dict[str, str | None], key: str, default: str) -> Decimal:
+    """A rouble limit from the environment; never a float — this number is money."""
+    raw = (values.get(key) or default).strip().replace(",", ".")
+    try:
+        amount = Decimal(raw)
+    except InvalidOperation:
+        raise ConfigurationError(f"{key}: укажите сумму в рублях, например 1000.") from None
+    if amount <= 0:
+        raise ConfigurationError(f"{key}: сумма должна быть больше нуля.")
+    return amount
 
 
 class ConfigurationError(ValueError):
@@ -145,6 +163,8 @@ class Settings:
             run_request_limit=_number(values, "AI_RUN_REQUEST_LIMIT", 100, integer=True, minimum=1),
             run_token_limit=_number(values, "AI_RUN_TOKEN_LIMIT", 400_000, integer=True, minimum=1),
             run_time_limit_seconds=_number(values, "AI_RUN_TIME_LIMIT_SECONDS", 600.0, minimum=1),
+            run_rub_limit=_money(values, "AI_RUN_RUB_LIMIT", "50"),
+            month_rub_limit=_money(values, "AI_MONTH_RUB_LIMIT", "1000"),
         )
         checko_key = (values.get("CHECKO_API_KEY") or "").strip()
         if provider == "checko" and not checko_key:
