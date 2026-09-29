@@ -19,7 +19,6 @@ manual review", so we surface every message as a dated ``BANKRUPTCY_EVENT`` fact
 its source and never infer a confirmed procedure from raw text.
 """
 
-import json
 import re
 from datetime import date, datetime
 from typing import Protocol
@@ -43,12 +42,12 @@ from claims_assistant.infrastructure.checko.errors import (
     NotFound,
     is_not_found,
 )
+from claims_assistant.infrastructure.checko.http import read_response
 
 __all__ = ["read_page", "project_bankruptcy", "AiohttpBankruptcyTransport", "BankruptcyTransport"]
 
 SOURCE = "checko-efrsb-v2"
 BANKRUPTCY_URL = "https://api.checko.ru/v2/bankruptcy-messages"
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 # One record too far past the sample is dropped; a stable ceiling keeps memory bounded even
 # if the envelope's counters are wrong.
 MAX_RECORDS = 2000
@@ -71,17 +70,7 @@ class AiohttpBankruptcyTransport:
                 json={"key": key, "inn": inn, "page": page},
                 allow_redirects=False,
             ) as response:
-                if response.status != 200:
-                    return response.status, None
-                body = bytearray()
-                async for chunk in response.content.iter_chunked(65536):
-                    body.extend(chunk)
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        raise InvalidResponse() from None
-                try:
-                    return response.status, json.loads(body)
-                except (ValueError, UnicodeError):
-                    raise InvalidResponse() from None
+                return await read_response(response)
 
 
 def _iso_date(value: object) -> date | None:

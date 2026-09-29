@@ -10,6 +10,7 @@ import pytest
 from claims_assistant.application.company_data import CompanyDataRequest, RequestLimits
 from claims_assistant.domain.external import CompanyStatus, Coverage, DataMode, FetchStatus, Section
 from claims_assistant.infrastructure.checko import company_data as checko
+from claims_assistant.infrastructure.checko import http as checko_http
 
 INN = "1234567894"
 NOW = datetime(2026, 9, 18, tzinfo=UTC)
@@ -152,6 +153,39 @@ async def test_http_error_is_safe_and_not_retried(http, status, code):
     assert KEY not in repr(snapshots)
 
 
+# Live answer of an exhausted free key (27.09.2026), with the counter it reported.
+DAILY_LIMIT = {
+    "meta": {
+        "status": "error",
+        "today_request_count": 100,
+        "message": "Превышен суточный лимит запросов для бесплатного тарифа",
+        "balance": 0.0,
+    }
+}
+
+
+@pytest.mark.parametrize(
+    "section", [Section.COMPANY, Section.BANKRUPTCY, Section.FINANCES], ids=lambda s: s.value
+)
+async def test_daily_limit_403_is_a_limit_not_a_broken_key(section):
+    (snapshot,) = await provider(Transport(403, DAILY_LIMIT)).fetch(
+        CompanyDataRequest(INN, (section,))
+    )
+    assert snapshot.status == FetchStatus.RATE_LIMITED
+    assert snapshot.error.code == "daily_limit"
+    assert "завтра" in snapshot.error.message
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, {"meta": {"status": "error", "message": "Метод не входит в тариф"}}, {"meta": []}],
+)
+async def test_other_403_stays_access_denied(payload):
+    (snapshot,) = await provider(Transport(403, payload)).fetch(COMPANY_ONLY)
+    assert snapshot.status == FetchStatus.UNAUTHORIZED
+    assert snapshot.error.code == "access_denied"
+
+
 async def test_api_error_body_is_not_echoed(caplog):
     payload = {"meta": {"status": "error", "message": KEY}}
     snapshots = await provider(Transport(payload=payload)).fetch(CompanyDataRequest(INN))
@@ -194,19 +228,33 @@ async def test_deadline_is_enforced_even_for_custom_transport():
 
 
 @pytest.mark.parametrize(
-    "body,error",
+    "http_status,body,expected",
     [
-        (b"not json", True),
-        (b"x" * (checko.MAX_RESPONSE_BYTES + 1), True),
-        (json.dumps(PAYLOAD).encode(), False),
+        (200, b"not json", checko.InvalidResponse),
+        (200, b"x" * (checko_http.MAX_RESPONSE_BYTES + 1), checko.InvalidResponse),
+        (200, json.dumps(PAYLOAD).encode(), (200, PAYLOAD)),
+        (403, json.dumps(DAILY_LIMIT).encode(), (403, DAILY_LIMIT)),
+        (403, b"not json", (403, None)),
+        (403, b"x" * (checko_http.MAX_RESPONSE_BYTES + 1), (403, None)),
+        (500, json.dumps(PAYLOAD).encode(), (500, None)),
     ],
-    ids=["not_json", "too_large", "valid"],
+    ids=[
+        "not_json",
+        "too_large",
+        "valid",
+        "403_body_kept",
+        "403_unreadable",
+        "403_too_large",
+        "500_body_dropped",
+    ],
 )
-async def test_http_transport_keeps_key_out_of_url_and_closes(monkeypatch, body, error):
+async def test_http_transport_keeps_key_out_of_url_and_closes(
+    monkeypatch, http_status, body, expected
+):
     closed = []
 
     class Response:
-        status = 200
+        status = http_status
 
         @property
         def content(self):
@@ -237,11 +285,11 @@ async def test_http_transport_keeps_key_out_of_url_and_closes(monkeypatch, body,
 
     constructor = Mock(return_value=Session())
     monkeypatch.setattr(checko.aiohttp, "ClientSession", constructor)
-    if error:
+    if expected is checko.InvalidResponse:
         with pytest.raises(checko.InvalidResponse):
             await checko.AiohttpCompanyTransport().request(KEY, INN, 2)
     else:
-        assert await checko.AiohttpCompanyTransport().request(KEY, INN, 2) == (200, PAYLOAD)
+        assert await checko.AiohttpCompanyTransport().request(KEY, INN, 2) == expected
     assert constructor.call_args.kwargs["trust_env"] is False
     assert constructor.call_args.kwargs["timeout"].total == 2
     assert closed == ["response", "session"]
