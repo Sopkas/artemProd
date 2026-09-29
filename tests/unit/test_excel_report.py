@@ -235,7 +235,8 @@ def test_about_sheet_names_what_is_not_checked_automatically():
     manual = [value for key, value, *_ in rows if key == "Не проверяется автоматически"]
     assert len(manual) == 1
     assert manual[0].startswith("Блокировки счетов ФНС: не проверяются автоматически")
-    assert manual[0].endswith("https://service.nalog.ru/bi.do")
+    assert "https://service.nalog.ru/bi.do" in manual[0]
+    assert "БИК любого банка" in manual[0]
 
 
 @pytest.mark.parametrize(

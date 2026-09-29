@@ -71,7 +71,7 @@ def format_card(check: CompanyCheck, internal: InternalContext | None = None) ->
         lines.extend(_section(snapshot))
     footer = [
         "",
-        *(check.line() for check in MANUAL_CHECKS),
+        *(manual.line() for manual in MANUAL_CHECKS),
         "",
         "Карточка показывает полученные факты и полноту проверки без оценки очерёдности.",
     ]

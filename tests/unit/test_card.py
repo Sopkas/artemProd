@@ -186,3 +186,4 @@ async def test_card_says_what_is_not_checked_and_where_to_look():
         text = await card_for(scenario)
         assert "Блокировки счетов ФНС: не проверяются автоматически" in text
         assert "https://service.nalog.ru/bi.do" in text
+        assert "БИК любого банка" in text

@@ -13,9 +13,12 @@ class ManualCheck:
     title: str
     reason: str
     url: str
+    # What the page asks for that a person would not guess.
+    hint: str = ""
 
     def line(self) -> str:
-        return f"{self.title}: {self.reason} Проверить вручную: {self.url}"
+        line = f"{self.title}: {self.reason} Проверить вручную: {self.url}"
+        return f"{line} — {self.hint}" if self.hint else line
 
 
 # 26–27.09.2026: service.nalog.ru answers the «действующие решения о приостановлении»
@@ -25,6 +28,8 @@ ACCOUNT_BLOCKS = ManualCheck(
     title="Блокировки счетов ФНС",
     reason="не проверяются автоматически — сервис ФНС требует ввести код с картинки.",
     url="https://service.nalog.ru/bi.do",
+    # The form also asks for a BIK: that of the bank making the query, so any bank will do.
+    hint="введите ИНН контрагента и БИК любого банка, например вашего.",
 )
 
 MANUAL_CHECKS: tuple[ManualCheck, ...] = (ACCOUNT_BLOCKS,)
