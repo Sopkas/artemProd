@@ -65,6 +65,9 @@ def open_sqlite_repository(
     @event.listens_for(engine, "connect")
     def _enable_foreign_keys(dbapi_connection, _record) -> None:
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
+        # Two writers of one service (a check finishing while another records its spend)
+        # should queue for a few seconds rather than fail at once (review B on #59).
+        dbapi_connection.execute("PRAGMA busy_timeout=5000")
 
     try:
         with engine.begin() as connection:
@@ -87,6 +90,11 @@ class SqliteAnalysisRepository:
         self._engine = engine
         self._clock = clock
         self._closed = False
+
+    @property
+    def engine(self) -> Engine:
+        """The same database other stores of this service live in (S5-03: the AI spend)."""
+        return self._engine
 
     def close(self) -> None:
         self._closed = True
