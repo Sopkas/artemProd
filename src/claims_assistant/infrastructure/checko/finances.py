@@ -1,6 +1,6 @@
 """S3-04: Checko finances section — two comparable years of revenue and net profit.
 
-ASSUMED SCHEMA (pending a real sample; kept here so reconciling is a local change).
+CONFIRMED against the live API on 20.09.2026 (free tariff; see docs/integrations.md).
 Request: ``POST /v2/finances`` with ``{"key", "inn"}``. Response:
 
     {"meta": {"status": "ok"},
@@ -8,8 +8,10 @@ Request: ``POST /v2/finances`` with ``{"key", "inn"}``. Response:
 
 Years are OKUD annual forms keyed by report-line code: 2110 = выручка, 2400 = чистая
 прибыль. Amounts are taken as rubles and tagged with the unit; the adapter only projects
-the two latest *consecutive* years as facts. Ratios (growth, revenue drop) belong to the
-scoring rules (S3-05), not here: this module never divides or infers a trend.
+the two latest *consecutive* years that carry at least one of these lines — a year key
+alone (an empty form, a balance sheet without revenue) is not data. Ratios (growth,
+revenue drop) belong to the scoring rules (S3-05), not here: this module never divides or
+infers a trend.
 """
 
 from datetime import date, datetime
@@ -44,6 +46,7 @@ SOURCE = "checko-finances-v2"
 FINANCES_URL = "https://api.checko.ru/v2/finances"
 UNIT = "RUB"
 _LINES = (("2110", FactKind.REVENUE, "revenue"), ("2400", FactKind.NET_PROFIT, "net-profit"))
+_TITLES = {"revenue": "выручка", "net-profit": "чистая прибыль"}
 
 
 class FinancesTransport(Protocol):
@@ -119,11 +122,16 @@ def _year_facts(inn: str, year: int, line: dict) -> tuple[list[Fact], Evidence |
     return facts, (item if facts else None)
 
 
+def _has_lines(line: dict) -> bool:
+    return any(_amount(line.get(code)) is not None for code, _kind, _name in _LINES)
+
+
 def project_finances(inn: str, years: dict[int, dict], fetched_at: datetime) -> ExternalSnapshot:
-    """Project the two latest consecutive years; otherwise report a partial reason."""
+    """Project the two latest consecutive years with data; otherwise say what is missing."""
     missing = []
-    ordered = sorted(years)
-    pair = next(((y - 1, y) for y in reversed(ordered) if y - 1 in years), None)
+    ordered = sorted(year for year, line in years.items() if _has_lines(line))
+    usable = set(ordered)
+    pair = next(((y - 1, y) for y in reversed(ordered) if y - 1 in usable), None)
     if not ordered:
         chosen: list[int] = []
     elif pair is None:
@@ -131,6 +139,16 @@ def project_finances(inn: str, years: dict[int, dict], fetched_at: datetime) -> 
         chosen = ordered[-1:]
     else:
         chosen = list(pair)
+        if ordered[-1] != pair[1]:
+            missing.append(
+                f"Последний год отчётности ({ordered[-1]}) без предыдущего; "
+                f"динамика — по {pair[0]}–{pair[1]}."
+            )
+        for code, _kind, name in _LINES:
+            present = [year for year in pair if _amount(years[year].get(code)) is not None]
+            if len(present) == 1:
+                absent = pair[0] if present[0] == pair[1] else pair[1]
+                missing.append(f"Нет строки {code} ({_TITLES[name]}) за {absent}.")
 
     facts: list[Fact] = []
     evidence: list[Evidence] = []
