@@ -15,6 +15,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
@@ -69,6 +70,10 @@ class AiAnswer:
     input_tokens: int
     output_tokens: int
     latency_seconds: float
+    # S5-03: the price of this call in roubles, as the provider reported it. None when
+    # the provider does not say — then the money limit cannot be charged, and the run
+    # limits in requests and tokens are what holds.
+    cost_rub: Decimal | None = None
 
 
 @runtime_checkable

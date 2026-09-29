@@ -119,7 +119,11 @@ def link_contracts(
     """
     strict = _index(names, normalize_name)
     loose = _index(names, name_without_form)
-    unnamed = [inn for inn, name in names.items() if not normalize_name(name or "")]
+    # Only worth saying when there is a report to tie: without one, a company the source
+    # does not know simply has no contracts, and a warning about them would be noise.
+    unnamed = (
+        [inn for inn, name in names.items() if not normalize_name(name or "")] if report else []
+    )
 
     by_inn: dict[str, list[ContractDebt]] = {}
     unknown: list[str] = []

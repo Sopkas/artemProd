@@ -16,6 +16,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from claims_assistant.domain.ai_context import Request
@@ -76,10 +77,15 @@ class AiRunLimits:
     max_requests: int = 100  # 50 companies, each with one retry
     max_tokens: int = 400_000  # input + output, as counted by the provider
     max_seconds: float = 600.0
+    # S5-03: what one check may spend. The month is guarded separately (ai_spend), but a
+    # single check must not be able to eat it whole, whatever the package's size.
+    max_rub: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.max_requests <= 0 or self.max_tokens <= 0 or self.max_seconds <= 0:
             raise ValueError("AI run limits must be positive")
+        if self.max_rub is not None and self.max_rub <= 0:
+            raise ValueError("AI money limit must be positive")
 
 
 @dataclass(slots=True)
@@ -87,8 +93,10 @@ class AiBudget:
     max_requests: int
     max_tokens: int
     deadline: datetime
+    max_rub: Decimal | None = None
     requests: int = 0
     tokens: int = 0
+    spent_rub: Decimal = Decimal(0)
     exhausted: bool = field(default=False, init=False)
 
     @classmethod
@@ -97,6 +105,7 @@ class AiBudget:
             max_requests=limits.max_requests,
             max_tokens=limits.max_tokens,
             deadline=now + timedelta(seconds=limits.max_seconds),
+            max_rub=limits.max_rub,
         )
 
     @classmethod
@@ -111,12 +120,21 @@ class AiBudget:
         if self.requests >= self.max_requests or self.tokens >= self.max_tokens:
             self.exhausted = True
             return False
+        if self.max_rub is not None and self.spent_rub >= self.max_rub:
+            self.exhausted = True
+            return False
         self.requests += 1
         return True
 
     def charge(self, answer: AiAnswer) -> None:
         self.tokens += answer.input_tokens + answer.output_tokens
+        # A provider that does not report the price cannot be charged for it; the limits
+        # in requests and tokens are what bounds the run then (S5-03).
+        if answer.cost_rub is not None:
+            self.spent_rub += answer.cost_rub
         if self.tokens >= self.max_tokens:
+            self.exhausted = True
+        if self.max_rub is not None and self.spent_rub >= self.max_rub:
             self.exhausted = True
 
 
