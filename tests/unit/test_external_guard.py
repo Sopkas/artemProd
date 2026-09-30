@@ -370,3 +370,18 @@ async def test_a_closed_source_stays_closed_only_for_that_run(clock, sleeps):
     card = await provider.fetch(CompanyDataRequest(OTHER))
     assert len(inner.calls) == 3
     assert all(s.status is FetchStatus.OK for s in card)
+
+
+async def test_a_spent_daily_limit_is_not_retried_but_closes_the_source(clock, sleeps):
+    """Checko's free tariff answers 403 «Превышен суточный лимит» once the day's requests are
+    spent; the adapter (#70) calls it RATE_LIMITED / daily_limit. Retrying cannot help until
+    tomorrow, so the first company stops the asking at once, without waiting."""
+    daily = {section: (FetchStatus.RATE_LIMITED, "daily_limit") for section in Section}
+    inner = ScriptedProvider([daily])
+    scoped = guard(inner, clock, sleeps, max_retries=2).scoped(RunBudget.unlimited())
+    first = await scoped.fetch(CompanyDataRequest(INN))
+    assert [s.error.code for s in first] == ["daily_limit"] * 3
+    assert len(inner.calls) == 1 and sleeps == []  # no retries, no pauses
+    second = await scoped.fetch(CompanyDataRequest(OTHER))
+    assert len(inner.calls) == 1
+    assert [s.error.code for s in second] == [SOURCE_LIMIT] * 3

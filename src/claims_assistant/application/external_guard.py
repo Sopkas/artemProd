@@ -30,6 +30,9 @@ BUDGET_EXHAUSTED = "budget_exhausted"
 BUDGET_MESSAGE = "Лимит времени или запросов проверки исчерпан; раздел не проверен."
 TRANSIENT_CODES = frozenset({"timeout", "network_error", "http_error", "rate_limited"})
 SOURCE_LIMIT = "source_limit"
+# The adapter's code for a spent daily quota (Checko: 403 «Превышен суточный лимит», #70).
+# Not retried — nothing changes until tomorrow — but it closes the source like a 429 does.
+DAILY_LIMIT = "daily_limit"
 SOURCE_LIMIT_MESSAGE = (
     "Источник данных ответил, что лимит запросов исчерпан; раздел не проверен. "
     "Повторите проверку позже."
@@ -205,6 +208,8 @@ class _ScopedProvider:
 
 
 def _is_transient(snapshot: ExternalSnapshot) -> bool:
+    if snapshot.error is not None and snapshot.error.code == DAILY_LIMIT:
+        return False
     if snapshot.status is FetchStatus.RATE_LIMITED:
         return True
     return snapshot.error is not None and snapshot.error.code in TRANSIENT_CODES
