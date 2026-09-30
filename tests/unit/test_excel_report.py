@@ -229,6 +229,16 @@ def test_about_sheet_names_run_mode_rules_and_limits():
     assert rows["Версия ИИ"] == "ИИ-пояснения не используются"
 
 
+def test_about_sheet_names_what_is_not_checked_automatically():
+    """S7-03: account blocks are a manual check, said with the page to open."""
+    rows = data_rows(open_report(live_report([]))["О проверке"])
+    manual = [value for key, value, *_ in rows if key == "Не проверяется автоматически"]
+    assert len(manual) == 1
+    assert manual[0].startswith("Блокировки счетов ФНС: не проверяются автоматически")
+    assert "https://service.nalog.ru/bi.do" in manual[0]
+    assert "БИК любого банка" in manual[0]
+
+
 @pytest.mark.parametrize(
     "name", ['=HYPERLINK("http://example.org","x")', "=1+1", "+7 (900)", "@SUM(A1)"]
 )
