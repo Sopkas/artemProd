@@ -98,6 +98,18 @@ class RecommendationProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class PreparedProvider(Protocol):
+    """A provider with something to learn before its calls (polza: what the model accepts).
+
+    ``prepare`` runs on its own timeout, never out of a call's (review B on #63), and is
+    cheap once there is nothing left to learn, so the guard may call it before every call.
+    Expected failures stay inside: the calls then go out with what every model accepts.
+    """
+
+    async def prepare(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ExplanationOutcome:
     """What one attempt produced: an accepted explanation, a rejected answer or no answer."""

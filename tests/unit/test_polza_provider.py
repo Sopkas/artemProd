@@ -222,10 +222,17 @@ def provider(transport, **kwargs) -> PolzaRecommendationProvider:
     return PolzaRecommendationProvider(KEY, transport=transport, **kwargs)
 
 
+async def ready(transport, **kwargs) -> PolzaRecommendationProvider:
+    """The client as the guard leaves it before a call: the catalogue already asked."""
+    client = provider(transport, **kwargs)
+    await client.prepare()
+    return client
+
+
 async def test_the_request_carries_the_instruction_the_context_and_our_limits():
     transport = Transport()
     request = build_request(context())
-    await provider(transport).explain(request, LIMITS)
+    await (await ready(transport)).explain(request, LIMITS)
     (payload,) = transport.calls
     assert payload["model"] == DEFAULT_MODEL
     assert payload["messages"][0] == {"role": "system", "content": request.instruction}
@@ -426,7 +433,8 @@ async def test_a_reasoning_model_gets_no_temperature_and_a_low_reasoning_effort(
     """Ninety of the catalogue's chat models answer 400 to a temperature, and a reasoning
     model left at its own effort can spend our whole output limit before it answers."""
     transport = Transport(catalog=GPT_5_MINI)
-    await provider(transport, model="openai/gpt-5-mini").explain(build_request(context()), LIMITS)
+    client = await ready(transport, model="openai/gpt-5-mini")
+    await client.explain(build_request(context()), LIMITS)
     (payload,) = transport.calls
     assert "temperature" not in payload
     assert payload["reasoning"] == {"effort": "low"}
@@ -436,15 +444,14 @@ async def test_a_reasoning_model_gets_no_temperature_and_a_low_reasoning_effort(
 
 async def test_a_model_without_reasoning_gets_no_reasoning_block():
     transport = Transport(catalog=GPT_41_MINI)
-    await provider(transport).explain(build_request(context()), LIMITS)
+    await (await ready(transport)).explain(build_request(context()), LIMITS)
     assert "reasoning" not in transport.calls[0] and transport.calls[0]["temperature"] == 0
 
 
 async def test_a_model_that_takes_no_schema_is_asked_for_json_in_words_whatever_the_setting():
     transport = Transport(catalog=GEMINI_25_FLASH)
-    await provider(transport, model="google/gemini-2.5-flash").explain(
-        build_request(context()), LIMITS
-    )
+    client = await ready(transport, model="google/gemini-2.5-flash")
+    await client.explain(build_request(context()), LIMITS)
     (payload,) = transport.calls
     assert "response_format" not in payload
     assert "JSON" in payload["messages"][0]["content"]
@@ -453,7 +460,8 @@ async def test_a_model_that_takes_no_schema_is_asked_for_json_in_words_whatever_
 async def test_the_catalogue_is_asked_once_per_model():
     transport = Transport()
     client = provider(transport)
-    for _ in range(2):
+    for _ in range(2):  # as the guard does: prepare, then the call
+        await client.prepare()
         await client.explain(build_request(context()), LIMITS)
     assert transport.fetched == [f"https://polza.ai/api/v1/models/{DEFAULT_MODEL}"]
     assert [call["temperature"] for call in transport.calls] == [0, 0]
@@ -470,6 +478,7 @@ async def test_without_the_catalogue_only_what_every_model_accepts_is_sent(catal
     transport = Transport(catalog=catalog)
     client = provider(transport, clock=lambda: 1000.0)
     for _ in range(2):
+        await client.prepare()
         await client.explain(build_request(context()), LIMITS)
     assert len(transport.calls) == 2 and len(transport.fetched) == 1
     for payload in transport.calls:
@@ -482,12 +491,12 @@ async def test_a_failed_catalogue_is_asked_again_five_minutes_later():
     now = [1000.0]
     transport = Transport(catalog=OSError("Cannot connect"))
     client = provider(transport, clock=lambda: now[0])
-    await client.explain(build_request(context()), LIMITS)
+    await client.prepare()  # the guard's step before each call
     now[0] += 299
-    await client.explain(build_request(context()), LIMITS)
+    await client.prepare()
     assert len(transport.fetched) == 1
     now[0] += 2  # 301 s after the failure
-    await client.explain(build_request(context()), LIMITS)
+    await client.prepare()
     assert len(transport.fetched) == 2
 
 
@@ -502,7 +511,8 @@ async def test_parameters_given_up_front_are_used_without_asking_the_catalogue()
 
 async def test_the_reasoning_effort_can_be_chosen():
     transport = Transport(catalog=GPT_5_MINI)
-    await provider(transport, reasoning_effort="minimal").explain(build_request(context()), LIMITS)
+    client = await ready(transport, reasoning_effort="minimal")
+    await client.explain(build_request(context()), LIMITS)
     assert transport.calls[0]["reasoning"] == {"effort": "minimal"}
 
 
@@ -518,3 +528,50 @@ async def test_a_refused_request_hands_its_body_to_whoever_asked_for_it():
         await client.explain(build_request(context()), LIMITS)
     assert seen == [(400, body)]
     assert "temperature" not in failure.value.message
+
+
+# --- the catalogue is read on its own time, not the model's (review B on #63) ------------
+
+
+class SlowCatalogue(Transport):
+    """The catalogue answers after a while — it does in real life, every other time."""
+
+    def __init__(self, delay: float, **kwargs):
+        super().__init__(**kwargs)
+        self._delay = delay
+
+    async def fetch(self, url, timeout):
+        import asyncio
+
+        await asyncio.sleep(self._delay)
+        return await super().fetch(url, timeout)
+
+
+def guarded(client, timeout: float):
+    from claims_assistant.application.ai_guard import AiPolicy, GuardedRecommendationProvider
+
+    async def no_sleep(_seconds):
+        return None
+
+    policy = AiPolicy(timeout_seconds=timeout, max_retries=0)
+    return GuardedRecommendationProvider(client, policy, sleep=no_sleep)
+
+
+async def test_a_slow_catalogue_does_not_eat_the_time_the_model_has_to_answer():
+    """The catalogue was read inside the guard's timeout: with 30 s for the call and up to
+    15 s for the catalogue, the model was left 15 s and the explanation became a template."""
+    transport = SlowCatalogue(0.3)
+    answer_ = await guarded(provider(transport), timeout=0.2).explain(
+        build_request(context()), LIMITS
+    )
+    assert answer_.text
+    assert transport.calls[0]["temperature"] == 0  # the catalogue was read, then used
+
+
+async def test_after_the_catalogue_failed_the_call_does_not_wait_for_it_again():
+    transport = SlowCatalogue(0.3, catalog=OSError("Cannot connect"))
+    answer_ = await guarded(provider(transport), timeout=0.2).explain(
+        build_request(context()), LIMITS
+    )
+    assert answer_.text
+    assert "temperature" not in transport.calls[0]  # what every model accepts
