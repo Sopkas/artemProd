@@ -42,8 +42,17 @@ from claims_assistant.domain.scoring import (
 
 # Both versions go to the report and the stored explanation (S5-02): a changed context or
 # instruction must be visible in what was produced with it.
-CONTEXT_VERSION = "1"
+CONTEXT_VERSION = "2"
 INSTRUCTION_VERSION = "2"
+
+# The rules' levels as the report names them (lower case: they go inside a sentence).
+PRIORITY_WORDS = {
+    "critical": "критический",
+    "high": "высокий",
+    "medium": "средний",
+    "low": "низкий",
+    "unknown": "недостаточно данных",
+}
 
 MAX_COMMENTS = 20  # the latest ones; the rest are counted, not sent
 MAX_COMMENT_CHARS = 500
@@ -195,7 +204,9 @@ class RecommendationContext:
             "rules_version": self.rules_version,
             **who,
             "analysis_date": self.analysis_date.isoformat(),
-            "priority": self.priority,
+            # The word, not the code: a model repeats what it is given, and «high» in
+            # quotes is not what a specialist reads (A on #72, live bot 30.09).
+            "priority": PRIORITY_WORDS.get(self.priority, self.priority),
             "next_step": self.next_step,
             "base_complete": self.base_complete,
             "values": [_value_dict(value) for value in self.values],

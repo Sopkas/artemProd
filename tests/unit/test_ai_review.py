@@ -153,7 +153,7 @@ def test_an_invented_date_is_rejected():
     [
         ("Основание revenue-2025: выручка упала на 40%.", "revenue-2025"),
         ("Сработал сигнал revenue_drop_30.", "revenue_drop_30"),
-        ("Просрочка (internal-overdue) 75 дн.", "internal-overdue"),
+        ("Показатель internal-overdue равен 75 дн.", "internal-overdue"),
     ],
 )
 def test_an_internal_id_in_the_text_is_its_own_rejection(text, found):
@@ -161,6 +161,57 @@ def test_an_internal_id_in_the_text_is_its_own_rejection(text, found):
     result = review_answer(answer(explanation=text), context())
     assert code(result) == RejectionCode.INTERNAL_ID
     assert result.detail == found
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Просрочка 75 дней (internal-overdue), выручка упала на 40% (revenue-2025).",
+        "Просрочка 75 дней (основания: internal-overdue, internal-debt).",
+        "Просрочка 75 дней (основание: internal-overdue).",
+        "Просрочка 75 дней. Основания: internal-overdue, revenue_drop_30.",
+    ],
+)
+def test_a_citation_of_known_ids_is_cut_not_rejected(text):
+    """A on #72: 20 correct answers of the S5-07 run were lost to «(internal-overdue)».
+    The IDs are checked in «grounds»; the specialist reads the sentence without them."""
+    result = review_answer(answer(explanation=text), context())
+    assert isinstance(result, Explanation), result
+    assert "internal-" not in result.text and "revenue" not in result.text
+    assert result.text.startswith("Просрочка 75 дней") and "( " not in result.text
+
+
+def test_a_citation_of_an_unknown_id_is_not_cut():
+    result = review_answer(answer(explanation="Просрочка 75 дней (fact-invented-9)."), context())
+    assert code(result) == RejectionCode.NEW_AMOUNT
+
+
+@pytest.mark.parametrize(
+    "text,accepted",
+    [
+        ("Просрочка более 70 дней.", True),  # 75 in the data
+        ("Просрочка свыше 60 дней.", True),
+        ("Просрочка не менее 75 дней.", True),
+        ("Просрочка менее 80 дней.", True),
+        ("Нет платежей более 92 дней.", False),  # not true of 92, the largest near it
+        ("Просрочка более 30 дней.", False),  # true, but too far to be a retelling
+        ("Просрочка более 100 дней.", False),
+        ("Просрочка 70 дней.", False),  # no bound: a plain new number
+    ],
+)
+def test_a_rounded_bound_is_a_retelling_of_a_close_number(text, accepted):
+    """A on #72, live bot 30.09: «более 90 дней» at 91 and «более 80 дней» at 82."""
+    result = review_answer(answer(explanation=text), context())
+    assert isinstance(result, Explanation) is accepted, result
+
+
+def test_a_date_in_words_is_a_date():
+    """A on #72: «25 сентября 2026 года» used to be rejected as the new number 25."""
+    ctx = context(interactions=[talk()])
+    for text in ("Клиент обещал оплату до 15 сентября 2026 года.", "Оплата до 15 сентября."):
+        assert isinstance(review_answer(answer(explanation=text), ctx), Explanation), text
+    invented = review_answer(answer(explanation="Оплата ожидается 1 декабря 2026 г."), ctx)
+    assert code(invented) == RejectionCode.NEW_DATE and invented.detail == "01.12.2026"
 
 
 def test_an_interaction_id_may_be_cited_and_is_not_a_number():
