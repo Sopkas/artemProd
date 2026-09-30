@@ -28,6 +28,7 @@ from claims_assistant.domain.external import (
     FactKind,
 )
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.manual_checks import MANUAL_CHECKS
 from claims_assistant.domain.plural import companies as _companies
 from claims_assistant.domain.report import DEMO_SCORE_NOTE, AnalysisReport, ReportRow
 from claims_assistant.domain.scoring import (
@@ -430,6 +431,7 @@ def _about(report: AnalysisReport) -> list[tuple[object, ...]]:
         ("Замечания импорта", f"ошибок: {errors}, предупреждений: {warnings}"),
     ]
     rows.extend(("Состав пакета", line) for line in meta.package)
+    rows.extend(("Не проверяется автоматически", check.line()) for check in MANUAL_CHECKS)
     rows.append(
         (
             "Ограничения",
