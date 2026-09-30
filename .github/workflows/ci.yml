@@ -1,8 +1,22 @@
 name: CI
 
+# A pull request is checked once, on the pull_request event; push runs only for main.
+# Running on both would check every push to a PR branch twice: concurrency does not cancel
+# the pair, because push and pull_request runs have different refs.
+# A change that touches only documentation is not checked.
+#
+# If the repository ever becomes private again, minutes will cost money (a Windows minute
+# counts twice): the recipe for cutting them is in the description of PR #62.
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   workflow_dispatch:
 
 permissions:
