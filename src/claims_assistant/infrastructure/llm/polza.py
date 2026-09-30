@@ -48,7 +48,7 @@ PROVIDER_NAME = "polza"
 DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_URL = "https://polza.ai/api/v1/chat/completions"
 CATALOG_URL = "https://polza.ai/api/v1/models"  # public: GET /<model id>, no key
-CATALOG_TIMEOUT_SECONDS = 15.0  # it comes out of the explanation's own timeout
+CATALOG_TIMEOUT_SECONDS = 15.0  # its own: read in prepare(), outside a call's timeout
 # The task is to explain facts already given, not to solve anything: a low effort keeps a
 # reasoning model inside the output limit and the price.
 REASONING_EFFORT = "low"
@@ -272,15 +272,21 @@ class PolzaRecommendationProvider:
         self._effort = reasoning_effort
         self._on_failure = on_failure
 
-    async def _model_parameters(self, limits: AiLimits) -> ModelParameters:
+    async def prepare(self) -> None:
+        """What the model accepts, from the catalogue, on the catalogue's own timeout.
+
+        The guard calls this before every call and outside the call's timeout (review B on
+        #63): the catalogue answers in seconds or not at all, and it used to take those
+        seconds from the model. Found once, the entry is kept for the process; until then
+        the calls go out with what every model accepts.
+        """
         if self._parameters is not None:
-            return self._parameters
-        timeout = min(limits.timeout_seconds, CATALOG_TIMEOUT_SECONDS)
-        found = await lookup_parameters(self._transport, self.model, timeout)
+            return
+        found = await lookup_parameters(self._transport, self.model, CATALOG_TIMEOUT_SECONDS)
         if found is None:
-            # Not remembered: the catalogue is asked again with the next call.
+            # Not remembered: the catalogue is asked again before the next call.
             logger.info("ai_catalog provider=%s model=%s found=no", self.name, self.model)
-            return UNKNOWN_PARAMETERS
+            return
         logger.info(
             "ai_catalog provider=%s model=%s temperature=%s response_format=%s reasoning=%s",
             self.name,
@@ -290,7 +296,6 @@ class PolzaRecommendationProvider:
             found.reasoning,
         )
         self._parameters = found
-        return found
 
     def _payload(
         self, request: Request, limits: AiLimits, parameters: ModelParameters
@@ -321,7 +326,8 @@ class PolzaRecommendationProvider:
         return payload
 
     async def explain(self, request: Request, limits: AiLimits) -> AiAnswer:
-        payload = self._payload(request, limits, await self._model_parameters(limits))
+        # The call never waits for the catalogue: that is prepare()'s, on its own time.
+        payload = self._payload(request, limits, self._parameters or UNKNOWN_PARAMETERS)
         started = time.monotonic()
         try:
             status, body = await self._transport.request(
