@@ -26,9 +26,13 @@ would put someone else's debt into a claim letter.
 """
 
 import re
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 
+from claims_assistant.domain.debt_report import SHEET_NAME as DEBT_REPORT_SHEET
 from claims_assistant.domain.debt_report import ContractDebt, CounterpartyDebt
+from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.sheet_rules import issue
 
 _LEGAL_FORMS = frozenset(
     {
@@ -152,6 +156,67 @@ def link_contracts(
         unnamed=tuple(sorted(set(unnamed))),
         without_form=tuple(without_form),
     )
+
+
+def merge_repeats(
+    report: Sequence[CounterpartyDebt],
+) -> tuple[tuple[CounterpartyDebt, ...], tuple[ImportIssue, ...]]:
+    """One report, one debtor: entries of one name in one file are one company.
+
+    The customer's report lists a client under every sales point it deals with, and the
+    print may repeat its own table under a filter («Отбор: …»). So the entries of one name
+    are joined, in the order they come, and a contract printed again is kept once — the
+    first time, with the first table's values (the repeats may come without them). A name
+    met under two sales points is said out loud: two companies can share a printed name.
+    Repeats across *different* reports are another matter, handled by the package review.
+    """
+    order: list[str] = []
+    joined: dict[str, CounterpartyDebt] = {}
+    groups: dict[str, list[str]] = {}
+    repeated = 0
+    for counterparty in report:
+        key = normalize_name(counterparty.name)
+        if counterparty.group and counterparty.group not in groups.setdefault(key, []):
+            groups[key].append(counterparty.group)
+        first = joined.get(key)
+        if first is None:
+            order.append(key)
+            joined[key] = counterparty
+            continue
+        known = {contract.name for contract in first.contracts}
+        new = tuple(contract for contract in counterparty.contracts if contract.name not in known)
+        repeated += len(counterparty.contracts) - len(new)
+        joined[key] = replace(
+            first,
+            inn=first.inn or counterparty.inn,
+            note=first.note or counterparty.note,
+            contracts=first.contracts + new,
+        )
+    if len(order) == len(report):
+        return tuple(report), ()
+    issues = [
+        issue(
+            DEBT_REPORT_SHEET,
+            "debt_report_company_in_several_groups",
+            IssueSeverity.WARNING,
+            f"«{joined[key].name}» есть в отчёте в нескольких точках продаж "
+            f"({', '.join(groups[key])}); договоры объединены — проверьте, что это одна "
+            "организация.",
+        )
+        for key in order
+        if len(groups.get(key, ())) > 1
+    ]
+    if repeated:
+        issues.append(
+            issue(
+                DEBT_REPORT_SHEET,
+                "debt_report_contracts_repeated",
+                IssueSeverity.WARNING,
+                f"В отчёте повторяются договоры ({repeated}) — например, в таблицах «Отбор»; "
+                "каждый учтён один раз.",
+            )
+        )
+    return tuple(joined[key] for key in order), tuple(issues)
 
 
 def worst_days(contracts: tuple[ContractDebt, ...]) -> int | None:

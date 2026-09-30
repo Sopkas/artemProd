@@ -765,19 +765,44 @@ async def test_the_stored_file_is_the_export_translated_into_our_sheet(
     assert all(row.inn == INN_1 for row in result.rows)  # whose file it was is remembered
 
 
-async def test_an_export_for_an_organization_outside_the_package_is_refused(
+async def test_an_inn_outside_the_package_is_asked_again_before_the_file(
     setup, bot, update_factory
 ):
+    """Found on 30.09.2026: the INN was checked only after the file, the answer said «fix
+    the file», and the INN could be changed only by cancelling the whole step."""
     dispatcher, repository = await package_ready(setup, bot, update_factory)
     reply = await to_export(dispatcher, bot, update_factory, inn="7736050003")
+    assert "нет в файле «Контрагенты»" in reply.text and "7736050003" not in reply.text
+    assert buttons(reply) == ["Отмена"]
+    reply = await send(dispatcher, bot, update_factory, INN_1)
     assert reply.text == texts.EXPORT_FILE_PROMPT
     reply = await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xlsx")
-    assert "нет в файле «Контрагенты»" in reply.text
-    assert not [
+    assert "Платежей принято: 2" in reply.text
+    payments = [
         file
         for file in (await repository.list_runs(OWNER))[0].files
         if file.kind.value == "payments"
     ]
+    assert len(payments) == 1
+
+
+async def test_an_export_past_the_analysis_date_covers_the_days_up_to_it(
+    setup, bot, update_factory
+):
+    """Payments after the analysis date are left out, so the export cannot vouch for them
+    either: the period it covers ends on the analysis date (01.09.2026 here)."""
+    from claims_assistant.domain.analysis import FileKind
+    from claims_assistant.domain.external import Period
+
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    await to_export(dispatcher, bot, update_factory)
+    data = export_file(end="05.10.2026 9:38:50")
+    reply = await send_document(dispatcher, bot, update_factory, data, name="1c.xlsx")
+    assert "Период выгрузки из файла: 01.06.2026–05.10.2026" in reply.text
+    assert "• Платежи — строк: 2, период 01.06.2026–01.09.2026" in reply.text
+    run = (await repository.list_runs(OWNER))[0]
+    (payments,) = [file for file in run.files if file.kind is FileKind.PAYMENTS]
+    assert payments.coverage == Period(date(2026, 6, 1), date(2026, 9, 1))
 
 
 async def test_a_wrong_inn_is_asked_again_without_repeating_it(setup, bot, update_factory):
