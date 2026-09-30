@@ -49,7 +49,13 @@ from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
 from .contract_link import LinkedContracts, link_contracts
 from .explanations import EXPLANATION_STEP, StoredExplanation
-from .external_guard import BUDGET_EXHAUSTED, SOURCE_LIMIT, TRANSIENT_CODES, RunBudget
+from .external_guard import (
+    BUDGET_EXHAUSTED,
+    DAILY_LIMIT,
+    SOURCE_LIMIT,
+    TRANSIENT_CODES,
+    RunBudget,
+)
 from .imports import SheetReader
 from .internal_context import payment_periods
 from .package_checks import PackageIntegrityError, PackageReview, review_package
@@ -128,8 +134,8 @@ class RunSummary:
     # S5-03: companies left without an accepted AI explanation while a provider was
     # configured (model unavailable, answer rejected, AI budget exhausted).
     explanations_missing: int = 0
-    # The source said its request limit was spent (429 after the guard's retries): the rest
-    # of the check was not asked; the user is told to come back tomorrow.
+    # The source said its daily request limit was spent (``daily_limit``, Checko's 403): the
+    # rest of the check was not asked; the user is told to come back tomorrow.
     source_limited: bool = False
     # S5-03: the month's money limit was already reached, so the model was not asked at
     # all. Kept apart from the count above: «не спрашивали» and «спросили, не вышло» are
@@ -651,10 +657,9 @@ def _hit_budget(snapshot: ExternalSnapshot) -> bool:
 
 
 def _hit_source_limit(snapshot: ExternalSnapshot) -> bool:
-    """The source's own limit: its 429 after the retries, or the guard's placeholder."""
-    return snapshot.status is FetchStatus.RATE_LIMITED or (
-        snapshot.error is not None and snapshot.error.code == SOURCE_LIMIT
-    )
+    """The source's daily limit: its own answer (``daily_limit``) or the guard's placeholder
+    for the companies after it. A 429 burst is not this (review B on #65)."""
+    return snapshot.error is not None and snapshot.error.code in (DAILY_LIMIT, SOURCE_LIMIT)
 
 
 def _is_open(snapshot: ExternalSnapshot) -> bool:

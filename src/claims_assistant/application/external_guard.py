@@ -31,11 +31,12 @@ BUDGET_MESSAGE = "Лимит времени или запросов провер
 TRANSIENT_CODES = frozenset({"timeout", "network_error", "http_error", "rate_limited"})
 SOURCE_LIMIT = "source_limit"
 # The adapter's code for a spent daily quota (Checko: 403 «Превышен суточный лимит», #70).
-# Not retried — nothing changes until tomorrow — but it closes the source like a 429 does.
+# Not retried — nothing changes until tomorrow — and it closes the source for the rest of
+# the check. A 429 is not this: it is a burst, retried, and never closes the source.
 DAILY_LIMIT = "daily_limit"
 SOURCE_LIMIT_MESSAGE = (
-    "Источник данных ответил, что лимит запросов исчерпан; раздел не проверен. "
-    "Повторите проверку позже."
+    "Источник данных ответил, что суточный лимит запросов исчерпан; раздел не проверен. "
+    "Повторите проверку завтра."
 )
 
 
@@ -75,8 +76,8 @@ class RunBudget:
     deadline: datetime
     used: int = 0
     exhausted: bool = field(default=False, init=False)
-    # The source itself said «enough» (still 429 after the retries): on the free tariff
-    # that is the daily limit, and every next company of this check would get the same.
+    # The source said its daily limit is spent (``daily_limit``): every next company of
+    # this check would get the same until tomorrow, so it is not asked again in this run.
     source_closed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -193,7 +194,9 @@ class GuardedCompanyDataProvider:
             )
             pending = retry
 
-        if any(snapshot.status is FetchStatus.RATE_LIMITED for snapshot in results.values()):
+        # Only the day's limit closes the source (review B on #65): a 429 left after the
+        # retries is a burst, and the next company may well get through.
+        if any(_spent_for_today(snapshot) for snapshot in results.values()):
             budget.source_closed = True
         return tuple(results[section] for section in request.sections)
 
@@ -205,6 +208,10 @@ class _ScopedProvider:
 
     async def fetch(self, request: CompanyDataRequest) -> tuple[ExternalSnapshot, ...]:
         return await self._guard.fetch_within(request, self._budget)
+
+
+def _spent_for_today(snapshot: ExternalSnapshot) -> bool:
+    return snapshot.error is not None and snapshot.error.code == DAILY_LIMIT
 
 
 def _is_transient(snapshot: ExternalSnapshot) -> bool:
