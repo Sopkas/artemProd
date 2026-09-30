@@ -149,6 +149,34 @@ def test_an_invented_date_is_rejected():
 
 
 @pytest.mark.parametrize(
+    "text,found",
+    [
+        ("Основание revenue-2025: выручка упала на 40%.", "revenue-2025"),
+        ("Сработал сигнал revenue_drop_30.", "revenue_drop_30"),
+        ("Просрочка (internal-overdue) 75 дн.", "internal-overdue"),
+    ],
+)
+def test_an_internal_id_in_the_text_is_its_own_rejection(text, found):
+    """Review A on #63: such IDs used to come out as new_amount «-0» or «30»."""
+    result = review_answer(answer(explanation=text), context())
+    assert code(result) == RejectionCode.INTERNAL_ID
+    assert result.detail == found
+
+
+def test_an_interaction_id_may_be_cited_and_is_not_a_number():
+    ctx = context(interactions=[talk()])
+    cited = review_answer(answer(explanation="В записи INT-8 клиент обещал оплату."), ctx)
+    assert isinstance(cited, Explanation)
+
+
+def test_an_id_does_not_lend_its_digits_to_the_text():
+    """«revenue-2025» in the context is a name: it neither makes -2025 known nor glues to
+    the next number, so a new number is still new."""
+    ctx = context()
+    assert code(review_answer(answer(explanation="Разница 20252025 руб."), ctx)) == "new_amount"
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "Приоритет должен быть ниже: организация платит.",

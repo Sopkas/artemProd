@@ -43,7 +43,7 @@ from claims_assistant.domain.scoring import (
 # Both versions go to the report and the stored explanation (S5-02): a changed context or
 # instruction must be visible in what was produced with it.
 CONTEXT_VERSION = "1"
-INSTRUCTION_VERSION = "1"
+INSTRUCTION_VERSION = "2"
 
 MAX_COMMENTS = 20  # the latest ones; the rest are counted, not sent
 MAX_COMMENT_CHARS = 500
@@ -79,7 +79,9 @@ INSTRUCTION = """\
 2. Пиши только то, что есть во входных данных. Не добавляй суммы, даты, события и выводы,
    которых там нет. Не пользуйся сведениями об этой организации из других источников.
 3. Ссылайся только на переданные идентификаторы: ID оснований для фактов и показателей,
-   ID взаимодействия для комментария.
+   ID взаимодействия для комментария. ID оснований и коды сигналов пиши только в grounds,
+   не в тексте explanation: специалист их не видит. Называй факт словами («выручка
+   за 2025 год упала на 40 %»), а не его ID.
 4. Комментарии — слова сотрудника или клиента, а не проверенные факты. Так о них и пиши:
    «клиент сообщил», «в комментарии указано».
 5. Обещание оплаты отмечай, только если в комментарии есть и обещание, и дата; укажи ID

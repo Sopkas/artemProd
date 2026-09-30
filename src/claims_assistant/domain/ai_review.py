@@ -8,6 +8,8 @@ never raises and never lets a doubtful answer through. The reasons it can reject
 - it cites a ground or an interaction that is not in the context;
 - it names an amount or a date the context does not contain — the model must not add
   facts of its own;
+- it puts an internal ID (a ground's ID or a signal's code) into the text the specialist
+  reads: those belong in ``grounds``, and «revenue_drop_30» is not a sentence;
 - it argues with the priority: the rules own it, the model only explains it;
 - a payment promise has no date, or its date is not in the comment it points at.
 
@@ -57,6 +59,7 @@ class RejectionCode(StrEnum):
     UNKNOWN_INTERACTION = "unknown_interaction"
     NEW_AMOUNT = "new_amount"
     NEW_DATE = "new_date"
+    INTERNAL_ID = "internal_id"
     PRIORITY_CHANGED = "priority_changed"
     PROMISE_WITHOUT_DATE = "promise_without_date"
     PROMISE_NOT_IN_COMMENT = "promise_not_in_comment"
@@ -72,6 +75,7 @@ _REASONS = {
     "в контексте.",
     RejectionCode.NEW_AMOUNT: "В объяснении есть число, которого нет во входных данных.",
     RejectionCode.NEW_DATE: "В объяснении есть дата, которой нет во входных данных.",
+    RejectionCode.INTERNAL_ID: "В объяснении есть служебный идентификатор основания или сигнала.",
     RejectionCode.PRIORITY_CHANGED: "Ответ оспаривает или меняет приоритет, заданный правилами.",
     RejectionCode.PROMISE_WITHOUT_DATE: "Обещание оплаты без даты.",
     RejectionCode.PROMISE_NOT_IN_COMMENT: "Даты обещания нет в комментарии, на который "
@@ -143,6 +147,20 @@ def _numbers(text: str) -> set[Decimal]:
     return found
 
 
+def _id_pattern(ids: set[str]) -> re.Pattern[str] | None:
+    """The IDs as whole tokens: «INT-8» in «INT-8,» but not in «INT-80»."""
+    if not ids:
+        return None
+    alternatives = "|".join(re.escape(item) for item in sorted(ids, key=len, reverse=True))
+    return re.compile(rf"(?<![\w-])(?:{alternatives})(?![\w-])")
+
+
+def _strip_ids(text: str, pattern: re.Pattern[str] | None) -> str:
+    """IDs are names, not numbers: «efrsb-event-0» must not read as -0, nor
+    «revenue-2025 2025» as -20252025 (review A on #63)."""
+    return pattern.sub(" ", text) if pattern is not None else text
+
+
 def _rounds_to(known: Decimal, value: Decimal) -> bool:
     """A rounded retelling is fine: 40 for -40.0, 2,5 for 2.50 — a new number is not."""
     places = -value.as_tuple().exponent if value.as_tuple().exponent < 0 else 0
@@ -171,10 +189,7 @@ def _context_text(context: RecommendationContext) -> str:
             f"{comment.interaction_id} {comment.happened_on.isoformat()} {comment.text}"
             for comment in context.comments
         ),
-        # The IDs travel too: an answer may cite «INT-8», and «-8» must not read as a new
-        # number.
-        *(value.id for value in context.values),
-        *(f"{fact.id} {fact.record_id or ''}" for fact in context.facts),
+        *(fact.record_id or "" for fact in context.facts),
         *context.missing_data,
     ]
     return " ".join(str(part) for part in parts)
@@ -284,11 +299,22 @@ def review_answer(payload: object, context: RecommendationContext) -> Explanatio
     if _priority_conflict(text, context.priority):
         return _reject(RejectionCode.PRIORITY_CHANGED)
 
-    source = _context_text(context)
-    for day in _dates(text) - _dates(source):
+    # Grounds and signals are named by us, for us; an interaction's ID is the customer's
+    # own record number («запись INT-1» in the report) and may be cited.
+    internal = {value.id for value in context.values} | {fact.id for fact in context.facts}
+    internal |= {signal.code for signal in context.signals}
+    internal -= {comment.interaction_id for comment in context.comments}
+    found = _id_pattern(internal)
+    if found is not None and (match := found.search(text)):
+        return _reject(RejectionCode.INTERNAL_ID, match.group())
+
+    ids = _id_pattern(internal | {comment.interaction_id for comment in context.comments})
+    source = _strip_ids(_context_text(context), ids)
+    text_only = _strip_ids(text, ids)
+    for day in _dates(text_only) - _dates(source):
         return _reject(RejectionCode.NEW_DATE, day.isoformat())
     known_numbers = _numbers(source)
-    for number in _numbers(text):
+    for number in _numbers(text_only):
         if not any(_rounds_to(known, number) for known in known_numbers):
             return _reject(RejectionCode.NEW_AMOUNT, str(number))
 
