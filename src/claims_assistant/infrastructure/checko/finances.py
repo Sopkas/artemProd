@@ -149,6 +149,12 @@ def project_finances(inn: str, years: dict[int, dict], fetched_at: datetime) -> 
             if len(present) == 1:
                 absent = pair[0] if present[0] == pair[1] else pair[1]
                 missing.append(f"Нет строки {code} ({_TITLES[name]}) за {absent}.")
+    # A later year that came without either line is a fact, not noise (review A on #71).
+    empty = [year for year in sorted(years) if ordered and year > ordered[-1]]
+    if empty:
+        shown = ", ".join(str(year) for year in empty)
+        tail = f"; динамика — по {pair[0]}–{pair[1]}." if pair else "."
+        missing.append(f"Отчётность за {shown} без строк 2110 и 2400{tail}")
 
     facts: list[Fact] = []
     evidence: list[Evidence] = []

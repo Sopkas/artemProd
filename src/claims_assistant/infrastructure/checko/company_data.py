@@ -310,8 +310,14 @@ class CheckoCompanyDataProvider:
         if page > 1:
             # Earlier pages already came: their messages are a signal and cost requests, so
             # a later page failing leaves the sample partial instead of the section lost.
+            # The failure rides along: the answer is not final and a later run may finish it.
             return bankruptcy.project_bankruptcy(
-                request.inn, records, fetched_at, complete=False, unreadable=0
+                request.inn,
+                records,
+                fetched_at,
+                complete=False,
+                unreadable=0,
+                interrupted=ProviderError(code, message),
             )
         return _failure(request.inn, Section.BANKRUPTCY, fetched_at, status, code, message)
 

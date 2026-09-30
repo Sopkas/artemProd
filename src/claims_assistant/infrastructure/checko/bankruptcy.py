@@ -35,6 +35,7 @@ from claims_assistant.domain.external import (
     Fact,
     FactKind,
     FetchStatus,
+    ProviderError,
     Section,
 )
 from claims_assistant.infrastructure.checko.errors import (
@@ -144,6 +145,7 @@ def project_bankruptcy(
     *,
     complete: bool,
     unreadable: int,
+    interrupted: ProviderError | None = None,
 ) -> ExternalSnapshot:
     """Build the section snapshot from the aggregated records across fetched pages."""
     facts = []
@@ -207,4 +209,5 @@ def project_bankruptcy(
         facts=tuple(facts),
         evidence=tuple(evidence),
         missing=tuple(missing),
+        interrupted=interrupted,
     )

@@ -147,6 +147,7 @@ async def test_bankruptcy_marks_partial_when_pages_exceed_budget():
     )
     assert transport.calls == [1, 2]  # stopped at the budget, no retries
     assert snapshot.coverage == Coverage.PARTIAL
+    assert snapshot.interrupted is None  # the budget is our choice, not a failure
     assert any("неполная" in reason for reason in snapshot.missing)
 
 
@@ -212,7 +213,19 @@ async def test_bankruptcy_keeps_earlier_pages_when_a_later_one_fails(failure):
     assert snapshot.coverage == Coverage.PARTIAL
     assert [f.value for f in snapshot.facts] == ["Решение"]
     assert any("неполная" in reason for reason in snapshot.missing)
+    # Review A on #71: the sample is not final, so the pipeline can leave it unsaved.
+    assert snapshot.interrupted is not None and snapshot.interrupted.code
     assert KEY not in repr(snapshot)
+
+
+async def test_bankruptcy_daily_limit_on_a_later_page_is_named():
+    limit = (403, {"meta": {"status": "error", "message": "Превышен суточный лимит запросов"}})
+    transport = FailingOnPage([efrsb_page([LIVE], total_pages=2)], 2, limit)
+    (snapshot,) = await provider(bankruptcy_transport=transport).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert snapshot.status == FetchStatus.OK
+    assert snapshot.interrupted.code == "daily_limit"
 
 
 async def test_bankruptcy_first_page_failure_is_still_unavailable():
@@ -260,7 +273,18 @@ def test_finances_year_without_lines_is_not_data(latest):
     snapshot = finances.project_finances(INN, years, NOW)
     assert (snapshot.covered_period.start.year, snapshot.covered_period.end.year) == (2022, 2023)
     assert {f.period.end.year for f in snapshot.facts} == {2022, 2023}
-    assert snapshot.coverage == Coverage.COMPLETE
+    assert snapshot.coverage == Coverage.PARTIAL
+    assert snapshot.missing == (
+        "Отчётность за 2024 без строк 2110 и 2400; динамика — по 2022–2023.",
+    )
+
+
+def test_finances_empty_year_before_the_data_is_not_mentioned():
+    years = finances.read_finances(
+        fin_payload({2021: {}, 2022: {"2110": 1, "2400": 1}, 2023: {"2110": 2, "2400": 2}})
+    )
+    snapshot = finances.project_finances(INN, years, NOW)
+    assert snapshot.coverage == Coverage.COMPLETE and snapshot.missing == ()
 
 
 def test_finances_says_when_the_latest_year_is_left_out():
