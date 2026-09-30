@@ -161,8 +161,9 @@ def test_a_company_under_two_sales_points_is_one_company_with_all_its_contracts(
 
 
 def test_a_contract_printed_again_in_a_filtered_table_is_kept_once_with_its_first_values():
-    """The customer's print repeats its table under «Отбор: …»; read with the first
-    table's columns, the repeats come without amounts and must not replace them."""
+    """The customer's print repeats its table under «Отбор: …». A repeat keeps the first
+    print's values, fills only what they lack, and is the report's usual shape: no
+    warning for it."""
     first = (contract("Дог-1", 65, "1868879.88"), contract("Дог-2", 55, "1093177.20"))
     merged, issues = merge_repeats(
         (
@@ -176,8 +177,22 @@ def test_a_contract_printed_again_in_a_filtered_table_is_kept_once_with_its_firs
         ("Дог-1", Decimal("1868879.88"), 65),
         ("Дог-2", Decimal("1093177.20"), 55),
     ]
-    assert [issue.code for issue in issues] == ["debt_report_contracts_repeated"]
-    assert "2" in issues[0].reason
+    assert issues == ()
+
+
+def test_a_reprint_that_disagrees_is_reported():
+    first = (contract("Дог-1", 65, "1868879.88"),)
+    merged, issues = merge_repeats(
+        (
+            CounterpartyDebt("АСТ ООО", group="Владивосток", contracts=first),
+            CounterpartyDebt(
+                "АСТ ООО", group="Владивосток", contracts=(contract("Дог-1", 64, "1868879.88"),)
+            ),
+        )
+    )
+    assert merged[0].contracts[0].days == 65  # the first print wins
+    assert [issue.code for issue in issues] == ["debt_report_contracts_disagree"]
+    assert "(1)" in issues[0].reason
 
 
 def test_a_report_without_repeats_is_left_as_it_is():
