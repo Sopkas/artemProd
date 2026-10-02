@@ -18,6 +18,14 @@ client may owe on one contract for 307 days and on another for 30, and the speci
 works with the contract, not with a sum. So contracts are kept apart; the counterparty
 level carries the total and the worst of them, exactly as the report's own subtotal does.
 
+**Every table is read by its own legend.** The print is one full table followed by
+tables under a filter («Отбор: Дней просрочки … Больше или равно "90"»), each with its
+own legend and its own column positions (the «Дней» column moves from 66 to 43, 40, 38,
+48 in the customer's file). Reading them all by the first legend gave rows without sums;
+and the filtered tables are not a subset of the first one — four companies of the real
+file are only there. So the print is split at every legend and each table is read alone;
+joining the entries of one name is ``contract_link.merge_repeats``.
+
 The report says nothing about the date its numbers are true on — the title ends with «на
 дату» and nothing follows. The analysis date comes from the dialog, where the user names
 it anyway.
@@ -175,12 +183,34 @@ def _amount(cells, columns, field, row_number, issues) -> Decimal | None:
         return None
 
 
+def _has_legend(cells: tuple[Cell, ...]) -> bool:
+    return any((_text(cell) or "").lower() == "дней" for cell in cells)
+
+
+def tables(rows: list[tuple[int, tuple[Cell, ...]]]) -> list[tuple[int, list]]:
+    """The print cut into its tables: each starts at a legend row that names «Дней».
+
+    Returns the first row number of each table (1-based, for the issues) and its rows. A
+    print without any legend is one table, so a foreign file still gets its message.
+    """
+    starts = [index for index, (_indent, cells) in enumerate(rows) if _has_legend(cells)]
+    if not starts:
+        return [(1, rows)]
+    bounds = [0, *starts[1:], len(rows)]
+    return [(bounds[i] + 1, rows[bounds[i] : bounds[i + 1]]) for i in range(len(bounds) - 1)]
+
+
 def read_debt_report(rows: list[tuple[int, tuple[Cell, ...]]]) -> DebtReport:
     """Read the print into counterparties with their contracts; never guess a level."""
     issues: list[ImportIssue] = []
-    columns = map_columns(rows)
-    contract_level, counterparty_level = _levels(rows)
-    if contract_level is None or counterparty_level is None or "days" not in columns:
+    counterparties: list[CounterpartyDebt] = []
+    read = 0
+    for first_row, table in tables(rows):
+        found = _read_table(table, first_row, issues)
+        if found is not None:
+            read += 1
+            counterparties.extend(found)
+    if not read:
         issues.append(
             issue(
                 SHEET_NAME,
@@ -190,7 +220,17 @@ def read_debt_report(rows: list[tuple[int, tuple[Cell, ...]]]) -> DebtReport:
                 "не найдены уровни отчёта или колонка «Дней».",
             )
         )
-        return DebtReport(issues=tuple(issues))
+    return DebtReport(tuple(counterparties), tuple(issues))
+
+
+def _read_table(
+    rows: list[tuple[int, tuple[Cell, ...]]], first_row: int, issues: list[ImportIssue]
+) -> list[CounterpartyDebt] | None:
+    """One table of the print by its own legend; None when it is not a table at all."""
+    columns = map_columns(rows)
+    contract_level, counterparty_level = _levels(rows)
+    if contract_level is None or counterparty_level is None or "days" not in columns:
+        return None
 
     counterparties: list[CounterpartyDebt] = []
     contracts: list[ContractDebt] = []
@@ -211,7 +251,7 @@ def read_debt_report(rows: list[tuple[int, tuple[Cell, ...]]]) -> DebtReport:
             )
         current, contracts = None, []
 
-    for row_number, (indent, cells) in enumerate(rows, start=1):
+    for row_number, (indent, cells) in enumerate(rows, start=first_row):
         title = _text(cells[0]) if cells else None
         if title is None or _skip(title):
             continue
@@ -252,7 +292,7 @@ def read_debt_report(rows: list[tuple[int, tuple[Cell, ...]]]) -> DebtReport:
             close()
             group = title  # a shallower level groups the counterparties (the sales point)
     close()
-    return DebtReport(tuple(counterparties), tuple(issues))
+    return counterparties
 
 
 def _safe_date(cells, columns, row_number, issues) -> date | None:

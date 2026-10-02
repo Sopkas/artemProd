@@ -11,7 +11,7 @@ errors never echo the payload.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -65,6 +65,8 @@ class ImportedPackage:
     # S7-01: the overdue report's counterparties with their contracts, before they are
     # linked to an INN — the link is made by name when the report is built.
     contracts: tuple[CounterpartyDebt, ...] = ()
+    # File id → usable rows (contracts for an overdue report), for «О проверке».
+    file_rows: dict[str, int] = field(default_factory=dict)
 
 
 def dump_import(package: ImportedPackage) -> str:
@@ -77,6 +79,7 @@ def dump_import(package: ImportedPackage) -> str:
             "history": [debt_snapshot_to_dict(row) for row in package.history],
             "interactions": [interaction_row_to_dict(row) for row in package.interactions],
             "contracts": [_counterparty_debt_to_dict(row) for row in package.contracts],
+            "file_rows": dict(package.file_rows),
         },
         ensure_ascii=False,
     )
@@ -96,6 +99,7 @@ def load_import(payload: str) -> ImportedPackage:
             contracts=tuple(
                 _counterparty_debt_from_dict(item) for item in data.get("contracts", ())
             ),
+            file_rows={str(key): _whole(value) for key, value in data["file_rows"].items()},
         )
     except PayloadError:
         raise

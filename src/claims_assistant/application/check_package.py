@@ -24,6 +24,7 @@ from claims_assistant.domain.inn import InvalidInn, validate_inn
 from claims_assistant.domain.payments import SHEET_NAME as PAYMENTS_SHEET
 
 from .analysis_repository import AnalysisRepository, NewFile
+from .contract_link import merge_repeats
 from .imports import (
     OutlineReader,
     RawSheetReader,
@@ -165,11 +166,15 @@ async def _store(
     coverage: Period | None,
     repository: AnalysisRepository,
     files: FileStorage,
+    *,
+    uploaded: bytes | None = None,
 ) -> tuple[UploadedFile, bool]:
+    """``uploaded`` is what the user sent when it is not what is stored (a translated
+    export): the checksum names the upload, so the same file twice is one file."""
     stored_path = await asyncio.to_thread(files.save, run.id, data)
     new_file = NewFile(
         kind=kind,
-        checksum=sha256(data).hexdigest(),
+        checksum=sha256(uploaded if uploaded is not None else data).hexdigest(),
         size_bytes=len(data),
         stored_path=stored_path,
         coverage=coverage,
@@ -187,7 +192,10 @@ async def _store(
 
 
 async def package_inns(
-    run: AnalysisRun, files: FileStorage, reader: SheetReader, limits: ImportLimits
+    run: AnalysisRun,
+    files: FileStorage,
+    reader: SheetReader,
+    limits: ImportLimits = ImportLimits(),
 ) -> frozenset[str]:
     """INNs of the draft's «Контрагенты» file, re-read from storage (never from the chat)."""
     main = [file for file in run.files if file.kind is FileKind.COUNTERPARTIES]
@@ -274,6 +282,8 @@ async def accept_debt_report(
     result = await asyncio.to_thread(read_debt_report, list(rows))
     if not result.counterparties:
         return PackageRejected(issues=result.issues)
+    # Counted the way the report will use them: one company per name in this file.
+    counterparties, repeats = merge_repeats(result.counterparties)
     stored, duplicate = await _store(
         owner_id, run, FileKind.DEBT_REPORT, data, None, repository, files
     )
@@ -281,10 +291,10 @@ async def accept_debt_report(
     return LedgerAccepted(
         run=run,
         file=stored,
-        rows=len(result.counterparties),
-        issues=result.issues,
+        rows=len(counterparties),
+        issues=result.issues + repeats,
         duplicate=duplicate,
-        contracts=result.contracts,
+        contracts=sum(len(counterparty.contracts) for counterparty in counterparties),
     )
 
 
@@ -338,12 +348,15 @@ async def accept_payments_export(
     )
     if not result.rows:
         return PackageRejected(issues=result.issues)
+    coverage = _up_to(export.period, run.analysis_date)
     sheet = await asyncio.to_thread(
         sheets.build_payments_workbook,
         [[row.inn, row.payment_id, row.paid_on, row.amount] for row in result.rows],
     )
+    # The sheet is rebuilt on every upload and openpyxl stamps the time into it, so its
+    # bytes differ each time: the export itself is what makes two uploads the same file.
     stored, duplicate = await _store(
-        owner_id, run, FileKind.PAYMENTS, sheet, export.period, repository, files
+        owner_id, run, FileKind.PAYMENTS, sheet, coverage, repository, files, uploaded=data
     )
     run = await repository.get_run(owner_id, run.id)
     return LedgerAccepted(
@@ -354,6 +367,14 @@ async def accept_payments_export(
         duplicate=duplicate,
         export=export,
     )
+
+
+def _up_to(period: Period | None, day: date) -> Period | None:
+    """The part of an export's period it can vouch for: payments after the analysis date
+    are left out of the package, so the days after it are not covered either."""
+    if period is None or period.start > day:
+        return None
+    return Period(period.start, min(period.end, day))
 
 
 def _export_issue(code: str, reason: str) -> ImportIssue:

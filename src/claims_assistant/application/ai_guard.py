@@ -26,6 +26,7 @@ from .recommendation import (
     AiErrorCode,
     AiLimits,
     AiUnavailable,
+    PreparedProvider,
     RecommendationProvider,
     request_size,
 )
@@ -178,6 +179,10 @@ class GuardedRecommendationProvider:
             raise AiUnavailable(
                 AiErrorCode.BUDGET, f"Запрос больше лимита ({size} > {limits.max_request_chars})."
             )
+        if isinstance(self.inner, PreparedProvider):
+            # Outside the call's own timeout: a slow catalogue must not eat the time the
+            # model has to answer (review B on #63).
+            await self.inner.prepare()
         attempt = 0
         while True:
             if not budget.take_request(self._clock()):
@@ -190,6 +195,8 @@ class GuardedRecommendationProvider:
                 error = AiUnavailable(AiErrorCode.TIMEOUT, "Модель не ответила в срок.")
             except AiUnavailable as failure:
                 error = failure
+                if failure.spent is not None:
+                    budget.charge(failure.spent)  # paid for, though it gave no answer
             else:
                 budget.charge(answer)
                 return answer

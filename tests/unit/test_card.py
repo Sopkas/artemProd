@@ -177,3 +177,13 @@ async def test_partial_empty_bankruptcy_is_not_reported_as_complete_absence():
     assert "проверка неполная" in text
     assert "За проверенный период сообщений не найдено" not in text
     assert text.count("Источник:") == 3
+
+
+async def test_card_says_what_is_not_checked_and_where_to_look():
+    """S7-03: the tax service hides account blocks behind a captcha. The card must not let
+    their absence read as «no blocks»: it names them and links the page to check by hand."""
+    for scenario in DemoScenario:
+        text = await card_for(scenario)
+        assert "Блокировки счетов ФНС: не проверяются автоматически" in text
+        assert "https://service.nalog.ru/bi.do" in text
+        assert "БИК любого банка" in text

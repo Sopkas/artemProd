@@ -42,7 +42,7 @@ from claims_assistant.domain.payments import PaymentRow
 from claims_assistant.domain.plural import of_companies as _companies
 
 from .check_package import FileStorage, StorageError
-from .contract_link import normalize_name
+from .contract_link import merge_repeats, normalize_name
 from .imports import OutlineReader, SheetReader, import_counterparties
 from .ledger_imports import import_debt_history, import_interactions, import_payments
 
@@ -70,6 +70,9 @@ class PackageReview:
     # INN → {DEBT_HISTORY_CONFLICT, LAST_PAYMENT_CONFLICT}: which indicator is unknown
     # for which company because the files contradict each other.
     conflicts: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    # File id → what that file gave: usable rows, or contracts for an overdue report —
+    # before rows repeated across files are merged, so each file is credited for its own.
+    file_rows: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def blocking(self) -> tuple[ImportIssue, ...]:
@@ -240,6 +243,7 @@ async def review_package(
     }
     parsed: dict[FileKind, list[tuple[str, tuple]]] = {kind: [] for kind in parsers}
     covered: dict[str, tuple[date, date]] = {}
+    file_rows: dict[str, int] = {}
     for file in run.files:
         parse = parsers.get(file.kind)
         if parse is None:
@@ -249,12 +253,16 @@ async def review_package(
             parse, reader, data, known_inns=known, analysis_date=run.analysis_date, limits=limits
         )
         parsed[file.kind].append((file.id, result.rows))
+        file_rows[file.id] = len(result.rows)
         issues.extend(_tag(result.issues, file.id))
         if file.kind is FileKind.PAYMENTS and file.coverage is not None:
             covered[file.id] = (file.coverage.start, file.coverage.end)
 
-    contracts, contract_issues = await _read_debt_reports(run, files, reader, limits)
+    contracts, contract_issues, contract_counts = await _read_debt_reports(
+        run, files, reader, limits
+    )
     issues.extend(contract_issues)
+    file_rows.update(contract_counts)
 
     payments, more = _merge_by_key(
         parsed[FileKind.PAYMENTS],
@@ -296,6 +304,7 @@ async def review_package(
         contracts=contracts,
         issues=tuple(issues),
         conflicts=conflicts,
+        file_rows=file_rows,
     )
 
 
@@ -304,29 +313,34 @@ async def _read_debt_reports(
     files: FileStorage,
     reader: SheetReader,
     limits: ImportLimits,
-) -> tuple[tuple[CounterpartyDebt, ...], list[ImportIssue]]:
-    """The customer's overdue reports of this package, counterparty by counterparty.
+) -> tuple[tuple[CounterpartyDebt, ...], list[ImportIssue], dict[str, int]]:
+    """The customer's overdue reports of this package, counterparty by counterparty, and
+    how many contracts each file gave.
 
     The file is read by the indents of its own rows, so the reader has to be able to give
     them; a reader that cannot is a wiring mistake, not a bad file.
 
-    A counterparty named in two reports keeps the contracts of the first one: two prints
-    of the same client are two views of one debt, and adding them up would double it.
+    Inside one report, the entries of one name are one company (``merge_repeats``). A
+    counterparty named in two reports keeps the contracts of the first one: two prints of
+    the same client are two views of one debt, and adding them up would double it.
     """
     attached = [file for file in run.files if file.kind is FileKind.DEBT_REPORT]
     if not attached:
-        return (), []
+        return (), [], {}
     if not isinstance(reader, OutlineReader):
         raise TypeError("A debt report needs a reader that returns row indents")
     issues: list[ImportIssue] = []
     counterparties: list[CounterpartyDebt] = []
+    counts: dict[str, int] = {}
     seen: dict[str, str] = {}  # normalised name → the file that brought it first
     for file in attached:
         data = await asyncio.to_thread(files.read, file.stored_path)
         rows = await asyncio.to_thread(reader.read_outline, data, limits)
         result = await asyncio.to_thread(read_debt_report, list(rows))
-        issues.extend(_tag(result.issues, file.id))
-        for counterparty in result.counterparties:
+        merged, repeats = merge_repeats(result.counterparties)
+        issues.extend(_tag(result.issues + repeats, file.id))
+        counts[file.id] = sum(len(counterparty.contracts) for counterparty in merged)
+        for counterparty in merged:
             key = normalize_name(counterparty.name)
             if key in seen:
                 issues.append(
@@ -340,7 +354,7 @@ async def _read_debt_reports(
                 continue
             seen[key] = file.id
             counterparties.append(counterparty)
-    return tuple(counterparties), issues
+    return tuple(counterparties), issues, counts
 
 
 __all__ = [
