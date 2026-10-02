@@ -307,13 +307,25 @@ def test_assess_rejects_indicators_of_another_company():
         assess(INN, clean_external(), row(), indicators=indicators)
 
 
+def test_package_indicators_read_each_companys_own_periods():
+    """A 1C export vouches for its own company only: the other one, without a period of
+    its own, keeps the date from «Контрагенты» instead of «no payments since…»."""
+    rows = [row(last=days_ago(5)), row(inn=OTHER, last=days_ago(20))]
+    result = package_indicators(
+        rows, DAY, payments=[pay(days_ago(5))], periods={INN: (period(30),)}
+    )
+    assert result[INN].payment.last_payment == days_ago(5)
+    assert result[OTHER].payment.status is not PaymentStatus.CONFLICT
+    assert result[OTHER].payment.source == INTERNAL_LAST_PAYMENT
+
+
 def test_package_indicators_keep_each_company_to_its_own_rows():
     rows = [row(), row(inn=OTHER, last=days_ago(3))]
     result = package_indicators(
         rows,
         DAY,
         payments=[pay(days_ago(5)), pay(days_ago(3), inn=OTHER)],
-        periods=(period(30),),
+        periods={INN: (period(30),), OTHER: (period(30),)},
         history=[snap(date(2026, 8, 1), "250", inn=OTHER)],
         finances={INN: clean_external()[2]},
     )

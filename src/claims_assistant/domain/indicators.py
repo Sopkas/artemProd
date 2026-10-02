@@ -405,11 +405,17 @@ def package_indicators(
     rows: Iterable[CounterpartyRow],
     analysis_date: date,
     payments: Iterable[PaymentRow] = (),
-    periods: Sequence[Period] = (),
+    periods: Mapping[str, Sequence[Period]] = MappingProxyType({}),
     history: Iterable[DebtSnapshot] = (),
     finances: Mapping[str, ExternalSnapshot] = MappingProxyType({}),
 ) -> dict[str, InternalIndicators]:
-    """Indicators of every row of a package, grouping the optional files by INN once."""
+    """Indicators of every row of a package, grouping the optional files by INN once.
+
+    ``periods`` are each company's covered periods: the caller puts every company of the
+    package in, with the periods of the files for the whole package and of its own 1C
+    exports. A company missing from it has no covered period, so its payment age stays
+    what «Контрагенты» says or unknown — never guessed from somebody else's file.
+    """
     paid: dict[str, list[PaymentRow]] = {}
     for payment in payments:
         paid.setdefault(payment.inn, []).append(payment)
@@ -421,7 +427,7 @@ def package_indicators(
             row,
             analysis_date,
             paid.get(row.inn, ()),
-            periods,
+            tuple(periods.get(row.inn, ())),
             snapshots.get(row.inn, ()),
             finances.get(row.inn),
         )

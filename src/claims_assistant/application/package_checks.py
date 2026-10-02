@@ -19,7 +19,7 @@ as «неизвестно» instead of the whole package.
 """
 
 import asyncio
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import PurePosixPath
@@ -154,22 +154,38 @@ def _merge_by_key(
     return list(accepted.values()), issues
 
 
+def payment_periods(run: AnalysisRun, inn: str) -> tuple[Period, ...]:
+    """The periods the package vouches for ``inn``'s payments: every file of our template
+    (it covers the whole package) and the 1C exports made for this company.
+
+    An export is one counterparty's print: counting its period for the others made them
+    «contradict» it and «go quiet» (block 5 of the manual test, 30.09.2026).
+    """
+    return tuple(
+        file.coverage
+        for file in run.files
+        if file.kind is FileKind.PAYMENTS
+        and file.coverage is not None
+        and (file.inn is None or file.inn == inn)
+    )
+
+
 def date_conflicts(
     run: AnalysisRun,
     counterparties: tuple[CounterpartyRow, ...],
     payments: tuple[PaymentRow, ...],
     history: tuple[DebtSnapshot, ...],
-    covered: dict[str, tuple[date, date]],
+    periods: Mapping[str, Sequence[Period]],
 ) -> tuple[list[ImportIssue], dict[str, frozenset[str]]]:
     """Contradictions between the main file and the optional ones, per INN.
 
-    One issue per kind names how many companies are affected (never which); the mapping
-    says which, so S4-06 marks the indicator unknown only for them.
+    ``periods`` are each company's covered periods (``payment_periods``); a company missing
+    from it has none. One issue per kind names how many companies are affected (never
+    which); the mapping says which, so S4-06 marks the indicator unknown only for them.
     """
     # The rules themselves live in domain.indicators, so the indicators (S4-06) read the
     # same contradictions as unknown values.
     found: dict[str, set[str]] = {}
-    periods = [Period(start, end) for start, end in covered.values()]
     paid: dict[str, list[date]] = {}
     for payment in payments:
         paid.setdefault(payment.inn, []).append(payment.paid_on)
@@ -180,7 +196,8 @@ def date_conflicts(
         # The main file's debt is as of the row's own cut-off date (contract §4).
         if debt_contradicts(row, snapshots.get(row.inn, ()), run.analysis_date):
             found.setdefault(row.inn, set()).add(DEBT_HISTORY_CONFLICT)
-        if last_payment_contradicts(row.last_payment_date, paid.get(row.inn, ()), periods):
+        own = tuple(periods.get(row.inn, ()))
+        if last_payment_contradicts(row.last_payment_date, paid.get(row.inn, ()), own):
             found.setdefault(row.inn, set()).add(LAST_PAYMENT_CONFLICT)
 
     issues: list[ImportIssue] = []
@@ -242,7 +259,6 @@ async def review_package(
         FileKind.INTERACTIONS: import_interactions,
     }
     parsed: dict[FileKind, list[tuple[str, tuple]]] = {kind: [] for kind in parsers}
-    covered: dict[str, tuple[date, date]] = {}
     file_rows: dict[str, int] = {}
     for file in run.files:
         parse = parsers.get(file.kind)
@@ -255,8 +271,6 @@ async def review_package(
         parsed[file.kind].append((file.id, result.rows))
         file_rows[file.id] = len(result.rows)
         issues.extend(_tag(result.issues, file.id))
-        if file.kind is FileKind.PAYMENTS and file.coverage is not None:
-            covered[file.id] = (file.coverage.start, file.coverage.end)
 
     contracts, contract_issues, contract_counts = await _read_debt_reports(
         run, files, reader, limits
@@ -291,8 +305,9 @@ async def review_package(
         "ID взаимодействия",
     )
     issues.extend(more)
+    periods = {row.inn: payment_periods(run, row.inn) for row in counterparties}
     conflict_issues, conflicts = date_conflicts(
-        run, counterparties, tuple(payments), tuple(history), covered
+        run, counterparties, tuple(payments), tuple(history), periods
     )
     issues.extend(conflict_issues)
     ordered_interactions = tuple(row for rows in chronology(interactions).values() for row in rows)
@@ -369,5 +384,6 @@ __all__ = [
     "belongs_to_run",
     "check_ownership",
     "date_conflicts",
+    "payment_periods",
     "review_package",
 ]

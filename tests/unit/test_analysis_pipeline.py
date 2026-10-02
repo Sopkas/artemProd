@@ -580,6 +580,48 @@ async def test_report_names_the_optional_files_of_the_package(tmp_path):
     ) in text
 
 
+async def test_one_companys_1c_export_says_nothing_about_the_others_payments(tmp_path):
+    """Block 5 of the manual test (30.09.2026): the export's period was the whole package's,
+    so a company without an export of its own got «нет поступлений с …» — a signal that
+    raises the priority — from somebody else's file."""
+    from claims_assistant.application.check_package import accept_payments_export
+    from claims_assistant.infrastructure.excel import ledgers
+    from tests.integration.test_upload_dialog import export_file
+
+    repository = InMemoryAnalysisRepository()
+    files = LocalFileStorage(tmp_path / "uploads")
+    draft = await accept_counterparties(
+        OWNER,
+        DAY,
+        DataMode.DEMO,
+        build_counterparties_template(ROWS),
+        repository=repository,
+        files=files,
+        reader=OpenpyxlSheetReader(),
+    )
+    run = draft.run
+    await accept_payments_export(
+        OWNER,
+        run.id,
+        export_file(end="01.09.2026 9:00:00"),  # covers every day up to the analysis date
+        inn="1234567894",
+        repository=repository,
+        files=files,
+        reader=OpenpyxlSheetReader(),
+        sheets=ledgers,
+    )
+    await repository.transition(OWNER, run.id, RunStatus.QUEUED)
+    run = await repository.claim_next()
+    await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
+    data = files.read((await repository.get_report(OWNER, run.id)).stored_path)
+    other = [
+        " ".join(str(cell) for cell in row if cell is not None)
+        for row in sheet_rows(data, "Качество данных") + sheet_rows(data, "Приоритеты")
+        if "7707083893" in row
+    ]
+    assert other and not any("поступлений" in line or "Платежи" in line for line in other)
+
+
 async def test_internal_indicators_and_chronology_reach_the_report(tmp_path):
     """S4-04: the owner's own files drive the assessment, the report names the files
     used, lists what is missing and shows the interactions chronology."""

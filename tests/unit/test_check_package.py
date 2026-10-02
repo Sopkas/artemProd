@@ -230,6 +230,26 @@ class RestampingWriter:
         return buffer.getvalue()
 
 
+async def test_an_export_is_stored_as_its_companys_and_a_template_as_the_packages(deps):
+    from claims_assistant.application.check_package import accept_payments_export
+    from claims_assistant.infrastructure.excel import ledgers
+    from tests.integration.test_upload_dialog import export_file
+
+    run = await draft(deps)
+    exported = await accept_payments_export(
+        OWNER, run.id, export_file(), inn=INN_1, sheets=ledgers, **deps
+    )
+    template = await accept_ledger(
+        OWNER,
+        run.id,
+        FileKind.PAYMENTS,
+        payments([[INN_1, "P-1", date(2026, 7, 15), 100.0]]),
+        coverage=PERIOD,
+        **deps,
+    )
+    assert (exported.file.inn, template.file.inn) == (INN_1, None)
+
+
 async def test_the_same_export_twice_keeps_one_copy(deps, tmp_path):
     from claims_assistant.application.check_package import accept_payments_export
     from tests.integration.test_upload_dialog import export_file

@@ -305,6 +305,56 @@ async def test_last_payment_date_is_checked_against_the_covered_export(deps, pay
     assert ("last_payment_conflict" in [c for c, *_ in codes(review)]) is conflict
 
 
+async def export(deps, run, inn, rows):
+    from claims_assistant.application.check_package import accept_payments_export
+    from claims_assistant.infrastructure.excel import ledgers
+    from tests.integration.test_upload_dialog import export_file
+
+    data = export_file(rows)  # period 01.06.2026–31.08.2026 from its header
+    result = await accept_payments_export(OWNER, run.id, data, inn=inn, sheets=ledgers, **deps)
+    return result.run
+
+
+PAID_15_07 = ("15.07.2026", "Поступление на расчетный счет 00БП-1 от 15.07.2026", 100.0)
+PAID_02_08 = ("02.08.2026", "Поступление на расчетный счет 00БП-2 от 02.08.2026", 1.0)
+
+
+async def test_a_1c_export_vouches_only_for_its_own_company(deps):
+    """Block 5 of the manual test (30.09.2026): one company's export made every other company
+    «contradict» it — its period was taken as the whole package's."""
+    rows = (
+        ROWS[0],  # INN_A, last payment 15.07 — matches its export
+        CounterpartyRow(
+            inn=INN_B, cutoff_date=DAY, debt=Decimal("50.00"), last_payment_date=date(2026, 8, 1)
+        ),
+    )
+    run = await export(deps, await draft(deps, rows), INN_A, [PAID_15_07])
+    review = await review_package(run, deps["files"], deps["reader"])
+    assert review.conflicts == {}
+    assert "last_payment_conflict" not in [c for c, *_ in codes(review)]
+
+
+async def test_a_1c_export_still_contradicts_its_own_company(deps):
+    run = await export(deps, await draft(deps), INN_A, [PAID_15_07, PAID_02_08])
+    review = await review_package(run, deps["files"], deps["reader"])
+    assert review.conflicts == {INN_A: frozenset({LAST_PAYMENT_CONFLICT})}
+
+
+async def test_a_companys_periods_are_the_packages_files_and_its_own_exports(deps):
+    """What the card and the report count on for one company: our template's period covers
+    every company of the package, a 1C export's only the company it was made for."""
+    from claims_assistant.application.package_checks import payment_periods
+
+    run = await draft(deps)
+    run = await attach(
+        deps, run, FileKind.PAYMENTS, build_payments_workbook([[INN_A, "P-9", DAY, 1.0]]), PERIOD
+    )
+    run = await export(deps, run, INN_A, [PAID_15_07])
+    exported = Period(date(2026, 6, 1), date(2026, 8, 31))
+    assert payment_periods(run, INN_A) == (PERIOD, exported)
+    assert payment_periods(run, INN_B) == (PERIOD,)
+
+
 async def test_last_payment_outside_the_covered_period_is_not_a_conflict(deps):
     run = await draft(deps)
     run = await attach(

@@ -10,10 +10,10 @@ and the newest finished check that contains the INN wins.
 
 from dataclasses import dataclass
 
-from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
+from claims_assistant.domain.analysis import AnalysisRun, RunStatus
 from claims_assistant.domain.counterparties import CounterpartyRow, ImportLimits
 from claims_assistant.domain.debt_report import ContractDebt
-from claims_assistant.domain.external import ExternalSnapshot, Period
+from claims_assistant.domain.external import ExternalSnapshot
 from claims_assistant.domain.indicators import InternalIndicators, internal_indicators
 from claims_assistant.domain.interactions import InteractionRow, chronology
 from claims_assistant.domain.report import file_labels
@@ -22,7 +22,7 @@ from claims_assistant.domain.steps import RUN_SCOPE, StepStatus
 from .analysis_repository import AnalysisRepository, RepositoryError
 from .check_package import FileStorage, StorageError, package_inns
 from .imports import SheetReader
-from .package_checks import PackageIntegrityError, review_package
+from .package_checks import PackageIntegrityError, payment_periods, review_package
 from .step_payloads import PayloadError, load_links
 from .step_store import StepStore
 
@@ -69,14 +69,6 @@ class InternalContext:
     contracts: tuple[ContractDebt, ...] = ()
 
 
-def payment_periods(run: AnalysisRun) -> tuple[Period, ...]:
-    return tuple(
-        file.coverage
-        for file in run.files
-        if file.kind is FileKind.PAYMENTS and file.coverage is not None
-    )
-
-
 async def internal_context(
     owner_id: int,
     inn: str,
@@ -113,7 +105,7 @@ async def internal_context(
             row,
             run.analysis_date,
             review.payments,
-            payment_periods(run),
+            payment_periods(run, inn),
             review.history,
             finances,
         )

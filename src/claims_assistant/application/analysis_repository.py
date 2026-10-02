@@ -10,6 +10,7 @@ from claims_assistant.domain.analysis import (
     RunStatus,
     UploadedFile,
     validate_checksum,
+    validate_file_inn,
     validate_stored_path,
 )
 from claims_assistant.domain.external import DataMode, Period
@@ -48,12 +49,14 @@ class NewFile:
     size_bytes: int
     stored_path: str
     coverage: Period | None = None
+    inn: str | None = None  # whose 1C export this is; None: the whole package's
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, FileKind):
             raise ValueError("File kind must be a FileKind")
         if self.coverage is not None and not isinstance(self.coverage, Period):
             raise ValueError("Coverage must be a Period or None")
+        validate_file_inn(self.kind, self.inn)
         validate_checksum(self.checksum)
         if type(self.size_bytes) is not int or self.size_bytes <= 0:
             raise ValueError("File size must be a positive integer")
