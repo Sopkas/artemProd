@@ -769,3 +769,66 @@ async def test_cross_file_findings_reach_the_report_quality_sheet(tmp_path):
     quality = sheet_rows(files.read(artifact.stored_path), "Качество данных")
     text = " ".join(str(cell) for row in quality for cell in row if cell is not None)
     assert "расходится с файлом «Контрагенты»" in text
+
+
+class RateLimitedProvider:
+    """Answers «limit» to everything: ``daily_limit`` is how the adapter names Checko's 403
+    once the day's requests are spent (#70), ``rate_limited`` a 429 burst."""
+
+    def __init__(self, code: str = "daily_limit") -> None:
+        self.calls: list[str] = []
+        self.code = code
+
+    async def fetch(self, request: CompanyDataRequest):
+        self.calls.append(request.inn)
+        return tuple(
+            ExternalSnapshot(
+                inn=request.inn,
+                section=section,
+                source="checko",
+                mode=DataMode.DEMO,
+                fetched_at=NOW,
+                status=FetchStatus.RATE_LIMITED,
+                coverage=Coverage.UNAVAILABLE,
+                missing=("Источник ограничил число запросов.",),
+                error=ProviderError(self.code, "Источник ограничил число запросов."),
+            )
+            for section in request.sections
+        )
+
+
+async def test_a_source_out_of_requests_is_not_asked_for_the_rest_and_the_user_is_told(tmp_path):
+    """Free tariff: 100 requests a day, about 33 companies. Past it every company gets 429;
+    asking each of them again only burns time, and the user must learn why the check is
+    partial and what to do."""
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    provider = RateLimitedProvider()
+    outcome = await pipeline(files, repository, guard(provider)).process(run)
+
+    assert outcome.status == RunStatus.PARTIAL
+    assert "лимит запросов" in outcome.failure and "завтра" in outcome.failure
+    assert provider.calls == ["1234567894"]  # the second company was not asked
+    summary = await load_summary(run.id, repository)
+    assert summary.source_limited is True
+    # Nothing unfinished was saved: a new attempt asks the source again.
+    assert await repository.get_step(run.id, "7707083893", FETCH_STEP, FETCH_VERSION) is None
+
+
+async def test_a_rate_limit_burst_leaves_the_rest_of_the_check_asking(tmp_path):
+    """A 429 left after the retries is not the day's limit: the next company is asked, and
+    nobody is told to wait until tomorrow (review B on #65)."""
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    provider = RateLimitedProvider("rate_limited")
+    outcome = await pipeline(files, repository, guard(provider)).process(run)
+
+    assert provider.calls == ["1234567894", "7707083893"]
+    assert "завтра" not in (outcome.failure or "")
+    assert (await load_summary(run.id, repository)).source_limited is False
+
+
+def test_a_summary_saved_before_the_source_limit_existed_still_reads():
+    old = (
+        '{"companies": 1, "checked": 1, "unchecked": 0, "row_errors": 0, '
+        '"priorities": {"low": 1}, "budget_exhausted": false}'
+    )
+    assert RunSummary.from_payload(old).source_limited is False
