@@ -139,6 +139,70 @@ def test_totals_and_filter_rows_are_not_data():
     assert all("Итого" not in c.name for c in result.counterparties)
 
 
+# The filtered table of the customer's print: the same legend, other column positions.
+SHIFTED = {
+    "name": 0,
+    "manager": 2,
+    "due": 15,
+    "subject": 19,
+    "amount": 31,
+    "overdue": 34,
+    "days": 40,
+}
+
+
+def shifted(indent, name, **values):
+    cells = [None] * WIDTH
+    cells[SHIFTED["name"]] = name
+    for field, value in values.items():
+        cells[SHIFTED[field]] = value
+    return indent, tuple(cells)
+
+
+def filtered_table():
+    return [
+        shifted(0, 'Отбор: Дней просрочки по договору Больше или равно "90"'),
+        shifted(
+            0,
+            "Точка продаж",
+            due="Срок действия до",
+            subject="Предмет лизинга",
+            amount="Сумма",
+            overdue="Сумма просроченной задолженности с вычетом н/р дней",
+            days="Дней",
+        ),
+        shifted(0, "Контрагент"),
+        shifted(0, "Договор лизинга"),
+        shifted(0, "Владивосток", amount=900, overdue=900, days=120),
+        shifted(2, "Данилов Максим Владимирович, ИП"),
+        shifted(4, "Дог. фин. лизинга № 3", amount=250, overdue=250, days=95),
+        shifted(2, "МАГИСТРАЛЬ ООО"),  # only in the filtered table, as in the real file
+        shifted(4, "Дог. фин. лизинга № 9", amount=650, overdue=650, days=120),
+        shifted(0, "Итого", amount=900),
+    ]
+
+
+def test_every_table_of_the_print_is_read_by_its_own_legend():
+    """30.09, the customer's real report: its «Отбор» tables put «Дней» in other columns.
+    Read by the first legend, their contracts came without sums; four companies are only
+    there."""
+    result = read_debt_report(report() + filtered_table())
+    names = [c.name for c in result.counterparties]
+    assert names == [
+        "РОМАШКА ООО",
+        "Данилов Максим Владимирович, ИП",
+        "Данилов Максим Владимирович, ИП",
+        "МАГИСТРАЛЬ ООО",
+    ]
+    only_there = result.counterparties[-1]
+    assert [(k.name, k.overdue, k.days) for k in only_there.contracts] == [
+        ("Дог. фин. лизинга № 9", Decimal("650"), 120)
+    ]
+    reprint = result.counterparties[2].contracts[0]
+    assert (reprint.overdue, reprint.days) == (Decimal("250"), 95)
+    assert result.issues == ()
+
+
 def test_days_that_are_not_days_are_left_unknown():
     """The fictional file the customer sent first has amounts in the «Дней» column."""
     rows = legend() + [

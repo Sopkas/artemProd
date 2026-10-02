@@ -24,3 +24,15 @@ def is_not_found(meta: object) -> bool:
         return False
     message = meta.get("message")
     return isinstance(message, str) and "не найдено" in message.lower()
+
+
+def is_daily_limit(payload: object) -> bool:
+    """Whether a 403 body says the key has used up its daily requests.
+
+    Confirmed on the live API (27.09.2026): HTTP 403, ``meta.status == "error"`` and
+    ``"message": "Превышен суточный лимит запросов для бесплатного тарифа"``. A 403 may
+    mean other refusals too, so the text decides, not the code alone.
+    """
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    message = meta.get("message") if isinstance(meta, dict) else None
+    return isinstance(message, str) and "лимит" in message.lower()

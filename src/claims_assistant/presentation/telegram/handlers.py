@@ -24,6 +24,7 @@ from claims_assistant.application.check_package import (
     accept_payments_export,
     latest_run,
     launch_run,
+    package_inns,
 )
 from claims_assistant.application.company_data import CompanyDataProvider
 from claims_assistant.application.imports import SheetReader
@@ -372,7 +373,9 @@ def create_dispatcher(
             FileKind.PAYMENTS, result.rows, result.issues, result.duplicate, composition
         )
         await message.answer(
-            texts.export_summary(result.export, result.rows) + "\n\n" + summary,
+            texts.export_summary(result.export, result.rows, result.file.coverage)
+            + "\n\n"
+            + summary,
             reply_markup=launch_menu(),
         )
 
@@ -593,6 +596,20 @@ def create_dispatcher(
             inn = validate_inn(message.text or "")
         except InvalidInn as error:
             await message.answer(str(error), reply_markup=cancel_menu())
+            return
+        # The export names no INN, so this answer is its only link to the package: check it
+        # while it can still be retyped, not after the file (block 5 of the manual test).
+        data = await state.get_data()
+        try:
+            run = await repository.get_run(message.from_user.id, data["run_id"])
+            known = await package_inns(run, files, reader)
+        except Exception as exc:
+            logger.error("export_inn_failed error_type=%s", type(exc).__name__)
+            await state.clear()
+            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+            return
+        if inn not in known:
+            await message.answer(texts.EXPORT_INN_NOT_IN_PACKAGE, reply_markup=cancel_menu())
             return
         await state.update_data(export_inn=inn)
         await state.set_state(CheckDialog.waiting_for_export_file)
