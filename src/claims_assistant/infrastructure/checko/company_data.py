@@ -1,7 +1,6 @@
 """S1-05: one bounded HTTPS request for organization details only."""
 
 import asyncio
-import json
 import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -24,11 +23,16 @@ from claims_assistant.domain.external import (
 )
 from claims_assistant.domain.inn import InnKind, inn_kind
 from claims_assistant.infrastructure.checko import bankruptcy, finances
-from claims_assistant.infrastructure.checko.errors import InvalidResponse, NotFound, is_not_found
+from claims_assistant.infrastructure.checko.errors import (
+    InvalidResponse,
+    NotFound,
+    is_daily_limit,
+    is_not_found,
+)
+from claims_assistant.infrastructure.checko.http import read_response
 
 SOURCE = "checko-company-v2"
 COMPANY_URL = "https://api.checko.ru/v2/company"
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 # Checko issues extract dates in Moscow time, which is UTC+3 with no DST since 2014.
 _MOSCOW = timezone(timedelta(hours=3))
 
@@ -49,27 +53,20 @@ class AiohttpCompanyTransport:
             async with session.post(
                 COMPANY_URL, json={"key": key, "inn": inn}, allow_redirects=False
             ) as response:
-                if response.status != 200:
-                    return response.status, None
-                body = bytearray()
-                async for chunk in response.content.iter_chunked(65536):
-                    body.extend(chunk)
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        raise InvalidResponse() from None
-                try:
-                    return response.status, json.loads(body)
-                except (ValueError, UnicodeError):
-                    raise InvalidResponse() from None
+                return await read_response(response)
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _http_error(http_status: int) -> tuple[FetchStatus, str, str] | None:
+def _http_error(http_status: int, payload: object = None) -> tuple[FetchStatus, str, str] | None:
     """Map a non-200 HTTP status to a safe (status, code, message); None means 200."""
     if http_status == 200:
         return None
+    if http_status == 403 and is_daily_limit(payload):
+        # Not a broken key: the source is back tomorrow, so the run can say so.
+        return FetchStatus.RATE_LIMITED, "daily_limit", _DAILY_LIMIT
     if http_status in (401, 403):
         return FetchStatus.UNAUTHORIZED, "access_denied", "Checko не разрешил доступ."
     if http_status == 429:
@@ -77,6 +74,7 @@ def _http_error(http_status: int) -> tuple[FetchStatus, str, str] | None:
     return FetchStatus.UNAVAILABLE, "http_error", "Checko вернул ошибку HTTP."
 
 
+_DAILY_LIMIT = "Исчерпан суточный лимит запросов Checko; повторите проверку завтра."
 _API_ERROR = "Checko отклонил запрос; проверьте доступ и лимиты в кабинете."
 _INVALID = "Ответ Checko не соответствует ожидаемому формату."
 _NOT_FOUND = "Организация с таким ИНН не найдена в источнике."
@@ -250,7 +248,7 @@ class CheckoCompanyDataProvider:
                 http_status, payload = await self._transport.request(
                     self._api_key, request.inn, request.limits.timeout_seconds
                 )
-            mapped = _http_error(http_status)
+            mapped = _http_error(http_status, payload)
             if mapped is None:
                 return normalize_company(payload, request.inn, fetched_at)
             status, code, message = mapped
@@ -284,7 +282,7 @@ class CheckoCompanyDataProvider:
                     http_status, payload = await self._bankruptcy_transport.request(
                         self._api_key, request.inn, page, limits.timeout_seconds
                     )
-                mapped = _http_error(http_status)
+                mapped = _http_error(http_status, payload)
                 if mapped is not None:
                     status, code, message = mapped
                     return _failure(request.inn, Section.BANKRUPTCY, fetched_at, *mapped)
@@ -327,7 +325,7 @@ class CheckoCompanyDataProvider:
                 http_status, payload = await self._finances_transport.request(
                     self._api_key, request.inn, request.limits.timeout_seconds
                 )
-            mapped = _http_error(http_status)
+            mapped = _http_error(http_status, payload)
             if mapped is not None:
                 return _failure(request.inn, Section.FINANCES, fetched_at, *mapped)
             years = finances.read_finances(payload)

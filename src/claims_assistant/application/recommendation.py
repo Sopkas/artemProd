@@ -36,15 +36,23 @@ class AiErrorCode(StrEnum):
     RATE_LIMITED = "rate_limited"
     REFUSED = "refused"  # the provider declined the request (policy, auth, bad request)
     BUDGET = "budget"  # our own limit: request too large or spend exhausted
+    # The model answered but stopped at our output limit. Not retried: the same request
+    # stops at the same length and is paid for again.
+    TRUNCATED = "truncated"
 
 
 class AiUnavailable(RuntimeError):
-    """An expected provider failure; ``message`` is safe to log and show."""
+    """An expected provider failure; ``message`` is safe to log and show.
 
-    def __init__(self, code: AiErrorCode, message: str) -> None:
+    ``spent`` is set when the call was paid for although it gave no usable answer (a
+    cut-off one): the tokens and the price, so the run budget is charged all the same.
+    """
+
+    def __init__(self, code: AiErrorCode, message: str, *, spent: "AiAnswer | None" = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.spent = spent
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +96,18 @@ class RecommendationProvider(Protocol):
         body or the answer: both may hold the customer's data.
         """
         ...
+
+
+@runtime_checkable
+class PreparedProvider(Protocol):
+    """A provider with something to learn before its calls (polza: what the model accepts).
+
+    ``prepare`` runs on its own timeout, never out of a call's (review B on #63), and is
+    cheap once there is nothing left to learn, so the guard may call it before every call.
+    Expected failures stay inside: the calls then go out with what every model accepts.
+    """
+
+    async def prepare(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

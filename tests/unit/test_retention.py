@@ -137,6 +137,22 @@ async def test_retention_must_be_positive(storage):
         await purge_expired(repository, files, retention=timedelta(0), now=clock.now)
 
 
+async def eventually(check, timeout: float = 2.0) -> None:
+    """The sweeper works in its own task: wait for what it does, not for a fixed pause.
+
+    A pause of 0.05 s was outlasted by the Windows runner on main (30.09.2026): the purge
+    had not finished yet, and the test failed with nothing wrong in the sweeper.
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not await check():
+        if loop.time() > deadline:
+            raise AssertionError("the sweeper did not get there in time")
+        await asyncio.sleep(0.01)
+
+
 async def test_sweeper_purges_at_start_and_stops_promptly(storage):
     import asyncio
 
@@ -147,8 +163,11 @@ async def test_sweeper_purges_at_start_and_stops_promptly(storage):
         repository, files, retention=RETENTION, interval=3600, clock=lambda: clock.now
     )
     task = asyncio.create_task(sweeper.run_forever())
-    await asyncio.sleep(0.05)
-    assert await repository.list_runs(OWNER) == ()
+
+    async def purged():
+        return await repository.list_runs(OWNER) == ()
+
+    await eventually(purged)
     sweeper.stop()
     await asyncio.wait_for(task, timeout=1)
 
@@ -169,7 +188,11 @@ async def test_sweeper_survives_a_storage_failure(storage, caplog):
     sweeper = RetentionSweeper(Broken(), files, retention=RETENTION, interval=3600)
     task = asyncio.create_task(sweeper.run_forever())
     with caplog.at_level(logging.ERROR):
-        await asyncio.sleep(0.05)
+
+        async def logged():
+            return "retention_sweep_failed" in caplog.text
+
+        await eventually(logged)
     sweeper.stop()
     await asyncio.wait_for(task, timeout=1)
     assert "retention_sweep_failed" in caplog.text and "secret path" not in caplog.text
