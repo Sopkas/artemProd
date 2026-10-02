@@ -832,3 +832,61 @@ def test_a_summary_saved_before_the_source_limit_existed_still_reads():
         '"priorities": {"low": 1}, "budget_exhausted": false}'
     )
     assert RunSummary.from_payload(old).source_limited is False
+
+
+# --- a bankruptcy sample cut short on a later page (#71) --------------------------------
+
+
+class InterruptedBankruptcy:
+    """The demo source, but every bankruptcy sample stops on page 2 with ``code``."""
+
+    def __init__(self, code: str) -> None:
+        self.inner = DemoCompanyDataProvider()
+        self.code = code
+
+    async def fetch(self, request: CompanyDataRequest):
+        snapshots = await self.inner.fetch(request)
+        return tuple(
+            replace(
+                snapshot,
+                coverage=Coverage.PARTIAL,
+                missing=(*snapshot.missing, "Выборка неполная: страница не получена."),
+                interrupted=ProviderError(self.code, "сбой на странице 2"),
+            )
+            if snapshot.section is Section.BANKRUPTCY
+            else snapshot
+            for snapshot in snapshots
+        )
+
+
+@pytest.mark.parametrize(
+    "code, final",
+    [("timeout", False), ("network_error", False), ("daily_limit", False), ("api_error", True)],
+)
+async def test_an_interrupted_sample_is_saved_only_when_a_repeat_would_not_finish_it(
+    tmp_path, code, final
+):
+    """A sample cut by a transient failure or the day's limit is not final: the step is not
+    saved, so tomorrow's repeat asks again. A broken answer on page 2 would break again."""
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    await pipeline(files, repository, guard(InterruptedBankruptcy(code))).process(run)
+    step = await repository.get_step(run.id, "1234567894", FETCH_STEP, FETCH_VERSION)
+    assert (step is not None) is final
+
+
+async def test_a_company_with_an_unfinished_sample_is_not_counted_as_checked(tmp_path):
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    outcome = await pipeline(files, repository, guard(InterruptedBankruptcy("timeout"))).process(
+        run
+    )
+    assert outcome.status == RunStatus.PARTIAL
+    assert "Организаций с неполными внешними данными: 2." in outcome.failure
+
+
+async def test_a_sample_cut_by_the_daily_limit_tells_the_user_to_come_back_tomorrow(tmp_path):
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    outcome = await pipeline(
+        files, repository, guard(InterruptedBankruptcy("daily_limit"))
+    ).process(run)
+    assert (await load_summary(run.id, repository)).source_limited is True
+    assert "завтра" in outcome.failure
