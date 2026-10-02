@@ -541,17 +541,28 @@ async def test_report_names_the_optional_files_of_the_package(tmp_path):
         files=files,
         reader=reader,
     )
-    payments = build_payments_workbook([["1234567894", "P-1", date(2026, 7, 15), 100.0]])
-    await accept_ledger(
-        OWNER,
-        accepted_run.run.id,
-        FileKind.PAYMENTS,
-        payments,
-        coverage=Period(date(2026, 6, 1), date(2026, 8, 31)),
-        repository=repository,
-        files=files,
-        reader=reader,
-    )
+    # Two exports: each line counts its own file, not every payment of the package
+    # (block 5 of the manual test, 30.09.2026: both lines said the total).
+    for rows, start in (
+        ([["1234567894", "P-1", date(2026, 7, 15), 100.0]], date(2026, 6, 1)),
+        (
+            [
+                ["7707083893", "P-2", date(2026, 7, 20), 5.0],
+                ["7707083893", "P-3", date(2026, 8, 20), 5.0],
+            ],
+            date(2026, 7, 1),
+        ),
+    ):
+        await accept_ledger(
+            OWNER,
+            accepted_run.run.id,
+            FileKind.PAYMENTS,
+            build_payments_workbook(rows),
+            coverage=Period(start, date(2026, 8, 31)),
+            repository=repository,
+            files=files,
+            reader=reader,
+        )
     await repository.transition(OWNER, accepted_run.run.id, RunStatus.QUEUED)
     run = await repository.claim_next()
     await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
@@ -560,8 +571,12 @@ async def test_report_names_the_optional_files_of_the_package(tmp_path):
     text = " ".join(str(cell) for row in about for cell in row if cell is not None)
     assert "Контрагенты: 2 строк, пригодных 2" in text
     assert (
-        "Платежи за 01.06.2026–31.08.2026: использован — давность платежа; "
-        "пригодных строк этого вида: 1"
+        "Платежи за 01.06.2026–31.08.2026, файл 1: использован — давность платежа; "
+        "пригодных строк: 1"
+    ) in text
+    assert (
+        "Платежи за 01.07.2026–31.08.2026, файл 2: использован — давность платежа; "
+        "пригодных строк: 2"
     ) in text
 
 

@@ -159,6 +159,15 @@ async def test_the_contracts_reach_the_report_and_the_priorities_sheet(deps):
     assert priorities[INN_2][10] is None and priorities[INN_2][11] is None
 
 
+async def test_about_the_check_says_what_the_report_gave(deps):
+    """It said «не используется; пригодных строк этого вида: 0» next to two contracts."""
+    _, data = await run_check(deps)
+    about = " ".join(str(c) for row in sheet_rows(data, "О проверке") for c in row if c)
+    assert (
+        "Отчёт по договорам: использован — договоры в карточке и на листе «Договоры»; договоров: 2"
+    ) in about
+
+
 async def test_a_name_that_matches_nobody_is_named_in_the_quality_sheet(deps):
     report = debt_report([("ООО «Совсем другая»", [("Дог-9", 10, 1.0, "Станок")])])
     run = (await package(deps, report)).run
@@ -169,6 +178,29 @@ async def test_a_name_that_matches_nobody_is_named_in_the_quality_sheet(deps):
     assert "не отнесены ни к одной организации" in quality
     contracts = sheet_rows(data, "Договоры")
     assert contracts == [("Договоры не приложены", None, None, None, None, None, None, None)]
+
+
+async def test_a_company_printed_twice_in_one_report_keeps_all_its_contracts(deps):
+    """30.09.2026: the second entry of a company in the same file lost its contracts, and
+    «Качество данных» said the company was «in two reports» about a single file."""
+    report = debt_report(
+        [
+            (DEMO_NAME, [("Дог-1", 307, 1_200_000.0, "Экскаватор")]),
+            (DEMO_NAME, [("Дог-3", 40, 300_000.0, "Бульдозер")]),
+        ]
+    )
+    accepted = await package(deps, report)
+    assert (accepted.rows, accepted.contracts) == (1, 2)  # what the upload summary says
+    await pipeline(deps["files"], deps["repository"], guard(NamingProvider())).process(accepted.run)
+    artifact = await deps["repository"].get_report(OWNER, accepted.run.id)
+    data = deps["files"].read(artifact.stored_path)
+    contracts = [(row[0], row[2], row[4]) for row in sheet_rows(data, "Договоры") if row[0]]
+    assert contracts == [
+        (INN_1, "Дог-1", Decimal("1200000.00")),
+        (INN_1, "Дог-3", Decimal("300000.00")),
+    ]
+    quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
+    assert "двух отчётах" not in quality
 
 
 async def test_a_resumed_check_keeps_the_contracts_without_reading_the_file_again(deps):

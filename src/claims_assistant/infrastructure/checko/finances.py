@@ -12,7 +12,6 @@ the two latest *consecutive* years as facts. Ratios (growth, revenue drop) belon
 scoring rules (S3-05), not here: this module never divides or infers a trend.
 """
 
-import json
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Protocol
@@ -37,12 +36,12 @@ from claims_assistant.infrastructure.checko.errors import (
     NotFound,
     is_not_found,
 )
+from claims_assistant.infrastructure.checko.http import read_response
 
 __all__ = ["read_finances", "project_finances", "AiohttpFinancesTransport", "FinancesTransport"]
 
 SOURCE = "checko-finances-v2"
 FINANCES_URL = "https://api.checko.ru/v2/finances"
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 UNIT = "RUB"
 _LINES = (("2110", FactKind.REVENUE, "revenue"), ("2400", FactKind.NET_PROFIT, "net-profit"))
 
@@ -59,17 +58,7 @@ class AiohttpFinancesTransport:
             async with session.post(
                 FINANCES_URL, json={"key": key, "inn": inn}, allow_redirects=False
             ) as response:
-                if response.status != 200:
-                    return response.status, None
-                body = bytearray()
-                async for chunk in response.content.iter_chunked(65536):
-                    body.extend(chunk)
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        raise InvalidResponse() from None
-                try:
-                    return response.status, json.loads(body)
-                except (ValueError, UnicodeError):
-                    raise InvalidResponse() from None
+                return await read_response(response)
 
 
 def read_finances(payload: object) -> dict[int, dict]:

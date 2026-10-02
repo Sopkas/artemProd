@@ -84,8 +84,12 @@ EXPORT_INN_PROMPT = (
     "а по названию в шапке опознать организацию нельзя.\n"
     "ИНН должен быть из файла «Контрагенты» этой проверки."
 )
+EXPORT_INN_NOT_IN_PACKAGE = (
+    "Этой организации нет в файле «Контрагенты» этой проверки. "
+    "Отправьте ИНН из него или нажмите «Отмена»."
+)
 EXPORT_FILE_PROMPT = (
-    "Отправьте файл выгрузки .xlsx (до 10 МБ) — так, как его печатает 1С, "
+    "Отправьте файл выгрузки .xlsx или .xls (до 10 МБ) — так, как его печатает 1С, "
     "перестраивать ничего не нужно.\nЧтобы вернуться к пакету, нажмите «Отмена»."
 )
 PAYMENTS_PERIOD_PROMPT = (
@@ -234,8 +238,12 @@ def _composition_block(composition: tuple[str, ...]) -> list[str]:
     return ["Состав пакета:"] + [f"• {line}" for line in composition]
 
 
-def export_summary(export, rows: int) -> str:
-    """What the export's own header said — so a file about the wrong client is noticed."""
+def export_summary(export, rows: int, coverage: Period | None = None) -> str:
+    """What the export's own header said — so a file about the wrong client is noticed.
+
+    ``coverage`` is the part of the period the package counts on; when it is shorter than
+    the header's (an export printed past the analysis date), the summary says so.
+    """
     lines = []
     if export.counterparty:
         lines.append(f"Контрагент в файле: {export.counterparty}")
@@ -250,6 +258,11 @@ def export_summary(export, rows: int) -> str:
         lines.append(
             "Период в файле не указан: полнота выгрузки неизвестна, "
             "показатель по платежам останется неопределённым."
+        )
+    if export.period is not None and coverage is not None and coverage != export.period:
+        lines.append(
+            "Поступления после даты анализа не учитываются, поэтому выгрузка полна "
+            f"за {period_text(coverage)}."
         )
     lines.append(f"Платежей принято: {rows}. В пакет сохранён лист «Платежи» из этой выгрузки.")
     return "\n".join(lines)
