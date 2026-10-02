@@ -173,3 +173,68 @@ def test_on_a_conflict_even_a_correct_sounding_answer_cannot_name_the_dates():
         scenario, {"explanation": "Даты 18.06.2026 и 20.07.2026 расходятся, давность не ясна."}
     )
     assert isinstance(result, Rejected) and result.code.value == "new_date"
+
+
+def test_a_cut_off_answer_is_the_models_result_not_a_lost_connection():
+    """«Связь оборвалась» is the channel; an answer stopped by our length limit came back
+    and was paid for — it belongs with the model's other failures, and in its median."""
+    from evals.bench import ModelSummary, Result
+
+    summary = ModelSummary(
+        "m",
+        [
+            Result("m", "a", 1, "accepted", 2.0, 100),
+            Result("m", "b", 1, "unavailable:truncated", 3.0, 100),
+            Result("m", "c", 1, "unavailable:unavailable", 60.0, 100),
+            Result("m", "d", 1, "unavailable:timeout", 90.0, 100),
+        ],
+    )
+    assert summary.lost == 2
+    assert summary.codes == "unavailable:truncated × 1"
+    assert summary.median_seconds == 2.5
+
+
+def test_a_saved_catalogue_answers_for_the_models_it_lists(tmp_path):
+    """The link to the catalogue drops half the time: the bench can read one saved copy,
+    so every model is measured against the same snapshot of what it accepts."""
+    from claims_assistant.infrastructure.llm.polza import ModelParameters
+    from evals.bench import saved_parameters
+    from tests.unit.test_polza_provider import GPT_5_MINI, GPT_41_MINI
+
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps({"data": [GPT_41_MINI, GPT_5_MINI]}), encoding="utf-8")
+    catalogue = saved_parameters(path)
+    assert catalogue("openai/gpt-5-mini") == ModelParameters(
+        temperature=False, response_format=True, reasoning=True
+    )
+    assert catalogue("openai/gpt-4.1-mini").temperature is True
+    assert catalogue("no-such/model") is None
+
+
+def test_a_cut_off_answer_is_counted_in_the_money_of_the_run():
+    """A cut-off answer was paid for (26.09: 1000 tokens, 0,58 ₽ each at one model) and the
+    table must show it; a call that never reached the model cost nothing."""
+    from decimal import Decimal
+
+    from claims_assistant.application.recommendation import (
+        AiAnswer,
+        AiErrorCode,
+        AiUnavailable,
+        ExplanationOutcome,
+    )
+    from evals.bench import spent_of
+
+    paid = AiAnswer(
+        text="",
+        provider="polza",
+        model="m",
+        input_tokens=1813,
+        output_tokens=1000,
+        latency_seconds=5.0,
+        cost_rub=Decimal("0.57764"),
+    )
+    cut = AiUnavailable(AiErrorCode.TRUNCATED, "Ответ модели обрезан.", spent=paid)
+    lost = AiUnavailable(AiErrorCode.UNAVAILABLE, "Провайдер ИИ недоступен.")
+    assert spent_of(ExplanationOutcome("polza", "m", "v", error=cut)) is paid
+    assert spent_of(ExplanationOutcome("polza", "m", "v", error=lost)) is None
+    assert spent_of(ExplanationOutcome("polza", "m", "v", answer=paid)) is paid

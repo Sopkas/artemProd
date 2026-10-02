@@ -25,6 +25,7 @@ _STATUS_NOTES = {
     "unavailable:unavailable": "модель недоступна",
     "unavailable:rate_limited": "модель ограничила число запросов",
     "unavailable:refused": "провайдер отклонил запрос",
+    "unavailable:truncated": "ответ модели обрезан лимитом длины",
 }
 
 

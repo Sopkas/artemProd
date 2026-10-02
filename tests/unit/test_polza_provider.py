@@ -6,6 +6,7 @@ docs/ai-provider.md), including the error body and the usage block with its pric
 """
 
 import json
+from decimal import Decimal
 
 import pytest
 
@@ -19,9 +20,11 @@ from claims_assistant.domain.ai_context import build_request
 from claims_assistant.infrastructure.llm.polza import (
     ANSWER_SCHEMA,
     DEFAULT_MODEL,
+    ModelParameters,
     PolzaRecommendationProvider,
     answer_schema,
     known_ids,
+    parameters_from_catalog,
 )
 from claims_assistant.infrastructure.llm.stub import default_answer
 from tests.unit.test_ai_evals import INN, context
@@ -54,13 +57,137 @@ def answer(content: str = VALID):
     }
 
 
+# Catalogue entries as polza returned them on 26.09.2026 (GET /api/v1/models/<id>), with
+# the long descriptions and the per-provider list left out.
+GPT_41_MINI = {
+    "id": "openai/gpt-4.1-mini",
+    "name": "OpenAI: GPT-4.1 Mini",
+    "type": "chat",
+    "created": 1769617411,
+    "top_provider": {
+        "name": "azure",
+        "context_length": 1047576,
+        "max_completion_tokens": 942818,
+        "pricing": {
+            "prompt_per_million": "47.52160000",
+            "completion_per_million": "190.08640000",
+            "currency": "RUB",
+        },
+        "supported_parameters": [
+            "max_completion_tokens",
+            "seed",
+            "response_format",
+            "structured_outputs",
+            "tools",
+            "tool_choice",
+            "temperature",
+            "top_p",
+            "max_tokens",
+        ],
+        "default_parameters": {"temperature": None, "top_p": None, "frequency_penalty": None},
+    },
+}
+GPT_5_MINI = {
+    "id": "openai/gpt-5-mini",
+    "name": "OpenAI: GPT-5 Mini",
+    "type": "chat",
+    "created": 1769617413,
+    "top_provider": {
+        "name": "openai/flex",
+        "context_length": 400000,
+        "max_completion_tokens": 128000,
+        "pricing": {
+            "prompt_per_million": "14.85050000",
+            "completion_per_million": "118.80400000",
+            "currency": "RUB",
+        },
+        "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "structured_outputs",
+            "response_format",
+            "seed",
+            "max_tokens",
+            "tools",
+            "tool_choice",
+            "reasoning_effort",
+        ],
+        "default_parameters": {"temperature": None, "top_p": None, "frequency_penalty": None},
+    },
+}
+GEMINI_25_FLASH = {
+    "id": "google/gemini-2.5-flash",
+    "name": "Google: Gemini 2.5 Flash",
+    "type": "chat",
+    "created": 1769617391,
+    "top_provider": {
+        "name": "mie",
+        "context_length": 1048576,
+        "max_completion_tokens": None,
+        "pricing": {
+            "prompt_per_million": "20.62098000",
+            "completion_per_million": "171.84150000",
+            "currency": "RUB",
+        },
+        "supported_parameters": ["max_tokens"],
+        "default_parameters": None,
+    },
+}
+
+QWEN_36_FLASH = {
+    "id": "qwen/qwen3.6-flash",
+    "name": "Qwen: Qwen3.6 Flash",
+    "type": "chat",
+    "created": 1777307727,
+    "top_provider": {
+        "name": "alibaba",
+        "context_length": 1000000,
+        "max_completion_tokens": 65536,
+        "pricing": {
+            "prompt_per_million": "22.27575000",
+            "completion_per_million": "133.65450000",
+            "currency": "RUB",
+        },
+        # «reasoning» without «reasoning_effort», like 96 of the 179 reasoning models.
+        "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "seed",
+            "presence_penalty",
+            "response_format",
+            "tools",
+            "tool_choice",
+            "structured_outputs",
+            "logprobs",
+            "top_logprobs",
+            "top_k",
+            "frequency_penalty",
+            "stop",
+        ],
+        "default_parameters": {"temperature": None, "top_p": None, "frequency_penalty": None},
+    },
+}
+
 _DEFAULT = object()
 
 
 class Transport:
-    """Stands in for the HTTP call; remembers what it was asked to send."""
+    """Stands in for the HTTP calls; remembers what it was asked to send.
 
-    def __init__(self, status: int = 200, body: object = _DEFAULT, error: Exception | None = None):
+    ``catalog`` is what the model's catalogue entry answers: an entry (HTTP 200), a
+    ``(status, body)`` pair, or an exception to raise.
+    """
+
+    def __init__(
+        self,
+        status: int = 200,
+        body: object = _DEFAULT,
+        error: Exception | None = None,
+        catalog: object = GPT_41_MINI,
+    ):
         # `None` is a body in its own right here (the answer was not JSON), so the
         # default is a sentinel rather than None.
         self._status, self._body, self._error = (
@@ -68,9 +195,11 @@ class Transport:
             answer() if body is _DEFAULT else body,
             error,
         )
+        self._catalog = catalog
         self.calls: list[dict] = []
         self.timeouts: list[float] = []
         self.keys: list[str] = []
+        self.fetched: list[str] = []
 
     async def request(self, key, url, payload, timeout):
         self.calls.append(payload)
@@ -80,15 +209,30 @@ class Transport:
             raise self._error
         return self._status, self._body
 
+    async def fetch(self, url, timeout):
+        self.fetched.append(url)
+        if isinstance(self._catalog, Exception):
+            raise self._catalog
+        if isinstance(self._catalog, tuple):
+            return self._catalog
+        return 200, self._catalog
+
 
 def provider(transport, **kwargs) -> PolzaRecommendationProvider:
     return PolzaRecommendationProvider(KEY, transport=transport, **kwargs)
 
 
+async def ready(transport, **kwargs) -> PolzaRecommendationProvider:
+    """The client as the guard leaves it before a call: the catalogue already asked."""
+    client = provider(transport, **kwargs)
+    await client.prepare()
+    return client
+
+
 async def test_the_request_carries_the_instruction_the_context_and_our_limits():
     transport = Transport()
     request = build_request(context())
-    await provider(transport).explain(request, LIMITS)
+    await (await ready(transport)).explain(request, LIMITS)
     (payload,) = transport.calls
     assert payload["model"] == DEFAULT_MODEL
     assert payload["messages"][0] == {"role": "system", "content": request.instruction}
@@ -190,8 +334,33 @@ async def test_an_answer_cut_off_by_the_length_limit_is_not_passed_on():
     body["choices"][0]["finish_reason"] = "length"
     with pytest.raises(AiUnavailable) as failure:
         await provider(Transport(200, body)).explain(build_request(context()), LIMITS)
-    assert failure.value.code is AiErrorCode.UNAVAILABLE
+    # Its own code, not «unavailable»: a lost connection is worth a retry, a cut-off
+    # answer is not — the same request stops at the same length and is paid for again.
+    assert failure.value.code is AiErrorCode.TRUNCATED
     assert "обрезан" in failure.value.message
+    # The call was paid for all the same; what it cost travels with the failure.
+    spent = failure.value.spent
+    assert spent is not None
+    assert (spent.input_tokens, spent.output_tokens) == (99, 38)
+    assert spent.cost_rub == Decimal("0.0044424")
+
+
+async def test_a_model_stopped_while_still_reasoning_is_cut_off_too():
+    """A reasoning model can use the whole limit on its reasoning: the text is then empty,
+    and that is still a cut-off, not an answer we failed to parse."""
+    body = answer("")
+    body["choices"][0]["finish_reason"] = "length"
+    body["usage"] = {"prompt_tokens": 1200, "completion_tokens": 500, "cost_rub": 0.09}
+    with pytest.raises(AiUnavailable) as failure:
+        await provider(Transport(200, body)).explain(build_request(context()), LIMITS)
+    assert failure.value.code is AiErrorCode.TRUNCATED
+    assert failure.value.spent.cost_rub == Decimal("0.09")
+
+
+async def test_a_failure_before_any_answer_costs_nothing():
+    with pytest.raises(AiUnavailable) as failure:
+        await provider(Transport(503, {"error": {}})).explain(build_request(context()), LIMITS)
+    assert failure.value.spent is None
 
 
 @pytest.mark.parametrize("usage", [{}, {"prompt_tokens": "99"}, {"prompt_tokens": -5}, None])
@@ -225,3 +394,170 @@ async def test_a_context_without_a_single_id_allows_no_grounds_at_all():
     empty = {"facts": [], "values": [], "comments": []}
     grounds = answer_schema(empty)["properties"]["grounds"]
     assert grounds["maxItems"] == 0 and "enum" not in grounds["items"]
+
+
+# --- what each model accepts: the provider's catalogue (S5-07) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        (GPT_41_MINI, ModelParameters(temperature=True, response_format=True, reasoning=False)),
+        (GPT_5_MINI, ModelParameters(temperature=False, response_format=True, reasoning=True)),
+        (QWEN_36_FLASH, ModelParameters(temperature=True, response_format=True, reasoning=True)),
+        (
+            GEMINI_25_FLASH,
+            ModelParameters(temperature=False, response_format=False, reasoning=False),
+        ),
+    ],
+)
+def test_what_a_model_accepts_is_read_from_its_catalogue_entry(entry, expected):
+    assert parameters_from_catalog(entry) == expected
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        None,
+        {},
+        {"top_provider": None},
+        {"top_provider": {"supported_parameters": "max_tokens"}},
+        {"error": {"code": "NOT_FOUND", "message": "Модель не найдена"}},
+    ],
+)
+def test_an_entry_we_cannot_read_says_nothing_about_the_model(entry):
+    assert parameters_from_catalog(entry) is None
+
+
+async def test_a_reasoning_model_gets_no_temperature_and_a_low_reasoning_effort():
+    """Ninety of the catalogue's chat models answer 400 to a temperature, and a reasoning
+    model left at its own effort can spend our whole output limit before it answers."""
+    transport = Transport(catalog=GPT_5_MINI)
+    client = await ready(transport, model="openai/gpt-5-mini")
+    await client.explain(build_request(context()), LIMITS)
+    (payload,) = transport.calls
+    assert "temperature" not in payload
+    assert payload["reasoning"] == {"effort": "low"}
+    assert payload["max_tokens"] == LIMITS.max_output_tokens
+    assert payload["response_format"]["json_schema"]["strict"] is True
+
+
+async def test_a_model_without_reasoning_gets_no_reasoning_block():
+    transport = Transport(catalog=GPT_41_MINI)
+    await (await ready(transport)).explain(build_request(context()), LIMITS)
+    assert "reasoning" not in transport.calls[0] and transport.calls[0]["temperature"] == 0
+
+
+async def test_a_model_that_takes_no_schema_is_asked_for_json_in_words_whatever_the_setting():
+    transport = Transport(catalog=GEMINI_25_FLASH)
+    client = await ready(transport, model="google/gemini-2.5-flash")
+    await client.explain(build_request(context()), LIMITS)
+    (payload,) = transport.calls
+    assert "response_format" not in payload
+    assert "JSON" in payload["messages"][0]["content"]
+
+
+async def test_the_catalogue_is_asked_once_per_model():
+    transport = Transport()
+    client = provider(transport)
+    for _ in range(2):  # as the guard does: prepare, then the call
+        await client.prepare()
+        await client.explain(build_request(context()), LIMITS)
+    assert transport.fetched == [f"https://polza.ai/api/v1/models/{DEFAULT_MODEL}"]
+    assert [call["temperature"] for call in transport.calls] == [0, 0]
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [OSError("Cannot connect"), (404, {"error": {"code": "NOT_FOUND"}}), (200, None)],
+)
+async def test_without_the_catalogue_only_what_every_model_accepts_is_sent(catalog):
+    """The explanation is still asked for; the parameters some models refuse are left out
+    until the catalogue answers, and it is asked again before the next call."""
+    transport = Transport(catalog=catalog)
+    client = provider(transport)
+    for _ in range(2):
+        await client.prepare()
+        await client.explain(build_request(context()), LIMITS)
+    assert len(transport.calls) == 2 and len(transport.fetched) == 2
+    for payload in transport.calls:
+        assert "temperature" not in payload and "reasoning" not in payload
+        assert payload["max_tokens"] == LIMITS.max_output_tokens
+        assert "response_format" in payload  # the setting decides while nothing is known
+
+
+async def test_parameters_given_up_front_are_used_without_asking_the_catalogue():
+    """The bench reads the catalogue itself, once, before it spends any money."""
+    transport = Transport()
+    known = parameters_from_catalog(GPT_5_MINI)
+    await provider(transport, parameters=known).explain(build_request(context()), LIMITS)
+    assert transport.fetched == []
+    assert "temperature" not in transport.calls[0]
+
+
+async def test_the_reasoning_effort_can_be_chosen():
+    transport = Transport(catalog=GPT_5_MINI)
+    client = await ready(transport, reasoning_effort="minimal")
+    await client.explain(build_request(context()), LIMITS)
+    assert transport.calls[0]["reasoning"] == {"effort": "minimal"}
+
+
+async def test_a_refused_request_hands_its_body_to_whoever_asked_for_it():
+    """For choosing a model the provider's own words are what tells «модель не подошла»
+    from «мы послали не то»; they go to the caller's hook, never to the log or the user."""
+    seen = []
+    body = {"error": {"code": "BAD_REQUEST", "message": "Unsupported parameter: temperature"}}
+    client = provider(
+        Transport(400, body), on_failure=lambda status, got: seen.append((status, got))
+    )
+    with pytest.raises(AiUnavailable) as failure:
+        await client.explain(build_request(context()), LIMITS)
+    assert seen == [(400, body)]
+    assert "temperature" not in failure.value.message
+
+
+# --- the catalogue is read on its own time, not the model's (review B on #63) ------------
+
+
+class SlowCatalogue(Transport):
+    """The catalogue answers after a while — it does in real life, every other time."""
+
+    def __init__(self, delay: float, **kwargs):
+        super().__init__(**kwargs)
+        self._delay = delay
+
+    async def fetch(self, url, timeout):
+        import asyncio
+
+        await asyncio.sleep(self._delay)
+        return await super().fetch(url, timeout)
+
+
+def guarded(client, timeout: float):
+    from claims_assistant.application.ai_guard import AiPolicy, GuardedRecommendationProvider
+
+    async def no_sleep(_seconds):
+        return None
+
+    policy = AiPolicy(timeout_seconds=timeout, max_retries=0)
+    return GuardedRecommendationProvider(client, policy, sleep=no_sleep)
+
+
+async def test_a_slow_catalogue_does_not_eat_the_time_the_model_has_to_answer():
+    """The catalogue was read inside the guard's timeout: with 30 s for the call and up to
+    15 s for the catalogue, the model was left 15 s and the explanation became a template."""
+    transport = SlowCatalogue(0.3)
+    answer_ = await guarded(provider(transport), timeout=0.2).explain(
+        build_request(context()), LIMITS
+    )
+    assert answer_.text
+    assert transport.calls[0]["temperature"] == 0  # the catalogue was read, then used
+
+
+async def test_after_the_catalogue_failed_the_call_does_not_wait_for_it_again():
+    transport = SlowCatalogue(0.3, catalog=OSError("Cannot connect"))
+    answer_ = await guarded(provider(transport), timeout=0.2).explain(
+        build_request(context()), LIMITS
+    )
+    assert answer_.text
+    assert "temperature" not in transport.calls[0]  # what every model accepts

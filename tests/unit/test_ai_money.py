@@ -84,6 +84,27 @@ async def test_a_price_we_cannot_trust_is_no_price(usage):
     assert result.cost_rub is None
 
 
+async def test_a_cut_off_answer_is_paid_for_once_and_counted():
+    """A reasoning model can spend the whole output limit before it answers. The call is
+    paid for, so the run's money must say so — and asking again would pay twice for the
+    same cut-off, so the guard does not."""
+    body = answer('{"explanation": "Нача')
+    body["choices"][0]["finish_reason"] = "length"
+    transport = Transport(200, body)
+    guard = GuardedRecommendationProvider(
+        PolzaRecommendationProvider(KEY, transport=transport),
+        AiPolicy(max_retries=2),
+        clock=lambda: NOW,
+    )
+    run_budget = budget("1.00")
+    with pytest.raises(AiUnavailable) as failure:
+        await guard.explain_within(build_request(context()), run_budget)
+    assert failure.value.code is AiErrorCode.TRUNCATED
+    assert len(transport.calls) == 1
+    assert run_budget.spent_rub == Decimal("0.0044424")
+    assert run_budget.tokens == 99 + 38
+
+
 async def test_the_guard_refuses_when_the_runs_money_is_gone():
     class Free:
         name, model = "stub", "stub-1"
