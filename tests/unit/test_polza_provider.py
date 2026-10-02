@@ -473,17 +473,31 @@ async def test_the_catalogue_is_asked_once_per_model():
 )
 async def test_without_the_catalogue_only_what_every_model_accepts_is_sent(catalog):
     """The explanation is still asked for; the parameters some models refuse are left out
-    until the catalogue answers, and it is asked again before the next call."""
+    until the catalogue answers. A failed catalogue is not asked again at once: at up to
+    15 s a call, a check of 50 companies would spend 12 minutes on it (review B on #63)."""
     transport = Transport(catalog=catalog)
-    client = provider(transport)
+    client = provider(transport, clock=lambda: 1000.0)
     for _ in range(2):
         await client.prepare()
         await client.explain(build_request(context()), LIMITS)
-    assert len(transport.calls) == 2 and len(transport.fetched) == 2
+    assert len(transport.calls) == 2 and len(transport.fetched) == 1
     for payload in transport.calls:
         assert "temperature" not in payload and "reasoning" not in payload
         assert payload["max_tokens"] == LIMITS.max_output_tokens
         assert "response_format" in payload  # the setting decides while nothing is known
+
+
+async def test_a_failed_catalogue_is_asked_again_five_minutes_later():
+    now = [1000.0]
+    transport = Transport(catalog=OSError("Cannot connect"))
+    client = provider(transport, clock=lambda: now[0])
+    await client.prepare()  # the guard's step before each call
+    now[0] += 299
+    await client.prepare()
+    assert len(transport.fetched) == 1
+    now[0] += 2  # 301 s after the failure
+    await client.prepare()
+    assert len(transport.fetched) == 2
 
 
 async def test_parameters_given_up_front_are_used_without_asking_the_catalogue():

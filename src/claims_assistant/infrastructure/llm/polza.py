@@ -49,6 +49,9 @@ DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_URL = "https://polza.ai/api/v1/chat/completions"
 CATALOG_URL = "https://polza.ai/api/v1/models"  # public: GET /<model id>, no key
 CATALOG_TIMEOUT_SECONDS = 15.0  # its own: read in prepare(), outside a call's timeout
+# After a failed lookup the catalogue is left alone for a while: at up to 15 s a try, asking
+# it on every call of a 50-company check while it is down costs 12 minutes (review B, #63).
+CATALOG_RETRY_SECONDS = 300.0
 # The task is to explain facts already given, not to solve anything: a low effort keeps a
 # reasoning model inside the output limit and the price.
 REASONING_EFFORT = "low"
@@ -257,6 +260,7 @@ class PolzaRecommendationProvider:
         parameters: ModelParameters | None = None,
         reasoning_effort: str = REASONING_EFFORT,
         on_failure: Callable[[int, object], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """``parameters`` — what the model accepts, when the caller already knows it;
         otherwise the catalogue is asked on the first call. ``on_failure`` receives the
@@ -271,6 +275,8 @@ class PolzaRecommendationProvider:
         self._parameters = parameters
         self._effort = reasoning_effort
         self._on_failure = on_failure
+        self._clock = clock
+        self._catalog_failed_at: float | None = None
 
     async def prepare(self) -> None:
         """What the model accepts, from the catalogue, on the catalogue's own timeout.
@@ -282,9 +288,13 @@ class PolzaRecommendationProvider:
         """
         if self._parameters is not None:
             return
+        failed_at = self._catalog_failed_at
+        if failed_at is not None and self._clock() - failed_at < CATALOG_RETRY_SECONDS:
+            return
         found = await lookup_parameters(self._transport, self.model, CATALOG_TIMEOUT_SECONDS)
         if found is None:
-            # Not remembered: the catalogue is asked again before the next call.
+            # Remembered for a while only: the catalogue is asked again after the pause.
+            self._catalog_failed_at = self._clock()
             logger.info("ai_catalog provider=%s model=%s found=no", self.name, self.model)
             return
         logger.info(
