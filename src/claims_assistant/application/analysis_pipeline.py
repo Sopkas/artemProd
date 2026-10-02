@@ -82,7 +82,9 @@ STEP_UNREADABLE = "Сохранённый шаг проверки не чита�
 IMPORT_STEP = "import"
 LINKS_STEP = "contracts_link"
 LINKS_VERSION = "links-v1"
-IMPORT_VERSION = "package-v4"  # v1: counts; v2: rows and issues; v3: every file; v4: contracts
+# v1: counts; v2: rows and issues; v3: every file; v4: contracts; v5: rows per file, and
+# a company printed twice in one overdue report is one company.
+IMPORT_VERSION = "package-v5"
 FETCH_STEP = "external_fetch"
 FETCH_VERSION = "sections-v1"
 REPORT_STEP = "report"
@@ -284,6 +286,7 @@ class AnalysisPipeline:
             history=review.history,
             interactions=review.interactions,
             contracts=review.contracts,
+            file_rows=dict(review.file_rows),
         )
         await self._save(run, RUN_SCOPE, IMPORT_STEP, IMPORT_VERSION, payload=dump_import(package))
         return package
@@ -655,6 +658,7 @@ _FILE_USE = {
     FileKind.PAYMENTS: "давность платежа",
     FileKind.DEBT_HISTORY: "динамика долга за месяц",
     FileKind.INTERACTIONS: "лист «Хронология»",
+    FileKind.DEBT_REPORT: "договоры в карточке и на листе «Договоры»",
 }
 
 
@@ -667,19 +671,17 @@ def _package_lines(run: AnalysisRun, package: ImportedPackage) -> tuple[str, ...
         for issue in issues
         if issue.severity is IssueSeverity.ERROR and issue.row is not None
     }
-    counts = {
-        FileKind.PAYMENTS: len(package.payments),
-        FileKind.DEBT_HISTORY: len(package.history),
-        FileKind.INTERACTIONS: len(package.interactions),
-    }
     lines = []
     for file, (_, label) in zip(run.files, file_labels(run.files), strict=True):
         if file.kind is FileKind.COUNTERPARTIES:
             lines.append(f"{label}: {len(rows) + len(bad_rows)} строк, пригодных {len(rows)}")
         else:
+            # Each file is credited with what it gave itself (block 5, 30.09.2026: every
+            # payments file showed the total of all of them, the report showed zero).
             use = _FILE_USE.get(file.kind, "не используется")
-            usable = counts.get(file.kind, 0)
-            lines.append(f"{label}: использован — {use}; пригодных строк этого вида: {usable}")
+            usable = package.file_rows.get(file.id, 0)
+            unit = "договоров" if file.kind is FileKind.DEBT_REPORT else "пригодных строк"
+            lines.append(f"{label}: использован — {use}; {unit}: {usable}")
     return tuple(lines)
 
 
