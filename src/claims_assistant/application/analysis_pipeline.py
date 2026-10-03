@@ -666,13 +666,24 @@ def _hit_budget(snapshot: ExternalSnapshot) -> bool:
 
 def _hit_source_limit(snapshot: ExternalSnapshot) -> bool:
     """The source's daily limit: its own answer (``daily_limit``) or the guard's placeholder
-    for the companies after it. A 429 burst is not this (review B on #65)."""
+    for the companies after it — also when it cut a sample on a later page (#71). A 429
+    burst is not this (review B on #65)."""
+    if snapshot.interrupted is not None and snapshot.interrupted.code == DAILY_LIMIT:
+        return True
     return snapshot.error is not None and snapshot.error.code in (DAILY_LIMIT, SOURCE_LIMIT)
 
 
+# A sample cut on a later page by one of these may well be finished by a repeat; one cut by
+# a broken answer (api_error, invalid_response) would break the same way, so it is final.
+_UNFINISHED = TRANSIENT_CODES | {DAILY_LIMIT}
+
+
 def _is_open(snapshot: ExternalSnapshot) -> bool:
-    """Not a final answer: the budget placeholder or a transient source failure."""
+    """Not a final answer: the budget placeholder, a transient source failure, or a sample
+    the source cut short for a reason a repeat may not meet (#71)."""
     if _hit_budget(snapshot) or snapshot.status is FetchStatus.RATE_LIMITED:
+        return True
+    if snapshot.interrupted is not None and snapshot.interrupted.code in _UNFINISHED:
         return True
     return snapshot.error is not None and snapshot.error.code in TRANSIENT_CODES
 
@@ -728,7 +739,11 @@ def _summarize(
     source_limited = False
     for row in rows:
         priorities[row.assessment.priority] += 1
-        if all(snapshot.status is FetchStatus.OK for snapshot in row.snapshots):
+        # A sample cut short (#71) is data, but not a finished check of the company.
+        if all(
+            snapshot.status is FetchStatus.OK and snapshot.interrupted is None
+            for snapshot in row.snapshots
+        ):
             checked += 1
         if any(_hit_budget(snapshot) for snapshot in row.snapshots):
             budget_exhausted = True

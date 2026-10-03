@@ -250,6 +250,7 @@ def snapshot_to_dict(snapshot: ExternalSnapshot) -> dict[str, Any]:
             snapshot.source_updated_at.isoformat() if snapshot.source_updated_at else None
         ),
         "error": _error_to_dict(snapshot.error),
+        "interrupted": _error_to_dict(snapshot.interrupted),
     }
 
 
@@ -272,6 +273,8 @@ def snapshot_from_dict(data: Any) -> ExternalSnapshot:
         covered_period=_optional(data, "covered_period", _period_from_dict),
         source_updated_at=_optional(data, "source_updated_at", _moment),
         error=_optional(data, "error", _error_from_dict),
+        # Absent in payloads saved before #71: read as not interrupted.
+        interrupted=_optional(data, "interrupted", _error_from_dict),
     )
     return _built(lambda: ExternalSnapshot(**fields))
 
