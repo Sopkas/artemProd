@@ -57,8 +57,12 @@ from .external_guard import (
     RunBudget,
 )
 from .imports import SheetReader
-from .internal_context import payment_periods
-from .package_checks import PackageIntegrityError, PackageReview, review_package
+from .package_checks import (
+    PackageIntegrityError,
+    PackageReview,
+    payment_periods,
+    review_package,
+)
 from .recommendation import (
     AiLimits,
     RecommendationProvider,
@@ -89,8 +93,9 @@ IMPORT_STEP = "import"
 LINKS_STEP = "contracts_link"
 LINKS_VERSION = "links-v1"
 # v1: counts; v2: rows and issues; v3: every file; v4: contracts; v5: rows per file, and
-# a company printed twice in one overdue report is one company.
-IMPORT_VERSION = "package-v5"
+# a company printed twice in one overdue report is one company; v6: a 1C export's period
+# is its own company's, so the date conflicts in the step changed.
+IMPORT_VERSION = "package-v6"
 FETCH_STEP = "external_fetch"
 FETCH_VERSION = "sections-v1"
 REPORT_STEP = "report"
@@ -370,7 +375,7 @@ class AnalysisPipeline:
             rows,
             run.analysis_date,
             package.payments,
-            payment_periods(run),
+            {row.inn: payment_periods(run, row.inn) for row in package.rows},
             package.history,
             {inn: snapshot for inn, snapshot in finances.items() if snapshot is not None},
         )

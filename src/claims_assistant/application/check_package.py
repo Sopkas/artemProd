@@ -168,9 +168,11 @@ async def _store(
     files: FileStorage,
     *,
     uploaded: bytes | None = None,
+    inn: str | None = None,
 ) -> tuple[UploadedFile, bool]:
     """``uploaded`` is what the user sent when it is not what is stored (a translated
-    export): the checksum names the upload, so the same file twice is one file."""
+    export): the checksum names the upload, so the same file twice is one file. ``inn``
+    is whose 1C export it is; a file without one covers the whole package."""
     stored_path = await asyncio.to_thread(files.save, run.id, data)
     new_file = NewFile(
         kind=kind,
@@ -178,6 +180,7 @@ async def _store(
         size_bytes=len(data),
         stored_path=stored_path,
         coverage=coverage,
+        inn=inn,
     )
     try:
         stored = await repository.add_file(owner_id, run.id, new_file)
@@ -356,7 +359,15 @@ async def accept_payments_export(
     # The sheet is rebuilt on every upload and openpyxl stamps the time into it, so its
     # bytes differ each time: the export itself is what makes two uploads the same file.
     stored, duplicate = await _store(
-        owner_id, run, FileKind.PAYMENTS, sheet, coverage, repository, files, uploaded=data
+        owner_id,
+        run,
+        FileKind.PAYMENTS,
+        sheet,
+        coverage,
+        repository,
+        files,
+        uploaded=data,
+        inn=inn,  # its period vouches for this company only
     )
     run = await repository.get_run(owner_id, run.id)
     return LedgerAccepted(
