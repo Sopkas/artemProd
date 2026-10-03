@@ -17,7 +17,7 @@ from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.cache.memory import TtlSnapshotCache
 from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
-from claims_assistant.infrastructure.demo.package import PACKAGE_SCENARIOS
+from claims_assistant.infrastructure.demo.package import PACKAGE_NAMES, PACKAGE_SCENARIOS
 from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.excel.report import build_report
 from claims_assistant.infrastructure.persistence.ai_spend import SqliteAiSpendStore
@@ -85,7 +85,12 @@ async def run(settings: Settings) -> None:
                 else DemoCompanyDataProvider(
                     settings.demo_scenario,
                     by_inn=PACKAGE_SCENARIOS if settings.demo_package else None,
+                    names=PACKAGE_NAMES if settings.demo_package else None,
                 )
+            )
+            # A forgotten DEMO_PACKAGE turns four stories into one; the log says which it is.
+            logger.info(
+                "data_provider=%s demo_package=%s", settings.data_provider, settings.demo_package
             )
             # Limits, retries and a per-process cache apply to demo and live alike.
             provider = GuardedCompanyDataProvider(
