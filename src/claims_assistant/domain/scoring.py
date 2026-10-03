@@ -349,7 +349,16 @@ def _external_gaps(
     bankruptcy = snapshots.get(Section.BANKRUPTCY)
     efrsb_full = bankruptcy is not None and bankruptcy.coverage is Coverage.COMPLETE
     # Checked on the facts, like the finance signals, not on the declared covered period.
-    two_years = _two_consecutive_years(snapshots.get(Section.FINANCES))
+    finances = snapshots.get(Section.FINANCES)
+    two_years = _two_consecutive_years(finances)
+    answered = finances is not None and finances.status is FetchStatus.OK
+    if answered and not two_years and not finances.missing:
+        # The section named no gap of its own, yet the base set is not met: without this
+        # line the report says «неполная» and nothing says why (review A on #61).
+        missing.append(
+            f"{_SECTION_LABELS[Section.FINANCES]}: нет показателя за два года подряд; "
+            "для полной оценки нужны оба."
+        )
     return missing, coverage, company_ok and efrsb_full and two_years
 
 
