@@ -223,6 +223,7 @@ class SqliteAnalysisRepository:
                 stored_path=file.stored_path,
                 uploaded_at=now,
                 coverage=file.coverage,
+                inn=file.inn,
             )
             sequence = connection.execute(
                 select(func.coalesce(func.max(uploaded_files.c.sequence), 0) + 1).where(
@@ -243,6 +244,7 @@ class SqliteAnalysisRepository:
                     else file.coverage.start.isoformat(),
                     coverage_end=None if file.coverage is None else file.coverage.end.isoformat(),
                     sequence=sequence,
+                    inn=file.inn,
                 )
             )
             connection.execute(
@@ -519,6 +521,7 @@ class SqliteAnalysisRepository:
                 else Period(
                     date.fromisoformat(item.coverage_start), date.fromisoformat(item.coverage_end)
                 ),
+                inn=item.inn,
             )
             for item in file_rows
         )

@@ -541,17 +541,28 @@ async def test_report_names_the_optional_files_of_the_package(tmp_path):
         files=files,
         reader=reader,
     )
-    payments = build_payments_workbook([["1234567894", "P-1", date(2026, 7, 15), 100.0]])
-    await accept_ledger(
-        OWNER,
-        accepted_run.run.id,
-        FileKind.PAYMENTS,
-        payments,
-        coverage=Period(date(2026, 6, 1), date(2026, 8, 31)),
-        repository=repository,
-        files=files,
-        reader=reader,
-    )
+    # Two exports: each line counts its own file, not every payment of the package
+    # (block 5 of the manual test, 30.09.2026: both lines said the total).
+    for rows, start in (
+        ([["1234567894", "P-1", date(2026, 7, 15), 100.0]], date(2026, 6, 1)),
+        (
+            [
+                ["7707083893", "P-2", date(2026, 7, 20), 5.0],
+                ["7707083893", "P-3", date(2026, 8, 20), 5.0],
+            ],
+            date(2026, 7, 1),
+        ),
+    ):
+        await accept_ledger(
+            OWNER,
+            accepted_run.run.id,
+            FileKind.PAYMENTS,
+            build_payments_workbook(rows),
+            coverage=Period(start, date(2026, 8, 31)),
+            repository=repository,
+            files=files,
+            reader=reader,
+        )
     await repository.transition(OWNER, accepted_run.run.id, RunStatus.QUEUED)
     run = await repository.claim_next()
     await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
@@ -560,9 +571,55 @@ async def test_report_names_the_optional_files_of_the_package(tmp_path):
     text = " ".join(str(cell) for row in about for cell in row if cell is not None)
     assert "Контрагенты: 2 строк, пригодных 2" in text
     assert (
-        "Платежи за 01.06.2026–31.08.2026: использован — давность платежа; "
-        "пригодных строк этого вида: 1"
+        "Платежи за 01.06.2026–31.08.2026, файл 1: использован — давность платежа; "
+        "пригодных строк: 1"
     ) in text
+    assert (
+        "Платежи за 01.07.2026–31.08.2026, файл 2: использован — давность платежа; "
+        "пригодных строк: 2"
+    ) in text
+
+
+async def test_one_companys_1c_export_says_nothing_about_the_others_payments(tmp_path):
+    """Block 5 of the manual test (30.09.2026): the export's period was the whole package's,
+    so a company without an export of its own got «нет поступлений с …» — a signal that
+    raises the priority — from somebody else's file."""
+    from claims_assistant.application.check_package import accept_payments_export
+    from claims_assistant.infrastructure.excel import ledgers
+    from tests.integration.test_upload_dialog import export_file
+
+    repository = InMemoryAnalysisRepository()
+    files = LocalFileStorage(tmp_path / "uploads")
+    draft = await accept_counterparties(
+        OWNER,
+        DAY,
+        DataMode.DEMO,
+        build_counterparties_template(ROWS),
+        repository=repository,
+        files=files,
+        reader=OpenpyxlSheetReader(),
+    )
+    run = draft.run
+    await accept_payments_export(
+        OWNER,
+        run.id,
+        export_file(end="01.09.2026 9:00:00"),  # covers every day up to the analysis date
+        inn="1234567894",
+        repository=repository,
+        files=files,
+        reader=OpenpyxlSheetReader(),
+        sheets=ledgers,
+    )
+    await repository.transition(OWNER, run.id, RunStatus.QUEUED)
+    run = await repository.claim_next()
+    await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
+    data = files.read((await repository.get_report(OWNER, run.id)).stored_path)
+    other = [
+        " ".join(str(cell) for cell in row if cell is not None)
+        for row in sheet_rows(data, "Качество данных") + sheet_rows(data, "Приоритеты")
+        if "7707083893" in row
+    ]
+    assert other and not any("поступлений" in line or "Платежи" in line for line in other)
 
 
 async def test_internal_indicators_and_chronology_reach_the_report(tmp_path):
@@ -754,3 +811,124 @@ async def test_cross_file_findings_reach_the_report_quality_sheet(tmp_path):
     quality = sheet_rows(files.read(artifact.stored_path), "Качество данных")
     text = " ".join(str(cell) for row in quality for cell in row if cell is not None)
     assert "расходится с файлом «Контрагенты»" in text
+
+
+class RateLimitedProvider:
+    """Answers «limit» to everything: ``daily_limit`` is how the adapter names Checko's 403
+    once the day's requests are spent (#70), ``rate_limited`` a 429 burst."""
+
+    def __init__(self, code: str = "daily_limit") -> None:
+        self.calls: list[str] = []
+        self.code = code
+
+    async def fetch(self, request: CompanyDataRequest):
+        self.calls.append(request.inn)
+        return tuple(
+            ExternalSnapshot(
+                inn=request.inn,
+                section=section,
+                source="checko",
+                mode=DataMode.DEMO,
+                fetched_at=NOW,
+                status=FetchStatus.RATE_LIMITED,
+                coverage=Coverage.UNAVAILABLE,
+                missing=("Источник ограничил число запросов.",),
+                error=ProviderError(self.code, "Источник ограничил число запросов."),
+            )
+            for section in request.sections
+        )
+
+
+async def test_a_source_out_of_requests_is_not_asked_for_the_rest_and_the_user_is_told(tmp_path):
+    """Free tariff: 100 requests a day, about 33 companies. Past it every company gets 429;
+    asking each of them again only burns time, and the user must learn why the check is
+    partial and what to do."""
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    provider = RateLimitedProvider()
+    outcome = await pipeline(files, repository, guard(provider)).process(run)
+
+    assert outcome.status == RunStatus.PARTIAL
+    assert "лимит запросов" in outcome.failure and "завтра" in outcome.failure
+    assert provider.calls == ["1234567894"]  # the second company was not asked
+    summary = await load_summary(run.id, repository)
+    assert summary.source_limited is True
+    # Nothing unfinished was saved: a new attempt asks the source again.
+    assert await repository.get_step(run.id, "7707083893", FETCH_STEP, FETCH_VERSION) is None
+
+
+async def test_a_rate_limit_burst_leaves_the_rest_of_the_check_asking(tmp_path):
+    """A 429 left after the retries is not the day's limit: the next company is asked, and
+    nobody is told to wait until tomorrow (review B on #65)."""
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    provider = RateLimitedProvider("rate_limited")
+    outcome = await pipeline(files, repository, guard(provider)).process(run)
+
+    assert provider.calls == ["1234567894", "7707083893"]
+    assert "завтра" not in (outcome.failure or "")
+    assert (await load_summary(run.id, repository)).source_limited is False
+
+
+def test_a_summary_saved_before_the_source_limit_existed_still_reads():
+    old = (
+        '{"companies": 1, "checked": 1, "unchecked": 0, "row_errors": 0, '
+        '"priorities": {"low": 1}, "budget_exhausted": false}'
+    )
+    assert RunSummary.from_payload(old).source_limited is False
+
+
+# --- a bankruptcy sample cut short on a later page (#71) --------------------------------
+
+
+class InterruptedBankruptcy:
+    """The demo source, but every bankruptcy sample stops on page 2 with ``code``."""
+
+    def __init__(self, code: str) -> None:
+        self.inner = DemoCompanyDataProvider()
+        self.code = code
+
+    async def fetch(self, request: CompanyDataRequest):
+        snapshots = await self.inner.fetch(request)
+        return tuple(
+            replace(
+                snapshot,
+                coverage=Coverage.PARTIAL,
+                missing=(*snapshot.missing, "Выборка неполная: страница не получена."),
+                interrupted=ProviderError(self.code, "сбой на странице 2"),
+            )
+            if snapshot.section is Section.BANKRUPTCY
+            else snapshot
+            for snapshot in snapshots
+        )
+
+
+@pytest.mark.parametrize(
+    "code, final",
+    [("timeout", False), ("network_error", False), ("daily_limit", False), ("api_error", True)],
+)
+async def test_an_interrupted_sample_is_saved_only_when_a_repeat_would_not_finish_it(
+    tmp_path, code, final
+):
+    """A sample cut by a transient failure or the day's limit is not final: the step is not
+    saved, so tomorrow's repeat asks again. A broken answer on page 2 would break again."""
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    await pipeline(files, repository, guard(InterruptedBankruptcy(code))).process(run)
+    step = await repository.get_step(run.id, "1234567894", FETCH_STEP, FETCH_VERSION)
+    assert (step is not None) is final
+
+
+async def test_a_company_with_an_unfinished_sample_is_not_counted_as_checked(tmp_path):
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    outcome = await pipeline(files, repository, guard(InterruptedBankruptcy("timeout"))).process(
+        run
+    )
+    assert outcome.status == RunStatus.PARTIAL
+    assert "Организаций с неполными внешними данными: 2." in outcome.failure
+
+
+async def test_a_sample_cut_by_the_daily_limit_tells_the_user_to_come_back_tomorrow(tmp_path):
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    outcome = await pipeline(
+        files, repository, guard(InterruptedBankruptcy("daily_limit"))
+    ).process(run)
+    assert (await load_summary(run.id, repository)).source_limited is True
+    assert "завтра" in outcome.failure

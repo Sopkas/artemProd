@@ -50,6 +50,8 @@ uploaded_files = Table(
     Column("coverage_start", String(10), nullable=True),
     Column("coverage_end", String(10), nullable=True),
     Column("sequence", Integer, nullable=False),
+    # Whose 1C export this is (migration 0005); NULL: a file of the whole package.
+    Column("inn", String(12), nullable=True),
     UniqueConstraint("run_id", "kind", "checksum", name="uq_uploaded_files_run_kind_checksum"),
     Index("ix_uploaded_files_run", "run_id", "sequence"),
 )

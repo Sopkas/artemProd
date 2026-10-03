@@ -75,6 +75,7 @@ class InMemoryAnalysisRepository:
             stored_path=file.stored_path,
             uploaded_at=now,
             coverage=file.coverage,
+            inn=file.inn,
         )
         self._runs[run.id] = replace(run, files=run.files + (stored,), updated_at=now)
         return stored

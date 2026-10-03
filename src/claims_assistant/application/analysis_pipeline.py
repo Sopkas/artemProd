@@ -49,10 +49,20 @@ from .check_package import FileStorage, StorageError
 from .company_data import CompanyDataProvider, CompanyDataRequest
 from .contract_link import LinkedContracts, link_contracts
 from .explanations import EXPLANATION_STEP, StoredExplanation
-from .external_guard import BUDGET_EXHAUSTED, TRANSIENT_CODES, RunBudget
+from .external_guard import (
+    BUDGET_EXHAUSTED,
+    DAILY_LIMIT,
+    SOURCE_LIMIT,
+    TRANSIENT_CODES,
+    RunBudget,
+)
 from .imports import SheetReader
-from .internal_context import payment_periods
-from .package_checks import PackageIntegrityError, PackageReview, review_package
+from .package_checks import (
+    PackageIntegrityError,
+    PackageReview,
+    payment_periods,
+    review_package,
+)
 from .recommendation import (
     AiLimits,
     RecommendationProvider,
@@ -82,7 +92,10 @@ STEP_UNREADABLE = "Сохранённый шаг проверки не чита�
 IMPORT_STEP = "import"
 LINKS_STEP = "contracts_link"
 LINKS_VERSION = "links-v1"
-IMPORT_VERSION = "package-v4"  # v1: counts; v2: rows and issues; v3: every file; v4: contracts
+# v1: counts; v2: rows and issues; v3: every file; v4: contracts; v5: rows per file, and
+# a company printed twice in one overdue report is one company; v6: a 1C export's period
+# is its own company's, so the date conflicts in the step changed.
+IMPORT_VERSION = "package-v6"
 FETCH_STEP = "external_fetch"
 FETCH_VERSION = "sections-v1"
 REPORT_STEP = "report"
@@ -128,6 +141,9 @@ class RunSummary:
     # S5-03: companies left without an accepted AI explanation while a provider was
     # configured (model unavailable, answer rejected, AI budget exhausted).
     explanations_missing: int = 0
+    # The source said its daily request limit was spent (``daily_limit``, Checko's 403): the
+    # rest of the check was not asked; the user is told to come back tomorrow.
+    source_limited: bool = False
     # S5-03: the month's money limit was already reached, so the model was not asked at
     # all. Kept apart from the count above: «не спрашивали» and «спросили, не вышло» are
     # different things for whoever reads the summary.
@@ -143,6 +159,7 @@ class RunSummary:
                 "priorities": {key.value: value for key, value in self.priorities.items()},
                 "budget_exhausted": self.budget_exhausted,
                 "explanations_missing": self.explanations_missing,
+                "source_limited": self.source_limited,
                 "ai_month_exhausted": self.ai_month_exhausted,
             }
         )
@@ -159,6 +176,7 @@ class RunSummary:
                 priorities={Priority(key): int(value) for key, value in data["priorities"].items()},
                 budget_exhausted=bool(data["budget_exhausted"]),
                 explanations_missing=int(data.get("explanations_missing", 0)),
+                source_limited=bool(data.get("source_limited", False)),
                 ai_month_exhausted=bool(data.get("ai_month_exhausted", False)),
             )
         except (ValueError, KeyError, TypeError) as exc:
@@ -170,6 +188,11 @@ class RunSummary:
             reasons.append(f"Строк с ошибками: {self.row_errors}; они исключены из проверки.")
         if self.budget_exhausted:
             reasons.append("Лимит времени или запросов проверки исчерпан.")
+        if self.source_limited:
+            reasons.append(
+                "Источник данных исчерпал лимит запросов, дальше его не спрашивали; "
+                "повторите проверку завтра."
+            )
         if self.unchecked:
             reasons.append(f"Организаций с неполными внешними данными: {self.unchecked}.")
         if self.ai_month_exhausted:
@@ -284,6 +307,7 @@ class AnalysisPipeline:
             history=review.history,
             interactions=review.interactions,
             contracts=review.contracts,
+            file_rows=dict(review.file_rows),
         )
         await self._save(run, RUN_SCOPE, IMPORT_STEP, IMPORT_VERSION, payload=dump_import(package))
         return package
@@ -351,7 +375,7 @@ class AnalysisPipeline:
             rows,
             run.analysis_date,
             package.payments,
-            payment_periods(run),
+            {row.inn: payment_periods(run, row.inn) for row in package.rows},
             package.history,
             {inn: snapshot for inn, snapshot in finances.items() if snapshot is not None},
         )
@@ -396,7 +420,10 @@ class AnalysisPipeline:
         # The oldest answer among the sections: cached snapshots keep their own
         # fetched_at, so every external fact in the report is at least this fresh.
         fetched = [
-            s.fetched_at for group in snapshots.values() for s in group if not _hit_budget(s)
+            s.fetched_at
+            for group in snapshots.values()
+            for s in group
+            if not _hit_budget(s) and not _hit_source_limit(s)
         ]
         meta = ReportMeta(
             run_id=run.id,
@@ -637,9 +664,26 @@ def _hit_budget(snapshot: ExternalSnapshot) -> bool:
     return snapshot.error is not None and snapshot.error.code == BUDGET_EXHAUSTED
 
 
+def _hit_source_limit(snapshot: ExternalSnapshot) -> bool:
+    """The source's daily limit: its own answer (``daily_limit``) or the guard's placeholder
+    for the companies after it — also when it cut a sample on a later page (#71). A 429
+    burst is not this (review B on #65)."""
+    if snapshot.interrupted is not None and snapshot.interrupted.code == DAILY_LIMIT:
+        return True
+    return snapshot.error is not None and snapshot.error.code in (DAILY_LIMIT, SOURCE_LIMIT)
+
+
+# A sample cut on a later page by one of these may well be finished by a repeat; one cut by
+# a broken answer (api_error, invalid_response) would break the same way, so it is final.
+_UNFINISHED = TRANSIENT_CODES | {DAILY_LIMIT}
+
+
 def _is_open(snapshot: ExternalSnapshot) -> bool:
-    """Not a final answer: the budget placeholder or a transient source failure."""
+    """Not a final answer: the budget placeholder, a transient source failure, or a sample
+    the source cut short for a reason a repeat may not meet (#71)."""
     if _hit_budget(snapshot) or snapshot.status is FetchStatus.RATE_LIMITED:
+        return True
+    if snapshot.interrupted is not None and snapshot.interrupted.code in _UNFINISHED:
         return True
     return snapshot.error is not None and snapshot.error.code in TRANSIENT_CODES
 
@@ -655,6 +699,7 @@ _FILE_USE = {
     FileKind.PAYMENTS: "давность платежа",
     FileKind.DEBT_HISTORY: "динамика долга за месяц",
     FileKind.INTERACTIONS: "лист «Хронология»",
+    FileKind.DEBT_REPORT: "договоры в карточке и на листе «Договоры»",
 }
 
 
@@ -667,19 +712,17 @@ def _package_lines(run: AnalysisRun, package: ImportedPackage) -> tuple[str, ...
         for issue in issues
         if issue.severity is IssueSeverity.ERROR and issue.row is not None
     }
-    counts = {
-        FileKind.PAYMENTS: len(package.payments),
-        FileKind.DEBT_HISTORY: len(package.history),
-        FileKind.INTERACTIONS: len(package.interactions),
-    }
     lines = []
     for file, (_, label) in zip(run.files, file_labels(run.files), strict=True):
         if file.kind is FileKind.COUNTERPARTIES:
             lines.append(f"{label}: {len(rows) + len(bad_rows)} строк, пригодных {len(rows)}")
         else:
+            # Each file is credited with what it gave itself (block 5, 30.09.2026: every
+            # payments file showed the total of all of them, the report showed zero).
             use = _FILE_USE.get(file.kind, "не используется")
-            usable = counts.get(file.kind, 0)
-            lines.append(f"{label}: использован — {use}; пригодных строк этого вида: {usable}")
+            usable = package.file_rows.get(file.id, 0)
+            unit = "договоров" if file.kind is FileKind.DEBT_REPORT else "пригодных строк"
+            lines.append(f"{label}: использован — {use}; {unit}: {usable}")
     return tuple(lines)
 
 
@@ -693,12 +736,19 @@ def _summarize(
     priorities = {priority: 0 for priority in Priority}
     checked = 0
     budget_exhausted = False
+    source_limited = False
     for row in rows:
         priorities[row.assessment.priority] += 1
-        if all(snapshot.status is FetchStatus.OK for snapshot in row.snapshots):
+        # A sample cut short (#71) is data, but not a finished check of the company.
+        if all(
+            snapshot.status is FetchStatus.OK and snapshot.interrupted is None
+            for snapshot in row.snapshots
+        ):
             checked += 1
         if any(_hit_budget(snapshot) for snapshot in row.snapshots):
             budget_exhausted = True
+        if any(_hit_source_limit(snapshot) for snapshot in row.snapshots):
+            source_limited = True
     return RunSummary(
         companies=len(rows),
         checked=checked,
@@ -706,6 +756,7 @@ def _summarize(
         row_errors=sum(1 for issue in issues if issue.severity is IssueSeverity.ERROR),
         priorities=priorities,
         budget_exhausted=budget_exhausted,
+        source_limited=source_limited,
         ai_month_exhausted=month_exhausted,
         explanations_missing=(
             sum(1 for row in rows if row.explanation is None) if explainer else 0

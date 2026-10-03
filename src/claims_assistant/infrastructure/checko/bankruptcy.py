@@ -14,12 +14,12 @@ CONFIRMED against the live API on 20.09.2026 (free tariff). Request:
 the record is identified by ``GUID`` and ``URL`` points at its Fedresurs page. The earlier
 assumption of a ``Номер`` field was wrong and is kept only as a fallback.
 
-Event *types* are not classified here: scoring.md treats an unverified type as "requires
-manual review", so we surface every message as a dated ``BANKRUPTCY_EVENT`` fact linked to
-its source and never infer a confirmed procedure from raw text.
+Event types are classified in ``domain/efrsb`` and only applied here: a message of an open
+case becomes a dated ``BANKRUPTCY_EVENT`` fact, of a closed one ``BANKRUPTCY_CLOSED``, each
+linked to its source. The register answers by INN without the role, so a confirmed
+procedure is never inferred from a message (S3-06).
 """
 
-import json
 import re
 from datetime import date, datetime
 from typing import Protocol
@@ -35,6 +35,7 @@ from claims_assistant.domain.external import (
     Fact,
     FactKind,
     FetchStatus,
+    ProviderError,
     Section,
 )
 from claims_assistant.infrastructure.checko.errors import (
@@ -43,12 +44,12 @@ from claims_assistant.infrastructure.checko.errors import (
     NotFound,
     is_not_found,
 )
+from claims_assistant.infrastructure.checko.http import read_response
 
 __all__ = ["read_page", "project_bankruptcy", "AiohttpBankruptcyTransport", "BankruptcyTransport"]
 
 SOURCE = "checko-efrsb-v2"
 BANKRUPTCY_URL = "https://api.checko.ru/v2/bankruptcy-messages"
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 # One record too far past the sample is dropped; a stable ceiling keeps memory bounded even
 # if the envelope's counters are wrong.
 MAX_RECORDS = 2000
@@ -71,17 +72,7 @@ class AiohttpBankruptcyTransport:
                 json={"key": key, "inn": inn, "page": page},
                 allow_redirects=False,
             ) as response:
-                if response.status != 200:
-                    return response.status, None
-                body = bytearray()
-                async for chunk in response.content.iter_chunked(65536):
-                    body.extend(chunk)
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        raise InvalidResponse() from None
-                try:
-                    return response.status, json.loads(body)
-                except (ValueError, UnicodeError):
-                    raise InvalidResponse() from None
+                return await read_response(response)
 
 
 def _iso_date(value: object) -> date | None:
@@ -106,8 +97,8 @@ def _url(value: object) -> str | None:
 def _label(record: dict) -> str:
     """What the user reads: the Russian name of the type, with the case number if given.
 
-    The machine code (``Тип``) is not shown and is not classified here — scoring.md wants
-    every message reviewed until the dictionary of types is agreed with the specialist.
+    The machine code (``Тип``) is not shown: it decides the kind of fact through
+    ``domain/efrsb``, the person reads the name.
     """
     if not isinstance(record, dict):
         return "Сообщение ЕФРСБ"
@@ -154,6 +145,7 @@ def project_bankruptcy(
     *,
     complete: bool,
     unreadable: int,
+    interrupted: ProviderError | None = None,
 ) -> ExternalSnapshot:
     """Build the section snapshot from the aggregated records across fetched pages."""
     facts = []
@@ -217,4 +209,5 @@ def project_bankruptcy(
         facts=tuple(facts),
         evidence=tuple(evidence),
         missing=tuple(missing),
+        interrupted=interrupted,
     )

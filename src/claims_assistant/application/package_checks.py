@@ -19,7 +19,7 @@ as «неизвестно» instead of the whole package.
 """
 
 import asyncio
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import PurePosixPath
@@ -42,7 +42,7 @@ from claims_assistant.domain.payments import PaymentRow
 from claims_assistant.domain.plural import of_companies as _companies
 
 from .check_package import FileStorage, StorageError
-from .contract_link import normalize_name
+from .contract_link import merge_repeats, normalize_name
 from .imports import OutlineReader, SheetReader, import_counterparties
 from .ledger_imports import import_debt_history, import_interactions, import_payments
 
@@ -70,6 +70,9 @@ class PackageReview:
     # INN → {DEBT_HISTORY_CONFLICT, LAST_PAYMENT_CONFLICT}: which indicator is unknown
     # for which company because the files contradict each other.
     conflicts: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    # File id → what that file gave: usable rows, or contracts for an overdue report —
+    # before rows repeated across files are merged, so each file is credited for its own.
+    file_rows: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def blocking(self) -> tuple[ImportIssue, ...]:
@@ -151,22 +154,38 @@ def _merge_by_key(
     return list(accepted.values()), issues
 
 
+def payment_periods(run: AnalysisRun, inn: str) -> tuple[Period, ...]:
+    """The periods the package vouches for ``inn``'s payments: every file of our template
+    (it covers the whole package) and the 1C exports made for this company.
+
+    An export is one counterparty's print: counting its period for the others made them
+    «contradict» it and «go quiet» (block 5 of the manual test, 30.09.2026).
+    """
+    return tuple(
+        file.coverage
+        for file in run.files
+        if file.kind is FileKind.PAYMENTS
+        and file.coverage is not None
+        and (file.inn is None or file.inn == inn)
+    )
+
+
 def date_conflicts(
     run: AnalysisRun,
     counterparties: tuple[CounterpartyRow, ...],
     payments: tuple[PaymentRow, ...],
     history: tuple[DebtSnapshot, ...],
-    covered: dict[str, tuple[date, date]],
+    periods: Mapping[str, Sequence[Period]],
 ) -> tuple[list[ImportIssue], dict[str, frozenset[str]]]:
     """Contradictions between the main file and the optional ones, per INN.
 
-    One issue per kind names how many companies are affected (never which); the mapping
-    says which, so S4-06 marks the indicator unknown only for them.
+    ``periods`` are each company's covered periods (``payment_periods``); a company missing
+    from it has none. One issue per kind names how many companies are affected (never
+    which); the mapping says which, so S4-06 marks the indicator unknown only for them.
     """
     # The rules themselves live in domain.indicators, so the indicators (S4-06) read the
     # same contradictions as unknown values.
     found: dict[str, set[str]] = {}
-    periods = [Period(start, end) for start, end in covered.values()]
     paid: dict[str, list[date]] = {}
     for payment in payments:
         paid.setdefault(payment.inn, []).append(payment.paid_on)
@@ -177,7 +196,8 @@ def date_conflicts(
         # The main file's debt is as of the row's own cut-off date (contract §4).
         if debt_contradicts(row, snapshots.get(row.inn, ()), run.analysis_date):
             found.setdefault(row.inn, set()).add(DEBT_HISTORY_CONFLICT)
-        if last_payment_contradicts(row.last_payment_date, paid.get(row.inn, ()), periods):
+        own = tuple(periods.get(row.inn, ()))
+        if last_payment_contradicts(row.last_payment_date, paid.get(row.inn, ()), own):
             found.setdefault(row.inn, set()).add(LAST_PAYMENT_CONFLICT)
 
     issues: list[ImportIssue] = []
@@ -239,7 +259,7 @@ async def review_package(
         FileKind.INTERACTIONS: import_interactions,
     }
     parsed: dict[FileKind, list[tuple[str, tuple]]] = {kind: [] for kind in parsers}
-    covered: dict[str, tuple[date, date]] = {}
+    file_rows: dict[str, int] = {}
     for file in run.files:
         parse = parsers.get(file.kind)
         if parse is None:
@@ -249,12 +269,14 @@ async def review_package(
             parse, reader, data, known_inns=known, analysis_date=run.analysis_date, limits=limits
         )
         parsed[file.kind].append((file.id, result.rows))
+        file_rows[file.id] = len(result.rows)
         issues.extend(_tag(result.issues, file.id))
-        if file.kind is FileKind.PAYMENTS and file.coverage is not None:
-            covered[file.id] = (file.coverage.start, file.coverage.end)
 
-    contracts, contract_issues = await _read_debt_reports(run, files, reader, limits)
+    contracts, contract_issues, contract_counts = await _read_debt_reports(
+        run, files, reader, limits
+    )
     issues.extend(contract_issues)
+    file_rows.update(contract_counts)
 
     payments, more = _merge_by_key(
         parsed[FileKind.PAYMENTS],
@@ -283,8 +305,9 @@ async def review_package(
         "ID взаимодействия",
     )
     issues.extend(more)
+    periods = {row.inn: payment_periods(run, row.inn) for row in counterparties}
     conflict_issues, conflicts = date_conflicts(
-        run, counterparties, tuple(payments), tuple(history), covered
+        run, counterparties, tuple(payments), tuple(history), periods
     )
     issues.extend(conflict_issues)
     ordered_interactions = tuple(row for rows in chronology(interactions).values() for row in rows)
@@ -296,6 +319,7 @@ async def review_package(
         contracts=contracts,
         issues=tuple(issues),
         conflicts=conflicts,
+        file_rows=file_rows,
     )
 
 
@@ -304,29 +328,34 @@ async def _read_debt_reports(
     files: FileStorage,
     reader: SheetReader,
     limits: ImportLimits,
-) -> tuple[tuple[CounterpartyDebt, ...], list[ImportIssue]]:
-    """The customer's overdue reports of this package, counterparty by counterparty.
+) -> tuple[tuple[CounterpartyDebt, ...], list[ImportIssue], dict[str, int]]:
+    """The customer's overdue reports of this package, counterparty by counterparty, and
+    how many contracts each file gave.
 
     The file is read by the indents of its own rows, so the reader has to be able to give
     them; a reader that cannot is a wiring mistake, not a bad file.
 
-    A counterparty named in two reports keeps the contracts of the first one: two prints
-    of the same client are two views of one debt, and adding them up would double it.
+    Inside one report, the entries of one name are one company (``merge_repeats``). A
+    counterparty named in two reports keeps the contracts of the first one: two prints of
+    the same client are two views of one debt, and adding them up would double it.
     """
     attached = [file for file in run.files if file.kind is FileKind.DEBT_REPORT]
     if not attached:
-        return (), []
+        return (), [], {}
     if not isinstance(reader, OutlineReader):
         raise TypeError("A debt report needs a reader that returns row indents")
     issues: list[ImportIssue] = []
     counterparties: list[CounterpartyDebt] = []
+    counts: dict[str, int] = {}
     seen: dict[str, str] = {}  # normalised name → the file that brought it first
     for file in attached:
         data = await asyncio.to_thread(files.read, file.stored_path)
         rows = await asyncio.to_thread(reader.read_outline, data, limits)
         result = await asyncio.to_thread(read_debt_report, list(rows))
-        issues.extend(_tag(result.issues, file.id))
-        for counterparty in result.counterparties:
+        merged, repeats = merge_repeats(result.counterparties)
+        issues.extend(_tag(result.issues + repeats, file.id))
+        counts[file.id] = sum(len(counterparty.contracts) for counterparty in merged)
+        for counterparty in merged:
             key = normalize_name(counterparty.name)
             if key in seen:
                 issues.append(
@@ -340,7 +369,7 @@ async def _read_debt_reports(
                 continue
             seen[key] = file.id
             counterparties.append(counterparty)
-    return tuple(counterparties), issues
+    return tuple(counterparties), issues, counts
 
 
 __all__ = [
@@ -355,5 +384,6 @@ __all__ = [
     "belongs_to_run",
     "check_ownership",
     "date_conflicts",
+    "payment_periods",
     "review_package",
 ]

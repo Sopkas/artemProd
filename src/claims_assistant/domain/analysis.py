@@ -6,6 +6,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 
 from .external import DataMode, Period
+from .inn import validate_inn
 
 
 class RunStatus(StrEnum):
@@ -58,6 +59,21 @@ def validate_checksum(checksum: str) -> None:
         raise ValueError("Checksum must be a lowercase SHA-256 hex digest")
 
 
+def validate_file_inn(kind: "FileKind", inn: str | None) -> None:
+    """Whose file it is, when it is one company's: only a 1C payments export says so.
+
+    Our template covers every company of the package, so it has no owner (None). An
+    export is printed for one counterparty, and its period vouches for that one only
+    (block 5 of the manual test, 30.09.2026).
+    """
+    if inn is None:
+        return
+    if kind is not FileKind.PAYMENTS:
+        raise ValueError("Only a payments file can belong to one company")
+    if validate_inn(inn) != inn:
+        raise ValueError("The file's INN must be normalised")
+
+
 def validate_stored_path(path: str) -> None:
     parts = PurePosixPath(path)
     if (
@@ -83,6 +99,8 @@ class UploadedFile:
     stored_path: str
     uploaded_at: datetime
     coverage: Period | None = None
+    # The company a 1C export was made for; None for a file that covers the whole package.
+    inn: str | None = None
 
     def __post_init__(self) -> None:
         if not self.id or not self.run_id:
@@ -91,6 +109,7 @@ class UploadedFile:
             raise ValueError("File kind must be a FileKind")
         if self.coverage is not None and not isinstance(self.coverage, Period):
             raise ValueError("Coverage must be a Period or None")
+        validate_file_inn(self.kind, self.inn)
         validate_checksum(self.checksum)
         if type(self.size_bytes) is not int or self.size_bytes <= 0:
             raise ValueError("File size must be a positive integer")

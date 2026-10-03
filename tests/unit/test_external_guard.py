@@ -8,6 +8,8 @@ import pytest
 from claims_assistant.application.company_data import CompanyDataRequest, RequestLimits
 from claims_assistant.application.external_guard import (
     BUDGET_EXHAUSTED,
+    SOURCE_LIMIT,
+    SOURCE_LIMIT_MESSAGE,
     GuardedCompanyDataProvider,
     GuardPolicy,
     RunBudget,
@@ -52,7 +54,9 @@ class ScriptedProvider:
         out = []
         for section in request.sections:
             status, code = plan.get(section, (FetchStatus.OK, None))
-            if status is FetchStatus.OK:
+            if status is FetchStatus.OK and code and code.startswith(INTERRUPTED):
+                out.append(_interrupted(request.inn, section, code.removeprefix(INTERRUPTED)))
+            elif status is FetchStatus.OK:
                 out.append(_ok(request.inn, section))
             else:
                 out.append(_failed(request.inn, section, status, code or "x"))
@@ -62,6 +66,24 @@ class ScriptedProvider:
 def _ok(inn: str, section: Section) -> ExternalSnapshot:
     return ExternalSnapshot(
         inn, section, "scripted", DataMode.LIVE, START, FetchStatus.OK, Coverage.COMPLETE
+    )
+
+
+INTERRUPTED = "interrupted:"  # a script code: the pages read are kept, a later one failed
+
+
+def _interrupted(inn: str, section: Section, code: str) -> ExternalSnapshot:
+    """What the adapter gives since #71 when page 2+ fails: OK, partial, and why."""
+    return ExternalSnapshot(
+        inn,
+        section,
+        "scripted",
+        DataMode.LIVE,
+        START,
+        FetchStatus.OK,
+        Coverage.PARTIAL,
+        missing=("Выборка неполная: страница не получена.",),
+        interrupted=ProviderError(code, "сбой на странице 2"),
     )
 
 
@@ -329,3 +351,89 @@ async def test_exhausted_sections_follow_the_provider_mode(clock, sleeps):
     from claims_assistant.application.check_company import CompanyCheck
 
     CompanyCheck(INN, snapshots)  # mixed modes would raise here
+
+
+# --- the source's own limit (free tariff: 100 requests a day) ---------------------------
+
+LIMITED = {section: (FetchStatus.RATE_LIMITED, "rate_limited") for section in Section}
+DAILY = {section: (FetchStatus.RATE_LIMITED, "daily_limit") for section in Section}
+
+
+async def test_a_rate_limit_left_after_the_retries_does_not_close_the_source(clock, sleeps):
+    """A 429 is a burst (review B on #65): the day's limit is a 403 «daily_limit» (#70), so
+    a 429 that outlived the retries must not send the rest of the check to «tomorrow»."""
+    inner = ScriptedProvider([LIMITED, LIMITED])  # the call and its one retry
+    scoped = guard(inner, clock, sleeps, max_retries=1).scoped(RunBudget.unlimited())
+    first = await scoped.fetch(CompanyDataRequest(INN))
+    assert all(s.status is FetchStatus.RATE_LIMITED for s in first)
+    second = await scoped.fetch(CompanyDataRequest(OTHER))
+    assert len(inner.calls) == 3  # the second company was asked
+    assert all(s.status is FetchStatus.OK for s in second)
+
+
+async def test_a_rate_limit_the_retry_got_past_does_not_close_the_source(clock, sleeps):
+    inner = ScriptedProvider([{Section.COMPANY: (FetchStatus.RATE_LIMITED, "rate_limited")}])
+    scoped = guard(inner, clock, sleeps, max_retries=1).scoped(RunBudget.unlimited())
+    await scoped.fetch(CompanyDataRequest(INN))
+    second = await scoped.fetch(CompanyDataRequest(OTHER))
+    assert all(s.status is FetchStatus.OK for s in second)
+    assert len(inner.calls) == 3
+
+
+async def test_a_closed_source_stays_closed_only_for_that_run(clock, sleeps):
+    """The card (/inn) has its own budget: it asks again, and may well be told «429»."""
+    inner = ScriptedProvider([DAILY])
+    provider = guard(inner, clock, sleeps, max_retries=1)
+    await provider.scoped(RunBudget.unlimited()).fetch(CompanyDataRequest(INN))
+    card = await provider.fetch(CompanyDataRequest(OTHER))
+    assert len(inner.calls) == 2
+    assert all(s.status is FetchStatus.OK for s in card)
+
+
+async def test_a_spent_daily_limit_is_not_retried_but_closes_the_source(clock, sleeps):
+    """Checko's free tariff answers 403 «Превышен суточный лимит» once the day's requests are
+    spent; the adapter (#70) calls it RATE_LIMITED / daily_limit. Retrying cannot help until
+    tomorrow, so the first company stops the asking at once, without waiting."""
+    inner = ScriptedProvider([DAILY])
+    scoped = guard(inner, clock, sleeps, max_retries=2).scoped(RunBudget.unlimited())
+    first = await scoped.fetch(CompanyDataRequest(INN))
+    assert [s.error.code for s in first] == ["daily_limit"] * 3
+    assert len(inner.calls) == 1 and sleeps == []  # no retries, no pauses
+    second = await scoped.fetch(CompanyDataRequest(OTHER))
+    assert len(inner.calls) == 1
+    assert [s.error.code for s in second] == [SOURCE_LIMIT] * 3
+    # The section says the same as the check's summary: come back tomorrow (review B).
+    assert all(s.missing == (SOURCE_LIMIT_MESSAGE,) for s in second)
+    assert "завтра" in SOURCE_LIMIT_MESSAGE
+
+
+# --- a sample cut short by the source (#71: ExternalSnapshot.interrupted) ----------------
+
+
+async def test_an_interrupted_sample_is_not_served_from_the_cache(clock, sleeps):
+    """The pages read are kept (#71), but the answer is not final: the hour-long cache must
+    not hand it out as one, or a repeat within the hour would never finish the sample."""
+    inner = ScriptedProvider([{Section.BANKRUPTCY: (FetchStatus.OK, f"{INTERRUPTED}timeout")}])
+    provider = guard(inner, clock, sleeps)
+    first = await provider.fetch(CompanyDataRequest(INN))
+    assert [s.interrupted is not None for s in first] == [False, True, False]
+    await provider.fetch(CompanyDataRequest(INN))
+    assert inner.calls[1].sections == (Section.BANKRUPTCY,)  # the rest came from the cache
+
+
+async def test_a_sample_cut_by_the_daily_limit_closes_the_source(clock, sleeps):
+    """Review B on #65: the next company would spend one more request only to hear 403."""
+    inner = ScriptedProvider([{Section.BANKRUPTCY: (FetchStatus.OK, f"{INTERRUPTED}daily_limit")}])
+    scoped = guard(inner, clock, sleeps).scoped(RunBudget.unlimited())
+    await scoped.fetch(CompanyDataRequest(INN))
+    second = await scoped.fetch(CompanyDataRequest(OTHER))
+    assert len(inner.calls) == 1
+    assert [s.error.code for s in second] == [SOURCE_LIMIT] * 3
+
+
+async def test_a_sample_cut_by_a_burst_leaves_the_source_open(clock, sleeps):
+    inner = ScriptedProvider([{Section.BANKRUPTCY: (FetchStatus.OK, f"{INTERRUPTED}rate_limited")}])
+    scoped = guard(inner, clock, sleeps).scoped(RunBudget.unlimited())
+    await scoped.fetch(CompanyDataRequest(INN))
+    second = await scoped.fetch(CompanyDataRequest(OTHER))
+    assert len(inner.calls) == 2 and all(s.status is FetchStatus.OK for s in second)

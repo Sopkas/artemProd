@@ -141,3 +141,5 @@ def test_status_note_words():
     assert status_note(None) is None and status_note("accepted") is None
     assert status_note("rejected:schema") == "ответ модели отклонён проверкой (schema)"
     assert status_note("unavailable:rate_limited") == "модель ограничила число запросов"
+    # The model answered but was stopped by our length limit: not «недоступна».
+    assert status_note("unavailable:truncated") == "ответ модели обрезан лимитом длины"

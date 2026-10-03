@@ -204,3 +204,63 @@ async def test_ledger_is_owner_scoped_and_needs_a_draft(deps):
     await launch_run(OWNER, run.id, deps["repository"])
     with pytest.raises(RunLocked):
         await accept_ledger(OWNER, run.id, FileKind.DEBT_HISTORY, data, coverage=None, **deps)
+
+
+# --- S4-05: the customer's 1C export, stored translated into our sheet ---
+
+
+class RestampingWriter:
+    """Our «Платежи» writer as openpyxl really behaves: every save stamps the time, so the
+    same rows never come out as the same bytes twice (30.09.2026, block 5 of the manual
+    test: the same export uploaded twice was stored twice)."""
+
+    def __init__(self):
+        self._saves = 0
+
+    def build_payments_workbook(self, rows):
+        from io import BytesIO
+        from zipfile import ZipFile
+
+        from claims_assistant.infrastructure.excel.ledgers import build_payments_workbook
+
+        self._saves += 1
+        buffer = BytesIO(build_payments_workbook(rows))
+        with ZipFile(buffer, "a") as archive:
+            archive.comment = f"saved {self._saves}".encode()
+        return buffer.getvalue()
+
+
+async def test_an_export_is_stored_as_its_companys_and_a_template_as_the_packages(deps):
+    from claims_assistant.application.check_package import accept_payments_export
+    from claims_assistant.infrastructure.excel import ledgers
+    from tests.integration.test_upload_dialog import export_file
+
+    run = await draft(deps)
+    exported = await accept_payments_export(
+        OWNER, run.id, export_file(), inn=INN_1, sheets=ledgers, **deps
+    )
+    template = await accept_ledger(
+        OWNER,
+        run.id,
+        FileKind.PAYMENTS,
+        payments([[INN_1, "P-1", date(2026, 7, 15), 100.0]]),
+        coverage=PERIOD,
+        **deps,
+    )
+    assert (exported.file.inn, template.file.inn) == (INN_1, None)
+
+
+async def test_the_same_export_twice_keeps_one_copy(deps, tmp_path):
+    from claims_assistant.application.check_package import accept_payments_export
+    from tests.integration.test_upload_dialog import export_file
+
+    run = await draft(deps)
+    data = export_file()
+    writer = RestampingWriter()
+    first = await accept_payments_export(OWNER, run.id, data, inn=INN_1, sheets=writer, **deps)
+    second = await accept_payments_export(OWNER, run.id, data, inn=INN_1, sheets=writer, **deps)
+    assert not first.duplicate and second.duplicate
+    assert second.file == first.file
+    kinds = [file.kind for file in (await deps["repository"].get_run(OWNER, run.id)).files]
+    assert kinds == [FileKind.COUNTERPARTIES, FileKind.PAYMENTS]
+    assert len([p for p in (tmp_path / "uploads").rglob("*") if p.is_file()]) == 2

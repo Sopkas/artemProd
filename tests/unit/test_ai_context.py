@@ -95,6 +95,8 @@ def test_context_holds_the_rule_result_as_given():
     context = context_for()
     assert context.inn == INN and context.analysis_date == DAY
     assert context.priority == Priority.HIGH.value  # overdue_60 + revenue drop
+    # The model reads the word, not the code (A on #72: «high» in quotes on the live bot).
+    assert context.as_dict()["priority"] == "высокий"
     assert context.next_step and context.rules_version == "0.1"
     assert {signal.code for signal in context.signals} >= {"overdue_60", "revenue_drop_30"}
     assert all(signal.level in {"critical", "high", "medium"} for signal in context.signals)

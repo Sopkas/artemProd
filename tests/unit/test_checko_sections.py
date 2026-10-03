@@ -1,7 +1,7 @@
 """S3-04: Checko EFRSB and finances sections — projection, pagination and safe errors.
 
-Field names for records/finances are the module's documented assumption; these tests use
-synthetic payloads of that same minimal shape, never stored real responses.
+Field names are confirmed against the live API (20.09.2026); these tests use synthetic
+payloads of that same minimal shape, never stored real responses.
 """
 
 from datetime import UTC, datetime
@@ -147,6 +147,7 @@ async def test_bankruptcy_marks_partial_when_pages_exceed_budget():
     )
     assert transport.calls == [1, 2]  # stopped at the budget, no retries
     assert snapshot.coverage == Coverage.PARTIAL
+    assert snapshot.interrupted is None  # the budget is our choice, not a failure
     assert any("неполная" in reason for reason in snapshot.missing)
 
 
@@ -168,6 +169,72 @@ async def test_bankruptcy_failures_are_safe(transport, code):
     assert snapshot.coverage == Coverage.UNAVAILABLE
     assert snapshot.error.code == code
     assert KEY not in repr(snapshot)
+
+
+class FailingOnPage:
+    """Pages answer from ``pages`` until ``fail_on``, which answers ``failure`` instead."""
+
+    def __init__(self, pages, fail_on, failure):
+        self.pages, self.fail_on, self.failure = pages, fail_on, failure
+        self.calls = []
+
+    async def request(self, key, inn, page, timeout):
+        self.calls.append(page)
+        if page == self.fail_on:
+            if isinstance(self.failure, Exception):
+                raise self.failure
+            return self.failure
+        return 200, self.pages[page - 1]
+
+
+LIVE = {"Дата": "2026-01-01", "GUID": "g-1", "Тип": "ArbitralDecree", "ТипНаим": "Решение"}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError(KEY),
+        OSError(KEY),
+        (500, None),
+        (429, None),
+        (200, {"meta": {"status": "error"}}),
+        (200, {"meta": {"status": "ok"}}),
+    ],
+    ids=["timeout", "network", "http_500", "rate_limited", "api_error", "invalid"],
+)
+async def test_bankruptcy_keeps_earlier_pages_when_a_later_one_fails(failure):
+    """Review A on #18: page 2 failing used to throw page 1's message away."""
+    transport = FailingOnPage([efrsb_page([LIVE], total_pages=3)], 2, failure)
+    (snapshot,) = await provider(bankruptcy_transport=transport).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert transport.calls == [1, 2]
+    assert snapshot.status == FetchStatus.OK
+    assert snapshot.coverage == Coverage.PARTIAL
+    assert [f.value for f in snapshot.facts] == ["Решение"]
+    assert any("неполная" in reason for reason in snapshot.missing)
+    # Review A on #71: the sample is not final, so the pipeline can leave it unsaved.
+    assert snapshot.interrupted is not None and snapshot.interrupted.code
+    assert KEY not in repr(snapshot)
+
+
+async def test_bankruptcy_daily_limit_on_a_later_page_is_named():
+    limit = (403, {"meta": {"status": "error", "message": "Превышен суточный лимит запросов"}})
+    transport = FailingOnPage([efrsb_page([LIVE], total_pages=2)], 2, limit)
+    (snapshot,) = await provider(bankruptcy_transport=transport).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert snapshot.status == FetchStatus.OK
+    assert snapshot.interrupted.code == "daily_limit"
+
+
+async def test_bankruptcy_first_page_failure_is_still_unavailable():
+    transport = FailingOnPage([], 1, TimeoutError(KEY))
+    (snapshot,) = await provider(bankruptcy_transport=transport).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert snapshot.coverage == Coverage.UNAVAILABLE
+    assert snapshot.error.code == "timeout"
 
 
 # --- Finances ---
@@ -192,6 +259,56 @@ def test_finances_partial_without_two_consecutive_years():
     assert snapshot.coverage == Coverage.PARTIAL
     assert any("последовательных" in reason for reason in snapshot.missing)
     assert snapshot.covered_period is None
+
+
+@pytest.mark.parametrize(
+    "latest",
+    [{}, {"1600": 500}],  # an empty form; a balance sheet with neither line (review A, #18)
+    ids=["empty_form", "no_lines"],
+)
+def test_finances_year_without_lines_is_not_data(latest):
+    years = finances.read_finances(
+        fin_payload({2022: {"2110": 1, "2400": 1}, 2023: {"2110": 2, "2400": 2}, 2024: latest})
+    )
+    snapshot = finances.project_finances(INN, years, NOW)
+    assert (snapshot.covered_period.start.year, snapshot.covered_period.end.year) == (2022, 2023)
+    assert {f.period.end.year for f in snapshot.facts} == {2022, 2023}
+    assert snapshot.coverage == Coverage.PARTIAL
+    assert snapshot.missing == (
+        "Отчётность за 2024 без строк 2110 и 2400; динамика — по 2022–2023.",
+    )
+
+
+def test_finances_empty_year_before_the_data_is_not_mentioned():
+    years = finances.read_finances(
+        fin_payload({2021: {}, 2022: {"2110": 1, "2400": 1}, 2023: {"2110": 2, "2400": 2}})
+    )
+    snapshot = finances.project_finances(INN, years, NOW)
+    assert snapshot.coverage == Coverage.COMPLETE and snapshot.missing == ()
+
+
+def test_finances_says_when_the_latest_year_is_left_out():
+    years = finances.read_finances(
+        fin_payload({2022: {"2110": 1}, 2023: {"2110": 2}, 2025: {"2110": 3}})
+    )
+    snapshot = finances.project_finances(INN, years, NOW)
+    assert (snapshot.covered_period.start.year, snapshot.covered_period.end.year) == (2022, 2023)
+    assert snapshot.coverage == Coverage.PARTIAL
+    assert snapshot.missing == (
+        "Последний год отчётности (2025) без предыдущего; динамика — по 2022–2023.",
+    )
+
+
+def test_finances_says_which_line_is_missing_in_the_pair():
+    years = finances.read_finances(fin_payload({2023: {"2110": 1, "2400": 1}, 2024: {"2400": 2}}))
+    snapshot = finances.project_finances(INN, years, NOW)
+    assert snapshot.coverage == Coverage.PARTIAL
+    assert snapshot.missing == ("Нет строки 2110 (выручка) за 2024.",)
+    assert {(f.kind, f.period.end.year) for f in snapshot.facts} == {
+        (FactKind.REVENUE, 2023),
+        (FactKind.NET_PROFIT, 2023),
+        (FactKind.NET_PROFIT, 2024),
+    }
 
 
 def test_finances_partial_when_empty():

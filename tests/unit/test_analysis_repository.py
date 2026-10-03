@@ -92,6 +92,21 @@ async def test_add_file_attaches_it_to_the_draft(repository):
     assert reloaded.updated_at >= stored.uploaded_at
 
 
+async def test_a_1c_export_remembers_whose_it_is(repository):
+    """A 1C export is one company's: its period vouches for that company only (block 5
+    of the manual test, 30.09.2026). A file of our template has no owner company."""
+    run = await repository.create_run(OWNER, DAY, DataMode.DEMO)
+    export = await repository.add_file(
+        OWNER, run.id, NewFile(FileKind.PAYMENTS, "b" * 64, 20, "p1.xlsx", inn="7707083893")
+    )
+    template = await repository.add_file(
+        OWNER, run.id, NewFile(FileKind.PAYMENTS, "c" * 64, 20, "p2.xlsx")
+    )
+    reloaded = await repository.get_run(OWNER, run.id)
+    assert [file.inn for file in reloaded.files] == ["7707083893", None]
+    assert (export.inn, template.inn) == ("7707083893", None)
+
+
 async def test_same_file_twice_is_not_duplicated(repository):
     run = await repository.create_run(OWNER, DAY, DataMode.DEMO)
     first = await repository.add_file(OWNER, run.id, new_file())
@@ -162,6 +177,8 @@ async def test_returned_runs_are_snapshots_not_live_objects(repository):
         {"checksum": "A" * 64},
         {"size_bytes": 0},
         {"stored_path": "../x.xlsx"},
+        {"inn": "7707083893"},  # only payments have an owner company
+        {"kind": FileKind.PAYMENTS, "inn": "7707083894"},  # a broken INN
     ],
 )
 def test_new_file_validates_like_uploaded_file(bad):
