@@ -15,6 +15,7 @@
 | `invented_ground` | Выдуманное основание | `grounds: ["fact-invented"]` | Отклонён: `unknown_ground` |
 | `invented_amount` | Выдуманная сумма | «Долг вырос до 250000 руб.» | Отклонён: `new_amount` |
 | `foreign_company` | Ответ называет другую организацию | «Связанная организация 7707083893…» | Отклонён: `new_amount` |
+| `internal_id` | Служебный ID в тексте | «Сработал сигнал revenue_drop_30…» | Отклонён: `internal_id` |
 | `invented_promise` | Обещание с датой не из комментария | `due_on: 2026-10-01` | Отклонён: `promise_not_in_comment` |
 | `model_failure_text` | Сбой модели: ответ не JSON | «Извините, я не могу ответить» | Отклонён: `not_json` |
 | `model_failure_cut` | Сбой модели: ответ оборван | Обрезанный JSON | Отклонён: `not_json` |
