@@ -14,9 +14,10 @@ CONFIRMED against the live API on 20.09.2026 (free tariff). Request:
 the record is identified by ``GUID`` and ``URL`` points at its Fedresurs page. The earlier
 assumption of a ``Номер`` field was wrong and is kept only as a fallback.
 
-Event *types* are not classified here: scoring.md treats an unverified type as "requires
-manual review", so we surface every message as a dated ``BANKRUPTCY_EVENT`` fact linked to
-its source and never infer a confirmed procedure from raw text.
+Event types are classified in ``domain/efrsb`` and only applied here: a message of an open
+case becomes a dated ``BANKRUPTCY_EVENT`` fact, of a closed one ``BANKRUPTCY_CLOSED``, each
+linked to its source. The register answers by INN without the role, so a confirmed
+procedure is never inferred from a message (S3-06).
 """
 
 import re
@@ -34,6 +35,7 @@ from claims_assistant.domain.external import (
     Fact,
     FactKind,
     FetchStatus,
+    ProviderError,
     Section,
 )
 from claims_assistant.infrastructure.checko.errors import (
@@ -95,8 +97,8 @@ def _url(value: object) -> str | None:
 def _label(record: dict) -> str:
     """What the user reads: the Russian name of the type, with the case number if given.
 
-    The machine code (``Тип``) is not shown and is not classified here — scoring.md wants
-    every message reviewed until the dictionary of types is agreed with the specialist.
+    The machine code (``Тип``) is not shown: it decides the kind of fact through
+    ``domain/efrsb``, the person reads the name.
     """
     if not isinstance(record, dict):
         return "Сообщение ЕФРСБ"
@@ -143,6 +145,7 @@ def project_bankruptcy(
     *,
     complete: bool,
     unreadable: int,
+    interrupted: ProviderError | None = None,
 ) -> ExternalSnapshot:
     """Build the section snapshot from the aggregated records across fetched pages."""
     facts = []
@@ -206,4 +209,5 @@ def project_bankruptcy(
         facts=tuple(facts),
         evidence=tuple(evidence),
         missing=tuple(missing),
+        interrupted=interrupted,
     )

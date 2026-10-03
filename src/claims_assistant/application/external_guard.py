@@ -176,7 +176,10 @@ class GuardedCompanyDataProvider:
             wait: float | None = None
             for snapshot in snapshots:
                 if snapshot.status is FetchStatus.OK:
-                    self._cache.put(snapshot)
+                    # A sample the source cut short on a later page (#71) is kept, but it is
+                    # not an answer to hand out for an hour: a repeat must ask again.
+                    if snapshot.interrupted is None:
+                        self._cache.put(snapshot)
                     results[snapshot.section] = snapshot
                 elif _is_transient(snapshot) and attempt < self._policy.max_retries:
                     retry.append(snapshot.section)
@@ -211,6 +214,10 @@ class _ScopedProvider:
 
 
 def _spent_for_today(snapshot: ExternalSnapshot) -> bool:
+    """The day's limit, whether it refused the section or cut its sample on a later page:
+    either way the next company would only spend a request to hear 403 (review B on #65)."""
+    if snapshot.interrupted is not None and snapshot.interrupted.code == DAILY_LIMIT:
+        return True
     return snapshot.error is not None and snapshot.error.code == DAILY_LIMIT
 
 

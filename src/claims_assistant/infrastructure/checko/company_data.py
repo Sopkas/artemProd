@@ -270,11 +270,11 @@ class CheckoCompanyDataProvider:
             "network_error",
             "Не удалось связаться с Checko.",
         )
+        records: list[dict] = []
+        page = 1
         try:
-            records: list[dict] = []
             limits = request.limits
             budget = min(limits.max_pages, limits.max_requests)
-            page = 1
             pages_to_fetch = budget
             total_pages = 1
             while True:
@@ -285,17 +285,18 @@ class CheckoCompanyDataProvider:
                 mapped = _http_error(http_status, payload)
                 if mapped is not None:
                     status, code, message = mapped
-                    return _failure(request.inn, Section.BANKRUPTCY, fetched_at, *mapped)
+                    break
                 page_records, total_pages, _current = bankruptcy.read_page(payload, request.inn)
                 records.extend(page_records)
                 pages_to_fetch = min(total_pages, budget)
                 if page >= pages_to_fetch or len(records) >= bankruptcy.MAX_RECORDS:
-                    break
+                    complete = (
+                        pages_to_fetch >= total_pages and len(records) <= bankruptcy.MAX_RECORDS
+                    )
+                    return bankruptcy.project_bankruptcy(
+                        request.inn, records, fetched_at, complete=complete, unreadable=0
+                    )
                 page += 1
-            complete = pages_to_fetch >= total_pages and len(records) <= bankruptcy.MAX_RECORDS
-            return bankruptcy.project_bankruptcy(
-                request.inn, records, fetched_at, complete=complete, unreadable=0
-            )
         except TimeoutError:
             code, message = "timeout", "Checko не ответил за отведённое время."
         except (aiohttp.ClientError, OSError):
@@ -306,6 +307,18 @@ class CheckoCompanyDataProvider:
             status, code, message = FetchStatus.UNAVAILABLE, "api_error", _API_ERROR
         except bankruptcy.InvalidResponse:
             status, code, message = FetchStatus.INVALID_RESPONSE, "invalid_response", _INVALID
+        if page > 1:
+            # Earlier pages already came: their messages are a signal and cost requests, so
+            # a later page failing leaves the sample partial instead of the section lost.
+            # The failure rides along: the answer is not final and a later run may finish it.
+            return bankruptcy.project_bankruptcy(
+                request.inn,
+                records,
+                fetched_at,
+                complete=False,
+                unreadable=0,
+                interrupted=ProviderError(code, message),
+            )
         return _failure(request.inn, Section.BANKRUPTCY, fetched_at, status, code, message)
 
     async def _finances(
