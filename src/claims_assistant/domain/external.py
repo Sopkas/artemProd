@@ -136,6 +136,9 @@ class ExternalSnapshot:
     covered_period: Period | None = None
     source_updated_at: datetime | None = None
     error: ProviderError | None = None
+    # The source failed part-way (a later page), so the partial answer is not final: the
+    # same request tomorrow may complete it. Only on a successful partial section.
+    interrupted: ProviderError | None = None
 
     def __post_init__(self) -> None:
         for field in ("fetched_at", "source_updated_at"):
@@ -155,6 +158,8 @@ class ExternalSnapshot:
                 raise ValueError("Failed section must not contain successful facts")
         elif self.error is not None or self.coverage == Coverage.UNAVAILABLE:
             raise ValueError("Successful section cannot be unavailable or contain an error")
+        if self.interrupted is not None and self.coverage != Coverage.PARTIAL:
+            raise ValueError("Only a partial successful section can be interrupted")
         evidence_ids = {item.id for item in self.evidence}
         if len(evidence_ids) != len(self.evidence):
             raise ValueError("Duplicate evidence ID")

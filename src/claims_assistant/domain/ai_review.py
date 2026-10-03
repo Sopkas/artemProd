@@ -8,6 +8,10 @@ never raises and never lets a doubtful answer through. The reasons it can reject
 - it cites a ground or an interaction that is not in the context;
 - it names an amount or a date the context does not contain — the model must not add
   facts of its own;
+- it puts an internal ID (a ground's ID or a signal's code) into a sentence the
+  specialist reads: those belong in ``grounds``, and «revenue_drop_30» is not a word. A
+  list of known IDs in brackets or at the end («(основания: internal-overdue)») is only a
+  citation: it is cut from the text, not a reason to lose a correct answer;
 - it argues with the priority: the rules own it, the model only explains it;
 - a payment promise has no date, or its date is not in the comment it points at.
 
@@ -36,6 +40,20 @@ _PROMISE_FIELDS = {"interaction_id", "due_on", "quote"}
 _NUMBER = re.compile(r"-?\d[\d  ]*(?:[.,]\d+)?")
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _RU_DATE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b")
+_MONTHS = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)  # fmt: skip
+# «25 сентября 2026 года», «25 сентября»: a date in words is a date, not the number 25.
+_WORD_DATE = re.compile(
+    rf"\b(\d{{1,2}})\s+({'|'.join(_MONTHS)})(?:\s+(\d{{4}})(?:\s*(?:года|г\.))?)?",
+    re.IGNORECASE,
+)
+# «более 90 дней» when the data say 91: a rounded bound, true of the fact it retells.
+_BOUND_MORE = re.compile(r"(?:более|больше|свыше|превыша\w*)(?:\s+чем)?\s*$", re.IGNORECASE)
+_BOUND_AT_LEAST = re.compile(r"не\s+менее\s*$", re.IGNORECASE)
+_BOUND_LESS = re.compile(r"(?:менее|меньше)(?:\s+чем)?\s*$", re.IGNORECASE)
+_BOUND_SLACK = Decimal("1.25")  # «более 90» may stand for up to 112, not for 200
 
 # The priority is the rules' answer; naming another one or asking to change it is a reason
 # to reject, whatever the wording around it.
@@ -57,6 +75,7 @@ class RejectionCode(StrEnum):
     UNKNOWN_INTERACTION = "unknown_interaction"
     NEW_AMOUNT = "new_amount"
     NEW_DATE = "new_date"
+    INTERNAL_ID = "internal_id"
     PRIORITY_CHANGED = "priority_changed"
     PROMISE_WITHOUT_DATE = "promise_without_date"
     PROMISE_NOT_IN_COMMENT = "promise_not_in_comment"
@@ -72,6 +91,7 @@ _REASONS = {
     "в контексте.",
     RejectionCode.NEW_AMOUNT: "В объяснении есть число, которого нет во входных данных.",
     RejectionCode.NEW_DATE: "В объяснении есть дата, которой нет во входных данных.",
+    RejectionCode.INTERNAL_ID: "В объяснении есть служебный идентификатор основания или сигнала.",
     RejectionCode.PRIORITY_CHANGED: "Ответ оспаривает или меняет приоритет, заданный правилами.",
     RejectionCode.PROMISE_WITHOUT_DATE: "Обещание оплаты без даты.",
     RejectionCode.PROMISE_NOT_IN_COMMENT: "Даты обещания нет в комментарии, на который "
@@ -128,19 +148,93 @@ def _dates(text: str) -> set[date]:
     return found
 
 
+def _word_dates(text: str) -> list[tuple[int, int, int | None]]:
+    """Day, month and year (None when not written) of every date in words."""
+    found = []
+    for match in _WORD_DATE.finditer(text):
+        day = int(match.group(1))
+        month = _MONTHS.index(match.group(2).lower()) + 1
+        found.append((day, month, int(match.group(3)) if match.group(3) else None))
+    return found
+
+
 def _strip_dates(text: str) -> str:
-    return _RU_DATE.sub(" ", _ISO_DATE.sub(" ", text))
+    return _WORD_DATE.sub(" ", _RU_DATE.sub(" ", _ISO_DATE.sub(" ", text)))
+
+
+def _decimal(raw: str) -> Decimal | None:
+    try:
+        return Decimal(raw.replace(" ", "").replace(" ", "").replace(",", "."))
+    except InvalidOperation:
+        return None
 
 
 def _numbers(text: str) -> set[Decimal]:
     found = set()
     for match in _NUMBER.finditer(_strip_dates(text)):
-        raw = match.group().replace(" ", "").replace(" ", "").replace(",", ".")
-        try:
-            found.add(Decimal(raw))
-        except InvalidOperation:
-            continue
+        value = _decimal(match.group())
+        if value is not None:
+            found.add(value)
     return found
+
+
+def _claims(text: str) -> list[tuple[Decimal, str | None]]:
+    """Every number of the text with the bound written before it: «more», «at_least»,
+    «less» or None for a plain number."""
+    stripped = _strip_dates(text)
+    found = []
+    for match in _NUMBER.finditer(stripped):
+        value = _decimal(match.group())
+        if value is None:
+            continue
+        before = stripped[max(0, match.start() - 20) : match.start()]
+        bound = None
+        if _BOUND_AT_LEAST.search(before):
+            bound = "at_least"
+        elif _BOUND_MORE.search(before):
+            bound = "more"
+        elif _BOUND_LESS.search(before):
+            bound = "less"
+        found.append((value, bound))
+    return found
+
+
+def _bound_holds(known: Decimal, value: Decimal, bound: str | None) -> bool:
+    """A bound is a retelling when a known number satisfies it and is close to it."""
+    if bound is None or value <= 0 or known <= 0:
+        return False
+    if bound == "more":
+        return value < known <= value * _BOUND_SLACK
+    if bound == "at_least":
+        return value <= known <= value * _BOUND_SLACK
+    return value / _BOUND_SLACK <= known < value
+
+
+def _citations(ids: set[str]) -> re.Pattern[str] | None:
+    """A list of known IDs cited in brackets or as the closing «Основания: …»."""
+    if not ids:
+        return None
+    one = "|".join(re.escape(item) for item in sorted(ids, key=len, reverse=True))
+    many = rf"(?:{one})(?:\s*[,;]\s*(?:{one}))*"
+    label = r"(?:(?:основани[еяй]|id)\s*:?\s*)?"
+    return re.compile(
+        rf"\s*\({label}{many}\)|[\s.;,]*\b(?:основани[еяй]|id)\s*:\s*{many}\s*\.?\s*$",
+        re.IGNORECASE,
+    )
+
+
+def _id_pattern(ids: set[str]) -> re.Pattern[str] | None:
+    """The IDs as whole tokens: «INT-8» in «INT-8,» but not in «INT-80»."""
+    if not ids:
+        return None
+    alternatives = "|".join(re.escape(item) for item in sorted(ids, key=len, reverse=True))
+    return re.compile(rf"(?<![\w-])(?:{alternatives})(?![\w-])")
+
+
+def _strip_ids(text: str, pattern: re.Pattern[str] | None) -> str:
+    """IDs are names, not numbers: «efrsb-event-0» must not read as -0, nor
+    «revenue-2025 2025» as -20252025 (review A on #63)."""
+    return pattern.sub(" ", text) if pattern is not None else text
 
 
 def _rounds_to(known: Decimal, value: Decimal) -> bool:
@@ -171,10 +265,7 @@ def _context_text(context: RecommendationContext) -> str:
             f"{comment.interaction_id} {comment.happened_on.isoformat()} {comment.text}"
             for comment in context.comments
         ),
-        # The IDs travel too: an answer may cite «INT-8», and «-8» must not read as a new
-        # number.
-        *(value.id for value in context.values),
-        *(f"{fact.id} {fact.record_id or ''}" for fact in context.facts),
+        *(fact.record_id or "" for fact in context.facts),
         *context.missing_data,
     ]
     return " ".join(str(part) for part in parts)
@@ -267,14 +358,20 @@ def review_answer(payload: object, context: RecommendationContext) -> Explanatio
     except _SchemaError as error:
         return _reject(RejectionCode.SCHEMA, f"поле: {error.field}")
 
+    known_ids = {value.id for value in context.values} | {fact.id for fact in context.facts}
+    known_ids |= {comment.interaction_id for comment in context.comments}
+
+    # A citation is already checked in «grounds»; the specialist does not read IDs, so
+    # the list is cut from what is shown instead of costing the whole answer (A on #72).
+    citations = _citations(known_ids | {signal.code for signal in context.signals})
     text = explanation.strip()
+    if citations is not None:
+        text = re.sub(r"\s+([.,;:])", r"\1", citations.sub("", text)).strip()
     if not text:
         return _reject(RejectionCode.EMPTY_EXPLANATION)
     if len(text) > MAX_EXPLANATION_CHARS:
         return _reject(RejectionCode.TOO_LONG, f"{len(text)} символов")
 
-    known_ids = {value.id for value in context.values} | {fact.id for fact in context.facts}
-    known_ids |= {comment.interaction_id for comment in context.comments}
     if any(not isinstance(ground, str) for ground in grounds):
         return _reject(RejectionCode.SCHEMA, "основание не строка")
     unknown = [ground for ground in grounds if ground not in known_ids]
@@ -284,12 +381,35 @@ def review_answer(payload: object, context: RecommendationContext) -> Explanatio
     if _priority_conflict(text, context.priority):
         return _reject(RejectionCode.PRIORITY_CHANGED)
 
-    source = _context_text(context)
-    for day in _dates(text) - _dates(source):
+    # Grounds and signals are named by us, for us; an interaction's ID is the customer's
+    # own record number («запись INT-1» in the report) and may be cited.
+    internal = {value.id for value in context.values} | {fact.id for fact in context.facts}
+    internal |= {signal.code for signal in context.signals}
+    internal -= {comment.interaction_id for comment in context.comments}
+    found = _id_pattern(internal)
+    if found is not None and (match := found.search(text)):
+        return _reject(RejectionCode.INTERNAL_ID, match.group())
+
+    ids = _id_pattern(internal | {comment.interaction_id for comment in context.comments})
+    source = _strip_ids(_context_text(context), ids)
+    text_only = _strip_ids(text, ids)
+    known_dates = _dates(source)
+    for day in _dates(text_only) - known_dates:
         return _reject(RejectionCode.NEW_DATE, day.isoformat())
+    for day, month, year in _word_dates(text_only):
+        if not any(
+            (known.day, known.month) == (day, month) and year in (None, known.year)
+            for known in known_dates
+        ):
+            written = f"{day:02d}.{month:02d}" + (f".{year}" if year else "")
+            return _reject(RejectionCode.NEW_DATE, written)
     known_numbers = _numbers(source)
-    for number in _numbers(text):
-        if not any(_rounds_to(known, number) for known in known_numbers):
+    for number, bound in _claims(text_only):
+        # A bound is checked as a bound: «более 75 дней» is not true of 75 days.
+        if not any(
+            _bound_holds(known, number, bound) if bound else _rounds_to(known, number)
+            for known in known_numbers
+        ):
             return _reject(RejectionCode.NEW_AMOUNT, str(number))
 
     promises = _promises(raw_promises, context)

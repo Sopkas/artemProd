@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -98,12 +99,31 @@ LIVE_SNAPSHOTS = [
         INN, {2024: {"2110": 1000, "2400": -50}, 2025: {"2110": "2 000,50", "2400": 75.5}}, NOW
     ),
     failed(),
+    bankruptcy.project_bankruptcy(
+        INN,
+        [{"Дата": "2026-05-01", "Тип": "Введение наблюдения", "Номер": "A-1"}],
+        NOW,
+        complete=False,
+        unreadable=0,
+        interrupted=ProviderError("daily_limit", "Лимит исчерпан."),
+    ),
 ]
 
 
 @pytest.mark.parametrize("snapshot", LIVE_SNAPSHOTS, ids=lambda s: f"{s.section}-{s.status}")
 def test_live_snapshots_round_trip_exactly_through_json(snapshot):
     assert snapshot_from_dict(through_json(snapshot_to_dict(snapshot))) == snapshot
+
+
+def test_snapshot_saved_before_interrupted_reads_as_not_interrupted():
+    data = snapshot_to_dict(LIVE_SNAPSHOTS[-1])
+    del data["interrupted"]
+    assert snapshot_from_dict(through_json(data)).interrupted is None
+
+
+def test_only_a_partial_section_can_be_interrupted():
+    with pytest.raises(ValueError, match="interrupted"):
+        replace(LIVE_SNAPSHOTS[3], interrupted=ProviderError("timeout", "Нет ответа."))
 
 
 @pytest.mark.parametrize("scenario", list(DemoScenario))

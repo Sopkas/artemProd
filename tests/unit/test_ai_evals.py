@@ -197,6 +197,14 @@ SCENARIOS: tuple[Scenario, ...] = (
         note="ИНН в запрос не уходит; чужой номер — число не из контекста.",
     ),
     Scenario(
+        id="internal_id",
+        title="Служебный ID в тексте",
+        build=lambda: context(),
+        answer={"explanation": "Сработал сигнал revenue_drop_30: выручка упала на 40%."},
+        expect=RejectionCode.INTERNAL_ID,
+        note="ID оснований и коды сигналов — в grounds, не в тексте для специалиста.",
+    ),
+    Scenario(
         id="invented_promise",
         title="Обещание с датой не из комментария",
         build=lambda: context(interactions=[talk()]),
