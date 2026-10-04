@@ -188,6 +188,31 @@ def test_file_labels_name_kind_period_and_number_of_repeated_kinds():
     )
 
 
+def test_file_labels_tell_two_1c_exports_over_one_period_apart():
+    """An export's period is its own company's (#76): without the INN two exports over the
+    same period read «файл 1» and «файл 2», and nobody can say whose is which."""
+
+    def upload(file_id, inn=None):
+        return UploadedFile(
+            id=file_id,
+            run_id="run-1",
+            kind=FileKind.PAYMENTS,
+            checksum=sha256(file_id.encode()).hexdigest(),
+            size_bytes=1,
+            stored_path=f"run-1/{file_id}.xlsx",
+            uploaded_at=NOW,
+            coverage=Period(date(2026, 6, 1), date(2026, 8, 31)),
+            inn=inn,
+        )
+
+    files = [upload("a"), upload("b", "7707083893"), upload("c", "7710140679")]
+    assert file_labels(files) == (
+        ("a", "Платежи за 01.06.2026–31.08.2026, файл 1"),
+        ("b", "Платежи (выгрузка 1С, ИНН 7707083893) за 01.06.2026–31.08.2026, файл 2"),
+        ("c", "Платежи (выгрузка 1С, ИНН 7710140679) за 01.06.2026–31.08.2026, файл 3"),
+    )
+
+
 def test_quality_names_the_file_of_each_issue_in_upload_order():
     files = (("f-main", "Контрагенты"), ("f-pay-1", "Платежи за 01.06.2026–30.06.2026, файл 1"))
     files += (("f-pay-2", "Платежи за 01.07.2026–31.08.2026, файл 2"),)
