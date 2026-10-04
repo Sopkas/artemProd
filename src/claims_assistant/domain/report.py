@@ -36,11 +36,14 @@ FILE_KIND_TITLES = {
 
 
 def file_labels(files: Sequence[UploadedFile]) -> tuple[tuple[str, str], ...]:
-    """(file id, label) in upload order: the kind, the payments period and, when a kind
-    repeats, the file's number — «Платежи за 01.06.2026–30.06.2026, файл 2».
+    """(file id, label) in upload order: the kind, whose 1C export it is, the payments
+    period and, when a kind repeats, the file's number — «Платежи за 01.06.2026–30.06.2026,
+    файл 2», «Платежи (выгрузка 1С, ИНН 7707083893) за 01.06.2026–31.08.2026, файл 3».
 
     The label names what the user chose and typed, never the file's contents; the upload
-    time is left out, as it would need the user's time zone.
+    time is left out, as it would need the user's time zone. An export's INN is the one
+    typed in the dialog: its period vouches for that company only (#76), so two exports
+    over the same period are told apart by it.
     """
     total: dict[FileKind, int] = {}
     for file in files:
@@ -50,6 +53,8 @@ def file_labels(files: Sequence[UploadedFile]) -> tuple[tuple[str, str], ...]:
     for file in files:
         seen[file.kind] = seen.get(file.kind, 0) + 1
         label = FILE_KIND_TITLES.get(file.kind, file.kind.value)
+        if file.inn is not None:
+            label += f" (выгрузка 1С, ИНН {file.inn})"
         if file.coverage is not None:
             start, end = file.coverage.start, file.coverage.end
             label += f" за {start.strftime('%d.%m.%Y')}–{end.strftime('%d.%m.%Y')}"

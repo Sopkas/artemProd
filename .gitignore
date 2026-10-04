@@ -31,6 +31,7 @@ dist/
 /storage/
 /uploads/
 /reports/
+/examples/demo/
 /evals/results/
 /logs/
 *.db

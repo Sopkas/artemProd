@@ -342,6 +342,18 @@ def test_one_year_with_a_declared_covered_period_is_not_a_complete_base_set():
     result = assess(INN, [company(), efrsb(), one_year], FULL_ROW)
     assert result.base_complete is False
     assert result.priority is Priority.UNKNOWN
+    # The section itself named no gap, so the assessment says why the set is incomplete.
+    assert (
+        "Финансовая отчётность: нет показателя за два года подряд; для полной оценки нужны оба."
+        in result.missing_data
+    )
+
+
+def test_a_gap_the_finances_section_named_itself_is_not_said_twice():
+    result = assess(INN, [company(), efrsb(), fin({2025: {"2110": 100}})], FULL_ROW)
+    assert result.base_complete is False
+    finance_gaps = [reason for reason in result.missing_data if "Финансовая" in reason]
+    assert len(finance_gaps) == 1 and "для полной оценки" not in finance_gaps[0]
 
 
 def test_a_quarter_is_not_compared_with_a_year():
