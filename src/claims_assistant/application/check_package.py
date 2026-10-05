@@ -98,6 +98,15 @@ class PackageConflict:
     reason: str
 
 
+def export_filed_under(inn: str) -> str:
+    """The same 1C export again, for another company: it stays whose it was (review B, #76)."""
+    return (
+        f"Эта выгрузка уже есть в пакете — как выгрузка организации с ИНН {inn}. "
+        "Одна выгрузка относится к одной организации. Если ИНН был указан неверно, "
+        "нажмите «Отмена» и начните проверку заново."
+    )
+
+
 MAIN_FILE_ALREADY_IN_PACKAGE = (
     "Файл «Контрагенты» уже есть в пакете, а этот отличается. Чтобы заменить список, "
     "нажмите «Отмена» и начните новую проверку."
@@ -312,7 +321,7 @@ async def accept_payments_export(
     reader: RawSheetReader,
     sheets: PaymentsSheetWriter,
     limits: ImportLimits = ImportLimits(),
-) -> LedgerAccepted | PackageRejected:
+) -> LedgerAccepted | PackageRejected | PackageConflict:
     """Attach the customer's own 1C print of one counterparty's payments (S4-05).
 
     The export says nothing about the INN — the dialog does, and it must be one of the
@@ -341,6 +350,12 @@ async def accept_payments_export(
                 ),
             )
         )
+    # The same print again under another INN is not a new file: it would stay the first
+    # company's in silence, and the user who fixed a wrong INN would believe otherwise.
+    uploaded = sha256(data).hexdigest()
+    for file in run.files:
+        if file.kind is FileKind.PAYMENTS and file.checksum == uploaded and file.inn != inn:
+            return PackageConflict(export_filed_under(file.inn or ""))
     result, export = await asyncio.to_thread(
         import_payments_export,
         reader,

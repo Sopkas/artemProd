@@ -210,3 +210,39 @@ async def test_interactions_give_way_when_the_card_is_tight(tmp_path, monkeypatc
     assert "Взаимодействия: 2, последние 1:" in tight or "последние 0:" in tight
     assert "Давность платежа" in tight and tight.endswith("без оценки очерёдности.")
     assert len(tight) < len(full)
+
+
+async def test_the_card_lists_no_other_companys_1c_export(tmp_path):
+    """Since #76 an export vouches for its own company only and #78 names it by INN: the
+    card of one company must not list another one's export among «its» files."""
+    from claims_assistant.application.check_package import accept_payments_export
+    from claims_assistant.infrastructure.excel import ledgers
+    from tests.integration.test_upload_dialog import export_file
+
+    deps = deps_for(tmp_path)
+    result = await accept_counterparties(
+        OWNER, DAY, DataMode.DEMO, build_counterparties_template(ROWS), **deps
+    )
+    run_id = result.run.id
+    await accept_ledger(
+        OWNER,
+        run_id,
+        FileKind.PAYMENTS,
+        build_payments_workbook([[INN, "P-1", date(2026, 7, 15), 50.0]]),
+        coverage=Period(date(2026, 6, 1), DAY),
+        **deps,
+    )
+    await accept_payments_export(OWNER, run_id, export_file(), inn=OTHER, sheets=ledgers, **deps)
+    repository = deps["repository"]
+    await repository.transition(OWNER, run_id, RunStatus.QUEUED)
+    await repository.claim_next()
+    await repository.finish(run_id, RunOutcome(RunStatus.COMPLETED))
+
+    mine = await internal_context(OWNER, INN, repository, deps["files"], deps["reader"])
+    theirs = await internal_context(OWNER, OTHER, repository, deps["files"], deps["reader"])
+    assert mine.files == ("Контрагенты", "Платежи за 01.06.2026–01.09.2026, файл 1")
+    assert theirs.files == (
+        "Контрагенты",
+        "Платежи за 01.06.2026–01.09.2026, файл 1",
+        f"Платежи (выгрузка 1С, ИНН {OTHER}) за 01.06.2026–31.08.2026, файл 2",
+    )
