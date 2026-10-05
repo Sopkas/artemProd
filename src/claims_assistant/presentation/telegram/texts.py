@@ -212,13 +212,26 @@ def composition_line(kind: FileKind, rows: int, coverage: Period | None) -> str:
     return text
 
 
+def template_samples(inns: tuple[str, ...]) -> str:
+    """Example rows of the template left in the file: they would be checked as the user's
+    debtors, and their INNs belong to real companies (review A on #79)."""
+    return (
+        f"Похоже, в файле остались строки-примеры из шаблона (ИНН {', '.join(inns)}). "
+        "Бот проверит их как ваших должников, а это ИНН настоящих организаций: на живом "
+        "источнике они потратят запросы и попадут в отчёт. Если это не ваши организации, "
+        "нажмите «Отмена», удалите строки-примеры и начните проверку заново."
+    )
+
+
 def package_summary(
     analysis_date: date,
     rows: int,
     issues: tuple[ImportIssue, ...],
     duplicate: bool,
     composition: tuple[str, ...] = (),
+    samples: tuple[str, ...] = (),
 ) -> str:
+    """``samples`` — INNs of rows that are the template's examples, left untouched."""
     lines = [CHECK_SUMMARY_TITLE]
     if duplicate:
         lines.append(CHECK_DUPLICATE)
@@ -227,6 +240,8 @@ def package_summary(
     lines.extend(_issues_block(issues))
     if any(issue.severity is IssueSeverity.ERROR for issue in issues):
         lines.append("Строки с ошибками в проверку не попадут.")
+    if samples:
+        lines.append(template_samples(samples))
     lines.extend(_composition_block(composition))
     lines.append(CHECK_CONFIRM)
     return "\n".join(lines)
