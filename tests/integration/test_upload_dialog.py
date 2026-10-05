@@ -809,10 +809,12 @@ async def test_the_same_export_under_another_inn_is_refused_and_the_package_kept
     setup, bot, update_factory
 ):
     dispatcher, repository = await package_ready(setup, bot, update_factory)
+    # One build: openpyxl stamps the time, so two builds a second apart are two files.
+    data = export_file()
     await to_export(dispatcher, bot, update_factory)
-    await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xlsx")
+    await send_document(dispatcher, bot, update_factory, data, name="1c.xlsx")
     await to_export(dispatcher, bot, update_factory, inn=INN_2)
-    reply = await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xlsx")
+    reply = await send_document(dispatcher, bot, update_factory, data, name="1c.xlsx")
     assert reply.text.startswith("Файл не принят.") and INN_1 in reply.text
     assert buttons(reply) == LAUNCH_MENU  # back to the package, nothing to fix in the file
     payments = [
