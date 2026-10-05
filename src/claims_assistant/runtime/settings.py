@@ -57,6 +57,18 @@ class ConfigurationError(ValueError):
     """Safe, user-facing configuration error without the rejected value."""
 
 
+_ON = frozenset({"true", "1", "yes"})
+_OFF = frozenset({"false", "0", "no"})
+
+
+def _switch(values: dict[str, str | None], key: str) -> bool:
+    """An on/off setting: true/false, 1/0 or yes/no in any case; empty means off."""
+    raw = (values.get(key) or "false").strip().lower()
+    if raw not in _ON | _OFF:
+        raise ConfigurationError(f"{key}: допустимы true или false.")
+    return raw in _ON
+
+
 @dataclass(frozen=True)
 class Settings:
     token: str = field(repr=False)
@@ -137,12 +149,14 @@ class Settings:
         except ValueError:
             allowed = ", ".join(item.value for item in DemoScenario)
             raise ConfigurationError(f"DEMO_SCENARIO: допустимы {allowed}.") from None
-        raw_package = (values.get("DEMO_PACKAGE") or "false").strip().lower()
-        if raw_package not in {"true", "false"}:
-            raise ConfigurationError("DEMO_PACKAGE: допустимы true, false.")
+        demo_package = _switch(values, "DEMO_PACKAGE")
         provider = (values.get("DATA_PROVIDER") or "demo").strip().lower()
         if provider not in {"demo", "checko"}:
             raise ConfigurationError("DATA_PROVIDER: допустимы demo, checko.")
+        if demo_package and provider != "demo":
+            # The package picks the demo answer per INN; with the live source it would do
+            # nothing, and a rehearsal taken for the demo would spend real requests.
+            raise ConfigurationError("DEMO_PACKAGE=true работает только с DATA_PROVIDER=demo.")
         ai_provider = (values.get("AI_PROVIDER") or "off").strip().lower()
         if ai_provider not in {"off", "stub", "polza"}:
             raise ConfigurationError("AI_PROVIDER: допустимы off, stub, polza.")
@@ -153,10 +167,7 @@ class Settings:
         raw_structured = (values.get("AI_RESPONSE_FORMAT") or "json_schema").strip().lower()
         if raw_structured not in {"json_schema", "none"}:
             raise ConfigurationError("AI_RESPONSE_FORMAT: допустимы json_schema, none.")
-        raw_comments = (values.get("AI_SEND_COMMENTS") or "false").strip().lower()
-        if raw_comments not in {"true", "false", "1", "0", "yes", "no"}:
-            raise ConfigurationError("AI_SEND_COMMENTS: допустимы true или false.")
-        ai_send_comments = raw_comments in {"true", "1", "yes"}
+        ai_send_comments = _switch(values, "AI_SEND_COMMENTS")
         ai = AiSettings(
             timeout_seconds=_number(values, "AI_TIMEOUT_SECONDS", 30.0, minimum=0.001),
             max_retries=_number(values, "AI_MAX_RETRIES", 1, integer=True, minimum=0),
@@ -200,7 +211,7 @@ class Settings:
             allowed_ids=allowed_ids,
             log_level=level,
             demo_scenario=scenario,
-            demo_package=raw_package == "true",
+            demo_package=demo_package,
             data_provider=provider,
             checko_api_key=checko_key,
             ai_provider=ai_provider,
