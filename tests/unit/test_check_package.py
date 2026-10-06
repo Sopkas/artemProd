@@ -284,3 +284,24 @@ async def test_the_same_export_under_another_inn_says_whose_it_already_is(deps):
     files = (await deps["repository"].get_run(OWNER, run.id)).files
     assert [file.inn for file in files if file.kind is FileKind.PAYMENTS] == [INN_1]
     assert first.file in files
+
+
+async def test_an_export_stored_before_0005_is_a_plain_repeat_not_a_conflict(deps):
+    """Review B on #81: a file stored before migration 0005 has no INN, and the conflict
+    read «…как выгрузка организации с ИНН .». Whose it is cannot be told, so it stays a
+    repeat, as it was before #81."""
+    from claims_assistant.application.analysis_repository import NewFile
+    from claims_assistant.application.check_package import accept_payments_export
+    from claims_assistant.infrastructure.excel import ledgers
+    from tests.integration.test_upload_dialog import export_file
+
+    run = await draft(deps)
+    data = export_file()
+    old = await deps["repository"].add_file(
+        OWNER,
+        run.id,
+        NewFile(FileKind.PAYMENTS, sha256(data).hexdigest(), 10, f"{run.id}/old.xlsx", PERIOD),
+    )
+    again = await accept_payments_export(OWNER, run.id, data, inn=INN_1, sheets=ledgers, **deps)
+    assert isinstance(again, LedgerAccepted) and again.duplicate
+    assert again.file == old
