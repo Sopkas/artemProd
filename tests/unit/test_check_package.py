@@ -264,3 +264,23 @@ async def test_the_same_export_twice_keeps_one_copy(deps, tmp_path):
     kinds = [file.kind for file in (await deps["repository"].get_run(OWNER, run.id)).files]
     assert kinds == [FileKind.COUNTERPARTIES, FileKind.PAYMENTS]
     assert len([p for p in (tmp_path / "uploads").rglob("*") if p.is_file()]) == 2
+
+
+async def test_the_same_export_under_another_inn_says_whose_it_already_is(deps):
+    """Review B on #76: the repeat was taken as a duplicate and stayed the first company's
+    without a word — the user who fixed a wrong INN believed the export was now the other's."""
+    from claims_assistant.application.check_package import PackageConflict, accept_payments_export
+    from claims_assistant.infrastructure.excel import ledgers
+    from tests.integration.test_upload_dialog import export_file
+
+    run = await draft(deps)
+    data = export_file()
+    first = await accept_payments_export(OWNER, run.id, data, inn=INN_1, sheets=ledgers, **deps)
+    again = await accept_payments_export(
+        OWNER, run.id, data, inn="7710140679", sheets=ledgers, **deps
+    )
+    assert isinstance(again, PackageConflict)
+    assert INN_1 in again.reason and "Отмена" in again.reason
+    files = (await deps["repository"].get_run(OWNER, run.id)).files
+    assert [file.inn for file in files if file.kind is FileKind.PAYMENTS] == [INN_1]
+    assert first.file in files

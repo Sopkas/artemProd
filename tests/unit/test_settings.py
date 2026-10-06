@@ -15,6 +15,7 @@ def clean_environment(monkeypatch):
         "ALLOWED_TELEGRAM_IDS",
         "LOG_LEVEL",
         "DEMO_SCENARIO",
+        "DEMO_PACKAGE",
         "DATA_PROVIDER",
         "CHECKO_API_KEY",
         "DATABASE_PATH",
@@ -107,6 +108,52 @@ def test_invalid_demo_scenario(tmp_path, monkeypatch):
     with pytest.raises(ConfigurationError, match="DEMO_SCENARIO") as error:
         Settings.load(tmp_path / "missing.env")
     assert "secret" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, False),
+        ("true", True),
+        (" TRUE ", True),
+        ("1", True),
+        ("yes", True),
+        ("false", False),
+        ("0", False),
+        ("no", False),
+    ],
+)
+def test_demo_package_reads_like_the_other_switches(tmp_path, monkeypatch, raw, expected):
+    """«1» and «yes» are read as on, as AI_SEND_COMMENTS already is (review A on #61)."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    if raw is not None:
+        monkeypatch.setenv("DEMO_PACKAGE", raw)
+    assert Settings.load(tmp_path / "missing.env").demo_package is expected
+
+
+def test_an_unreadable_demo_package_is_rejected_without_repeating_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("DEMO_PACKAGE", "secret")
+    with pytest.raises(ConfigurationError, match="DEMO_PACKAGE") as error:
+        Settings.load(tmp_path / "missing.env")
+    assert "secret" not in str(error.value)
+
+
+def test_the_demo_package_is_refused_with_the_live_source(tmp_path, monkeypatch):
+    """DEMO_PACKAGE chooses the demo answer per INN; with Checko it would do nothing, and a
+    rehearsal believed to be the demo would spend real requests on made-up INNs."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("DATA_PROVIDER", "checko")
+    monkeypatch.setenv("CHECKO_API_KEY", "synthetic-key")
+    monkeypatch.setenv("DEMO_PACKAGE", "true")
+    with pytest.raises(ConfigurationError, match="DEMO_PACKAGE") as error:
+        Settings.load(tmp_path / "missing.env")
+    assert "DATA_PROVIDER=demo" in str(error.value)
+    monkeypatch.setenv("DEMO_PACKAGE", "false")
+    assert Settings.load(tmp_path / "missing.env").data_provider == "checko"
 
 
 def test_invalid_log_level(tmp_path, monkeypatch):
