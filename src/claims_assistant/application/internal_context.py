@@ -69,6 +69,15 @@ class InternalContext:
     contracts: tuple[ContractDebt, ...] = ()
 
 
+def _own_files(run: AnalysisRun, inn: str) -> tuple[str, ...]:
+    """Labels of the files that speak of this company: all but another company's 1C export,
+    whose period does not vouch for it (#76). Numbers stay those of the report (#78)."""
+    owner = {file.id: file.inn for file in run.files}
+    return tuple(
+        label for file_id, label in file_labels(run.files) if owner[file_id] in (None, inn)
+    )
+
+
 async def internal_context(
     owner_id: int,
     inn: str,
@@ -118,7 +127,7 @@ async def internal_context(
             row=row,
             indicators=indicators,
             interactions=interactions,
-            files=tuple(label for _, label in file_labels(run.files)),
+            files=_own_files(run, inn),
             contracts=tuple(contracts),
         )
     return None

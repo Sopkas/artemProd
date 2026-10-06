@@ -358,6 +358,11 @@ def create_dispatcher(
             await state.clear()
             await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
             return
+        if isinstance(result, PackageConflict):
+            # Nothing to fix in the file: back to the package, as for a second «Контрагенты».
+            await state.set_state(CheckDialog.confirming)
+            await message.answer(texts.package_conflict(result.reason), reply_markup=launch_menu())
+            return
         if not isinstance(result, LedgerAccepted):
             await message.answer(
                 texts.ledger_rejected(FileKind.PAYMENTS, result.issues),

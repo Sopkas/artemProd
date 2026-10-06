@@ -805,6 +805,24 @@ async def test_an_export_past_the_analysis_date_covers_the_days_up_to_it(
     assert payments.coverage == Period(date(2026, 6, 1), date(2026, 9, 1))
 
 
+async def test_the_same_export_under_another_inn_is_refused_and_the_package_kept(
+    setup, bot, update_factory
+):
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    # One build: openpyxl stamps the time, so two builds a second apart are two files.
+    data = export_file()
+    await to_export(dispatcher, bot, update_factory)
+    await send_document(dispatcher, bot, update_factory, data, name="1c.xlsx")
+    await to_export(dispatcher, bot, update_factory, inn=INN_2)
+    reply = await send_document(dispatcher, bot, update_factory, data, name="1c.xlsx")
+    assert reply.text.startswith("Файл не принят.") and INN_1 in reply.text
+    assert buttons(reply) == LAUNCH_MENU  # back to the package, nothing to fix in the file
+    payments = [
+        f for f in (await repository.list_runs(OWNER))[0].files if f.kind.value == "payments"
+    ]
+    assert [f.inn for f in payments] == [INN_1]
+
+
 async def test_a_wrong_inn_is_asked_again_without_repeating_it(setup, bot, update_factory):
     dispatcher, _ = await package_ready(setup, bot, update_factory)
     await send(dispatcher, bot, update_factory, "Добавить платежи")
