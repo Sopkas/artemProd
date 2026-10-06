@@ -62,6 +62,18 @@ def configure_logging(settings: Settings) -> None:
     logging.getLogger("aiogram").setLevel(logging.WARNING)
 
 
+def company_source(settings: Settings) -> CheckoCompanyDataProvider | DemoCompanyDataProvider:
+    """The external source the settings name: Checko, or the demo with the defence package's
+    answers per INN when DEMO_PACKAGE is on (S6-04; the e2e test of the show builds it here)."""
+    if settings.data_provider == "checko":
+        return CheckoCompanyDataProvider(settings.checko_api_key)
+    return DemoCompanyDataProvider(
+        settings.demo_scenario,
+        by_inn=PACKAGE_SCENARIOS if settings.demo_package else None,
+        names=PACKAGE_NAMES if settings.demo_package else None,
+    )
+
+
 async def run(settings: Settings) -> None:
     bot = Bot(token=settings.token)
     try:
@@ -79,15 +91,7 @@ async def run(settings: Settings) -> None:
             files = LocalFileStorage(settings.storage_path)
             reader = OpenpyxlSheetReader()
             mode = DataMode.LIVE if settings.data_provider == "checko" else DataMode.DEMO
-            source = (
-                CheckoCompanyDataProvider(settings.checko_api_key)
-                if settings.data_provider == "checko"
-                else DemoCompanyDataProvider(
-                    settings.demo_scenario,
-                    by_inn=PACKAGE_SCENARIOS if settings.demo_package else None,
-                    names=PACKAGE_NAMES if settings.demo_package else None,
-                )
-            )
+            source = company_source(settings)
             # A forgotten DEMO_PACKAGE turns four stories into one; the log says which it is.
             logger.info(
                 "data_provider=%s demo_package=%s", settings.data_provider, settings.demo_package
