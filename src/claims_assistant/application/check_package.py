@@ -352,10 +352,17 @@ async def accept_payments_export(
         )
     # The same print again under another INN is not a new file: it would stay the first
     # company's in silence, and the user who fixed a wrong INN would believe otherwise.
+    # A file stored before migration 0005 has no INN: whose it is cannot be told, so it
+    # stays a plain repeat (review B on #81).
     uploaded = sha256(data).hexdigest()
     for file in run.files:
-        if file.kind is FileKind.PAYMENTS and file.checksum == uploaded and file.inn != inn:
-            return PackageConflict(export_filed_under(file.inn or ""))
+        if (
+            file.kind is FileKind.PAYMENTS
+            and file.checksum == uploaded
+            and file.inn is not None
+            and file.inn != inn
+        ):
+            return PackageConflict(export_filed_under(file.inn))
     result, export = await asyncio.to_thread(
         import_payments_export,
         reader,
