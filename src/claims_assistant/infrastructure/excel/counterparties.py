@@ -25,7 +25,8 @@ def _with_control_digit(prefix: str) -> str:
     return prefix + str(control)
 
 
-def _sample_rows() -> tuple[CounterpartyRow, ...]:
+def sample_rows() -> tuple[CounterpartyRow, ...]:
+    """The template's example rows; the dialog points them out if they come back (A)."""
     return (
         # Minimal mode: only the INN is known.
         CounterpartyRow(inn=_with_control_digit("770708389")),
@@ -61,7 +62,7 @@ def build_counterparties_template(rows: Sequence[CounterpartyRow] | None = None)
     # Keep the INN column textual so leading digits are never lost.
     for cell in worksheet["A"]:
         cell.number_format = "@"
-    for row in _sample_rows() if rows is None else rows:
+    for row in sample_rows() if rows is None else rows:
         worksheet.append(_cell_values(row))
     buffer = io.BytesIO()
     workbook.save(buffer)

@@ -44,7 +44,10 @@ from claims_assistant.domain.external import DataMode, Period, Section
 from claims_assistant.domain.inn import InvalidInn, validate_inn
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider
 from claims_assistant.infrastructure.excel import ledgers
-from claims_assistant.infrastructure.excel.counterparties import build_counterparties_template
+from claims_assistant.infrastructure.excel.counterparties import (
+    build_counterparties_template,
+    sample_rows,
+)
 from claims_assistant.infrastructure.excel.ledgers import (
     build_debt_history_template,
     build_interactions_template,
@@ -139,6 +142,17 @@ def parse_user_date(text: str, utc_offset_hours: int = 3) -> date | None:
     return None
 
 
+def _template_samples(rows) -> tuple[str, ...]:
+    """INNs of accepted rows that are the template's examples as sent: every field but the
+    cut-off date the same. The same INN with the user's own figures is the user's company."""
+
+    def key(row):
+        return (row.inn, row.name, row.debt, row.overdue_days, row.last_payment_date)
+
+    samples = {key(row) for row in sample_rows()}
+    return tuple(row.inn for row in rows if key(row) in samples)
+
+
 def _composition(run, rows: dict) -> tuple[str, ...]:
     """One line per package file, in upload order; row counts come from the dialog state."""
     return tuple(
@@ -219,6 +233,7 @@ def create_dispatcher(
                 result.issues,
                 result.duplicate,
                 composition,
+                samples=_template_samples(result.rows),
             ),
             reply_markup=launch_menu(),
         )

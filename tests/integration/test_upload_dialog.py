@@ -141,6 +141,59 @@ async def test_valid_file_gives_a_summary_with_launch_button(setup, bot, update_
     assert run.status == RunStatus.DRAFT and len(run.files) == 1
 
 
+SAMPLES_WARNING = "строки-примеры из шаблона"
+
+
+@pytest.mark.parametrize(
+    ("day", "inns"),
+    [
+        # On the template's own cut-off date both samples pass as the user's companies.
+        ("01.09.2026", ("7707083893", "7710140679")),
+        # On any other date the full sample fails on its date; the INN-only one still passes.
+        ("15.09.2026", ("7707083893",)),
+    ],
+)
+async def test_untouched_template_samples_are_pointed_out_before_launch(
+    setup, bot, update_factory, day, inns
+):
+    """Block 5 of the manual test (30.09.2026) and review A on #79: samples left in the file
+    are checked as the user's debtors, and their INNs belong to real companies — on the
+    live source they cost requests and land in the report with a real priority."""
+    dispatcher, _ = setup
+    await start_check(dispatcher, bot, update_factory, day=day)
+    reply = await send_document(dispatcher, bot, update_factory, build_counterparties_template())
+    assert SAMPLES_WARNING in reply.text and "Отмена" in reply.text
+    warning = next(line for line in reply.text.splitlines() if SAMPLES_WARNING in line)
+    assert all(inn in warning for inn in inns)
+    assert len([inn for inn in ("7707083893", "7710140679") if inn in warning]) == len(inns)
+    assert buttons(reply) == LAUNCH_MENU  # a warning: the user decides
+
+
+async def test_a_users_own_rows_get_no_samples_warning(setup, bot, update_factory):
+    """The same INN with the user's own data is the user's company, not a leftover sample."""
+    from decimal import Decimal
+
+    from claims_assistant.domain.counterparties import CounterpartyRow
+
+    dispatcher, _ = setup
+    await start_check(dispatcher, bot, update_factory)
+    rows = (
+        CounterpartyRow(inn="7707083893", cutoff_date=date(2026, 9, 1), debt=Decimal("10.00")),
+        CounterpartyRow(
+            inn="7710140679",
+            name="ООО «Синтетический контрагент»",
+            cutoff_date=date(2026, 9, 1),
+            debt=Decimal("150000.00"),
+            overdue_days=46,
+            last_payment_date=date(2026, 7, 15),
+        ),
+    )
+    reply = await send_document(
+        dispatcher, bot, update_factory, build_counterparties_template(rows)
+    )
+    assert texts.CHECK_SUMMARY_TITLE in reply.text and SAMPLES_WARNING not in reply.text
+
+
 async def test_launch_queues_the_run_and_returns_to_the_menu(setup, bot, update_factory):
     dispatcher, repository = setup
     await start_check(dispatcher, bot, update_factory)
