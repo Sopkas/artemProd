@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from claims_assistant.application.check_company import check_company
+from claims_assistant.application.internal_context import card_assessment
 from claims_assistant.domain.external import (
     CompanyStatus,
     Coverage,
@@ -17,13 +18,62 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
-from claims_assistant.presentation.telegram.card import format_card
+from claims_assistant.presentation.telegram.card import DETAILS_HINT, format_brief, format_card
 
 INN = "1234567894"
 
 
 async def card_for(scenario: DemoScenario) -> str:
     return format_card(await check_company(INN, DemoCompanyDataProvider(scenario)))
+
+
+async def brief_for(scenario: DemoScenario) -> str:
+    """The brief card of a company the user has no data of their own on."""
+    check = await check_company(INN, DemoCompanyDataProvider(scenario))
+    return format_brief(check, card_assessment(check, None))
+
+
+def first_line(text: str) -> str:
+    """The conclusion: the first line after the demo banner."""
+    return text.splitlines()[2]
+
+
+async def test_brief_card_says_the_point_first_and_is_much_shorter():
+    """The customer's first remark (11.10.2026): less text, the conclusion at a glance."""
+    brief = await brief_for(DemoScenario.ORDINARY)
+    assert brief.startswith("ДЕМО")
+    assert first_line(brief) == "✅ Во внешних данных значимых сигналов нет"
+    assert f"ДЕМО — вымышленная компания, ИНН {INN}" in brief
+    assert brief.endswith(DETAILS_HINT)
+    assert "Источник:" not in brief and "synthetic-demo-v1" not in brief
+    assert len(brief) * 2 < len(await card_for(DemoScenario.ORDINARY))
+
+
+async def test_brief_card_names_the_reason_of_an_alarm():
+    brief = await brief_for(DemoScenario.ALARM)
+    # Without the user's own data there is no priority of the list, and the line says so.
+    assert first_line(brief) == "❗️ Высокий — требует внимания (по внешним данным)"
+    assert "• Есть сообщения ЕФРСБ о банкротстве" in brief
+    assert "Своих данных по этой организации нет" in brief
+
+
+@pytest.mark.parametrize("scenario", [DemoScenario.INCOMPLETE, DemoScenario.ERROR])
+async def test_brief_card_never_marks_an_incomplete_check_as_clean(scenario):
+    """✅ is «checked in full, nothing found»: an unread section is ❔, with its reason."""
+    brief = await brief_for(scenario)
+    assert first_line(brief) == "❔ Внешние данные неполные"
+    assert "✅" not in brief
+    assert "Проверено не полностью:" in brief and "финансы" in brief
+    assert "Причина: Синтетический пример сбоя источника." in brief
+
+
+async def test_brief_card_does_not_rate_reliability_and_keeps_the_manual_check():
+    """«Индекс благонадёжности» is not what the rules compute; and what the bot does not
+    check at all stays said in the brief card, or ✅ would read as «blocks checked too»."""
+    for scenario in DemoScenario:
+        brief = await brief_for(scenario)
+        assert "надёжн" not in brief.lower() and "индекс" not in brief.lower()
+        assert "Блокировки счетов ФНС: бот не проверяет." in brief
 
 
 async def test_ordinary_card_shows_inn_name_status_finances_and_demo_mark():

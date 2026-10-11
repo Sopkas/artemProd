@@ -161,6 +161,17 @@ _PRIORITY_LABELS = {
     Priority.LOW: "низкий",
     Priority.UNKNOWN: "недостаточно данных",
 }
+# The mark in front of a priority (customer's request, 11.10.2026: the point at a glance).
+# ✅ is «checked in full, nothing found» and nothing more: the product ranks the work, it
+# does not rate a company's reliability.
+PRIORITY_MARKS = {
+    Priority.CRITICAL: "❗️",
+    Priority.HIGH: "❗️",
+    Priority.MEDIUM: "⚠️",
+    Priority.LOW: "✅",
+    Priority.UNKNOWN: "❔",
+}
+CARD_NO_DETAILS = "Сначала проверьте организацию: «Проверить ИНН»."
 
 
 def status_label(status: RunStatus) -> str:
@@ -378,12 +389,13 @@ def run_finished(run: AnalysisRun, summary: RunSummary | None) -> str:
         lines.append(f"Причина: {run.failure}")
     if summary is not None:
         lines.append(f"Организаций: {summary.companies}, проверено полностью: {summary.checked}")
-        counts = [
-            f"{_PRIORITY_LABELS[priority]} — {summary.priorities.get(priority, 0)}"
+        # One line a priority, its mark first: read at a glance, not as a sentence.
+        lines.extend(
+            f"{PRIORITY_MARKS[priority]} {_PRIORITY_LABELS[priority].capitalize()} — "
+            f"{summary.priorities[priority]}"
             for priority in Priority
             if summary.priorities.get(priority, 0)
-        ]
-        lines.append("Приоритеты: " + (", ".join(counts) if counts else "нет"))
+        )
         if summary.explanations_missing:
             lines.append(
                 f"Пояснений ИИ нет у {summary.explanations_missing} организаций — "

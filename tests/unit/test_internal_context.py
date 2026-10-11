@@ -193,7 +193,7 @@ async def test_card_with_long_comments_fits_one_telegram_message(tmp_path):
     assert "Взаимодействия: 7, последние 5:" in text
     assert "…" in text and long not in text  # comments are cut, newest are kept
     assert "07.08.2026" in text and "01.08.2026" not in text
-    assert text.endswith("без оценки очерёдности.")
+    assert text.endswith("вывод — в краткой карточке.")
 
 
 async def test_interactions_give_way_when_the_card_is_tight(tmp_path, monkeypatch):
@@ -208,7 +208,7 @@ async def test_interactions_give_way_when_the_card_is_tight(tmp_path, monkeypatc
     monkeypatch.setattr(card_module, "_CARD_BUDGET", len(full) - 40)
     tight = format_card(check, context)
     assert "Взаимодействия: 2, последние 1:" in tight or "последние 0:" in tight
-    assert "Давность платежа" in tight and tight.endswith("без оценки очерёдности.")
+    assert "Давность платежа" in tight and tight.endswith("вывод — в краткой карточке.")
     assert len(tight) < len(full)
 
 

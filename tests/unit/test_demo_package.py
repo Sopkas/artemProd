@@ -299,6 +299,48 @@ async def test_a_forgotten_demo_package_shows_in_the_report(tmp_path, package):
     assert PRIORITY_LABELS[Priority.MEDIUM] in rows[BY_KEY["alarm"].row.inn]
 
 
+async def test_the_card_gives_each_company_the_priority_of_the_report(tmp_path, package):
+    """The brief card's first line is the same rules on the same data as the report: a card
+    that said «средний» of a company the report calls «высокий» would be worse than none."""
+    from claims_assistant.application.check_company import check_company
+    from claims_assistant.application.internal_context import card_assessment, internal_context
+    from claims_assistant.application.worker import RunWorker
+    from claims_assistant.presentation.telegram.card import format_brief
+    from claims_assistant.presentation.telegram.texts import PRIORITY_MARKS
+
+    repository = InMemoryAnalysisRepository()
+    files = LocalFileStorage(tmp_path / "uploads")
+    reader = OpenpyxlSheetReader()
+    deps = dict(repository=repository, files=files, reader=reader)
+    draft = await accept_counterparties(
+        OWNER, ANALYSIS_DATE, DataMode.DEMO, package[COUNTERPARTIES_FILE], **deps
+    )
+    for kind, name, coverage in (
+        (FileKind.PAYMENTS, PAYMENTS_FILE, PERIOD),
+        (FileKind.DEBT_HISTORY, HISTORY_FILE, None),
+        (FileKind.INTERACTIONS, INTERACTIONS_FILE, None),
+    ):
+        await accept_ledger(OWNER, draft.run.id, kind, package[name], coverage=coverage, **deps)
+    await repository.transition(OWNER, draft.run.id, RunStatus.QUEUED)
+    provider = guard(DemoCompanyDataProvider(by_inn=PACKAGE_SCENARIOS, names=PACKAGE_NAMES))
+    assert await RunWorker(repository, pipeline(files, repository, provider)).process_one()
+    run = await repository.get_run(OWNER, draft.run.id)
+    data = files.read((await repository.get_report(OWNER, run.id)).stored_path)
+    report = {row[0]: row for row in sheet_rows(data, "Приоритеты")}
+    for company in COMPANIES:
+        check = await check_company(company.row.inn, provider)
+        context = await internal_context(OWNER, company.row.inn, repository, files, reader)
+        assessment = card_assessment(check, context)
+        assert assessment.priority is company.expected_priority, company.key
+        assert PRIORITY_LABELS[assessment.priority] in report[company.row.inn], company.key
+        brief = format_brief(check, assessment, context)
+        headline = brief.splitlines()[2]
+        assert headline.startswith(PRIORITY_MARKS[company.expected_priority]), company.key
+        assert PRIORITY_LABELS[company.expected_priority] in headline, company.key
+        assert f"{company.row.name}, ИНН {company.row.inn}" in brief
+        assert "Внутренние данные — проверка от 01.09.2026" in brief
+
+
 def test_another_analysis_date_rejects_the_rows_with_a_cutoff(package):
     """«Сегодня» on the day of the defence: three rows carry the package's cut-off date and
     are refused, one company is left and there is nothing to show."""

@@ -17,9 +17,11 @@ from claims_assistant.domain.external import ExternalSnapshot
 from claims_assistant.domain.indicators import InternalIndicators, internal_indicators
 from claims_assistant.domain.interactions import InteractionRow, chronology
 from claims_assistant.domain.report import file_labels
+from claims_assistant.domain.scoring import Assessment, assess
 from claims_assistant.domain.steps import RUN_SCOPE, StepStatus
 
 from .analysis_repository import AnalysisRepository, RepositoryError
+from .check_company import CompanyCheck
 from .check_package import FileStorage, StorageError, package_inns
 from .imports import SheetReader
 from .package_checks import PackageIntegrityError, payment_periods, review_package
@@ -67,6 +69,25 @@ class InternalContext:
     files: tuple[str, ...]  # labels of the package files the data came from
     # S7-01: contracts of the overdue report tied to this company by name, worst first.
     contracts: tuple[ContractDebt, ...] = ()
+
+
+def card_assessment(check: CompanyCheck, context: InternalContext | None) -> Assessment:
+    """What the rules make of the card's company, for the card's first line.
+
+    The same call as the pipeline's: the external sections just fetched and, when the owner
+    has a finished check with this company, its row and indicators on that check's analysis
+    date. Without the owner's data only the external rules can fire, and the base set is
+    never complete — the card says so instead of a priority of the list.
+    """
+    if context is None:
+        return assess(check.inn, check.snapshots)
+    return assess(
+        check.inn,
+        check.snapshots,
+        context.row,
+        analysis_date=context.run.analysis_date,
+        indicators=context.indicators,
+    )
 
 
 def _own_files(run: AnalysisRun, inn: str) -> tuple[str, ...]:

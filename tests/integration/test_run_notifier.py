@@ -65,8 +65,10 @@ async def test_summary_then_file_and_delivery_is_recorded(bot, tmp_path):
     assert message.text == texts.run_finished(run, SUMMARY)
     assert "завершена частично" in message.text
     assert "Организаций: 3, проверено полностью: 2" in message.text
-    assert "критичный — 1" in message.text and "низкий — 1" in message.text
-    assert "недостаточно данных — 1" in message.text
+    # One line a priority, its mark first.
+    assert "❗️ Критичный — 1" in message.text.splitlines()
+    assert "✅ Низкий — 1" in message.text.splitlines()
+    assert "❔ Недостаточно данных — 1" in message.text.splitlines()
     assert "демонстрационные" in message.text
     assert isinstance(document, SendDocument) and document.chat_id == OWNER
     assert document.caption == texts.report_caption(run)
