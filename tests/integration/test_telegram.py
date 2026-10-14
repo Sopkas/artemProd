@@ -79,3 +79,32 @@ async def test_handler_error_is_contained_without_logging_private_data(bot, upda
     assert "secret token" not in caplog.text
     await dispatcher.feed_update(bot, update_factory("/help"))
     assert bot.session.calls[-1].text == texts.HELP
+
+
+@pytest.mark.parametrize(
+    ("text", "fields", "kind"),
+    [
+        ("мой ИНН 7707083893, долг 100 000", {}, "text"),
+        ("/start", {}, "command"),
+        (
+            None,
+            {"document": {"file_id": "x", "file_unique_id": "x", "file_name": "dolgi.xlsx"}},
+            "file",
+        ),
+    ],
+)
+async def test_a_refused_user_is_logged_by_id_without_what_they_sent(
+    bot, update_factory, caplog, text, fields, kind
+):
+    """Who tried to get in is in the journal; what they wrote, their name and file are not."""
+    update = update_factory(text, user_id=99, **fields)
+    await create_dispatcher(frozenset({42})).feed_update(bot, update)
+    assert bot.session.calls[-1].text == texts.access_denied(99)
+    assert f"access_denied user_id=99 kind={kind}" in caplog.text
+    for private in ("7707083893", "долг", "dolgi", "Test"):
+        assert private not in caplog.text
+
+
+async def test_an_allowed_user_leaves_no_access_record(bot, update_factory, caplog):
+    await create_dispatcher(frozenset({42})).feed_update(bot, update_factory("/start"))
+    assert "access_denied" not in caplog.text
