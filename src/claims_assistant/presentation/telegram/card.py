@@ -28,7 +28,7 @@ from claims_assistant.domain.indicators import (
     PaymentStatus,
 )
 from claims_assistant.domain.manual_checks import MANUAL_CHECKS
-from claims_assistant.domain.scoring import Assessment, Priority
+from claims_assistant.domain.scoring import Assessment, Priority, combine
 
 from .texts import PRIORITY_MARKS
 
@@ -85,6 +85,12 @@ _PART_TITLES = {
 }
 _MAX_REASONS = 3
 DETAILS_HINT = "Все факты с источниками и датами — «Подробнее»."
+# The register answers by INN whatever the company's role in the case (#52): it lists the
+# creditor's messages too. Without the owner's data they alone do not make the mark.
+_ROLE_UNCONFIRMED = "unresolved_bankruptcy_event"
+ROLE_UNCONFIRMED_LINE = (
+    f"{PRIORITY_MARKS[Priority.MEDIUM]} Есть сообщения ЕФРСБ — роль организации не подтверждена"
+)
 
 
 def _headline(assessment: Assessment, internal: InternalContext | None) -> str:
@@ -94,6 +100,12 @@ def _headline(assessment: Assessment, internal: InternalContext | None) -> str:
     # Without the owner's data there is no priority of the list: only what the external
     # sections say, and whether they were read in full.
     if assessment.signals:
+        # The mark comes from the other external rules; the register's messages stay
+        # among the reasons below.
+        others = [signal for signal in assessment.signals if signal.code != _ROLE_UNCONFIRMED]
+        if not others:
+            return ROLE_UNCONFIRMED_LINE
+        priority = combine(others, base_complete=False)
         return f"{PRIORITY_MARKS[priority]} {_HEADLINES[priority]} (по внешним данным)"
     external = [part for part in assessment.coverage if part != "internal"]
     if all(assessment.coverage[part] is Coverage.COMPLETE for part in external):
