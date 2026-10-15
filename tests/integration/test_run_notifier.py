@@ -113,3 +113,16 @@ async def test_send_failure_marks_delivery_failed_and_keeps_the_report(bot, tmp_
     artifact = await repository.get_report(OWNER, run.id)
     assert artifact.delivery is DeliveryStatus.FAILED and artifact.delivery_error
     assert files.read(artifact.stored_path) == b"xlsx-bytes"
+
+
+async def test_a_summary_with_no_priority_says_so(tmp_path):
+    """Every row had errors: the summary says «Приоритетов нет» instead of leaving a gap."""
+    from dataclasses import replace
+
+    run = await finished(
+        InMemoryAnalysisRepository(),
+        LocalFileStorage(tmp_path / "uploads"),
+        outcome=RunOutcome(RunStatus.PARTIAL, "Организаций с неполными: 1."),
+    )
+    text = texts.run_finished(run, replace(SUMMARY, priorities={}))
+    assert "Приоритетов нет." in text.splitlines()

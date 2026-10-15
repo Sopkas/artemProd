@@ -93,6 +93,11 @@ ROLE_UNCONFIRMED_LINE = (
 )
 
 
+# Neither good nor bad: the external sections were read in full and said nothing alarming,
+# but there is no data of the owner's, so no priority of the list.
+EXTERNAL_CLEAN_MARK = "ℹ️"
+
+
 def _headline(assessment: Assessment, internal: InternalContext | None) -> str:
     priority = assessment.priority
     if internal is not None:
@@ -109,7 +114,9 @@ def _headline(assessment: Assessment, internal: InternalContext | None) -> str:
         return f"{PRIORITY_MARKS[priority]} {_HEADLINES[priority]} (по внешним данным)"
     external = [part for part in assessment.coverage if part != "internal"]
     if all(assessment.coverage[part] is Coverage.COMPLETE for part in external):
-        return f"{PRIORITY_MARKS[Priority.LOW]} Во внешних данных значимых сигналов нет"
+        # Not ✅: without the owner's data the check is not complete, and a green tick read
+        # first would pass for «reliable» (review A on #86). ✅ belongs to Priority.LOW only.
+        return f"{EXTERNAL_CLEAN_MARK} Во внешних данных значимых сигналов нет"
     return f"{PRIORITY_MARKS[Priority.UNKNOWN]} Внешние данные неполные"
 
 

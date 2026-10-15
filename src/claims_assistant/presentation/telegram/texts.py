@@ -390,12 +390,14 @@ def run_finished(run: AnalysisRun, summary: RunSummary | None) -> str:
     if summary is not None:
         lines.append(f"Организаций: {summary.companies}, проверено полностью: {summary.checked}")
         # One line a priority, its mark first: read at a glance, not as a sentence.
-        lines.extend(
+        counts = [
             f"{PRIORITY_MARKS[priority]} {_PRIORITY_LABELS[priority].capitalize()} — "
             f"{summary.priorities[priority]}"
             for priority in Priority
             if summary.priorities.get(priority, 0)
-        )
+        ]
+        # No row got a priority (every one had errors): said, not left out (review A on #86).
+        lines.extend(counts or ["Приоритетов нет."])
         if summary.explanations_missing:
             lines.append(
                 f"Пояснений ИИ нет у {summary.explanations_missing} организаций — "

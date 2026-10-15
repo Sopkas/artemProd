@@ -43,7 +43,9 @@ async def test_brief_card_says_the_point_first_and_is_much_shorter():
     """The customer's first remark (11.10.2026): less text, the conclusion at a glance."""
     brief = await brief_for(DemoScenario.ORDINARY)
     assert brief.startswith("ДЕМО")
-    assert first_line(brief) == "✅ Во внешних данных значимых сигналов нет"
+    # ℹ️, not ✅: with no data of the user's own the check is not complete (review A on #86).
+    assert first_line(brief) == "ℹ️ Во внешних данных значимых сигналов нет"
+    assert "✅" not in brief
     assert f"ДЕМО — вымышленная компания, ИНН {INN}" in brief
     assert brief.endswith(DETAILS_HINT)
     assert "Источник:" not in brief and "synthetic-demo-v1" not in brief

@@ -49,7 +49,7 @@ async def test_valid_inn_shows_the_demo_card_and_dialog_ends(bot, update_factory
     # The brief card: the conclusion with its mark right under the demo banner.
     assert reply.text.startswith(DEMO_BANNER)
     assert f"ИНН {VALID_INN}" in reply.text
-    assert reply.text.splitlines()[2].startswith("✅ ")
+    assert reply.text.splitlines()[2].startswith("ℹ️ ")  # no data of the user's: not ✅
     assert "Источник:" not in reply.text and len(reply.text) < 500
     assert buttons(reply) == ["Подробнее", *MAIN_MENU]
     # «Подробнее» sends the full card for the same INN and gives the main menu back.
