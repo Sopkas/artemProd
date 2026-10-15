@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import GetFile, SendDocument, SendMessage
+from aiogram.methods import DeleteMessage, GetFile, SendChatAction, SendDocument, SendMessage
 from aiogram.types import File, Message, Update
 
 # The repository root, so `evals/` (the model bench set, S5-07) imports like a package.
@@ -75,6 +75,11 @@ class RecordingSession(BaseSession):
     async def close(self) -> None:
         self.closed = True
 
+    @property
+    def last_message(self) -> SendMessage:
+        """The bot's last text message: after a card the note's deletion comes (S8-03)."""
+        return next(call for call in reversed(self.calls) if isinstance(call, SendMessage))
+
     async def make_request(self, bot: Bot, method: Any, timeout: int | None = None) -> Any:
         self.calls.append(method)
         if self.fail_once is not None:
@@ -94,6 +99,9 @@ class RecordingSession(BaseSession):
                 chat={"id": method.chat_id, "type": "private"},
                 document={"file_id": "sent", "file_unique_id": "sent"},
             )
+        # S8-03: «печатает» and the deleted «Считаю миллионы…» note.
+        if isinstance(method, SendChatAction | DeleteMessage):
+            return True
         if isinstance(method, GetFile) and method.file_id in self.files:
             return File(file_id=method.file_id, file_unique_id="u", file_path=method.file_id)
         raise AssertionError(f"Unexpected Telegram request: {type(method).__name__}")
