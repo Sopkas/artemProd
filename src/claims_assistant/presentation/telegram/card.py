@@ -36,7 +36,9 @@ DEMO_BANNER = "ДЕМО: синтетические данные, не свед�
 
 _SECTION_TITLES = {
     Section.COMPANY: "Организация",
-    Section.BANKRUPTCY: "Сообщения о банкротстве",
+    # S8-01: the register by its name. «Сообщения о банкротстве — не найдено» read as «no
+    # bankruptcy» to the customer, while a case was in court; EFRSB is one source of several.
+    Section.BANKRUPTCY: "Сообщения ЕФРСБ",
     Section.FINANCES: "Финансы",
     Section.COURTS: "Арбитражные дела (ответчик, незавершённые)",
     Section.FEDRESURS: "Намерения кредиторов о банкротстве (Федресурс)",
@@ -83,10 +85,13 @@ _HEADLINES = {
     Priority.LOW: "Низкий — проверено полностью, значимых сигналов нет",
     Priority.UNKNOWN: "Недостаточно данных — проверка неполная",
 }
+# Every section has one (a test holds it): a missing title showed the code, «courts».
 _PART_TITLES = {
     Section.COMPANY.value: "организация",
-    Section.BANKRUPTCY.value: "сообщения о банкротстве",
+    Section.BANKRUPTCY.value: "сообщения ЕФРСБ",
     Section.FINANCES.value: "финансы",
+    Section.COURTS.value: "арбитражные дела",
+    Section.FEDRESURS.value: "Федресурс",
     "internal": "внутренние данные",
 }
 _MAX_REASONS = 3
@@ -358,10 +363,13 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
     title = _SECTION_TITLES[snapshot.section]
     lines = [f"{title} — {_COVERAGE_LABELS[snapshot.coverage]}"]
     if snapshot.status != FetchStatus.OK:
-        if snapshot.error is not None:
-            lines.append(f"  Причина: {snapshot.error.message}")
+        cause = snapshot.error.message if snapshot.error is not None else None
+        if cause is not None:
+            lines.append(f"  Причина: {cause}")
+        # S8-01: the live source puts the same text in both; said once, as the reason.
         for reason in snapshot.missing:
-            lines.append(f"  Ограничение: {reason}")
+            if reason != cause:
+                lines.append(f"  Ограничение: {reason}")
         lines.append(f"  Источник: {snapshot.source}, получено {_date(snapshot.fetched_at)}")
         return lines
     for fact in snapshot.facts:
