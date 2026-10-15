@@ -36,7 +36,7 @@ sudo bash /opt/claims-assistant/app/deploy/install.sh main   # второй за
 
 ## Работа
 
-- Состояние: `systemctl status claims-assistant`; журнал: `journalctl -u claims-assistant -f` (ищите `bot_started`, `run_finished`, `retention_sweep`; токены и ключи из журнала вырезаются).
+- Состояние: `systemctl status claims-assistant`; журнал: `journalctl -u claims-assistant -f` (ищите `bot_started`, `run_finished`, `retention_sweep`; `access_denied user_id=…` — попытка зайти с Telegram ID не из `ALLOWED_TELEGRAM_IDS`, без текста сообщения; токены и ключи из журнала вырезаются).
 - Остановка/запуск: `systemctl stop|start|restart claims-assistant`.
 - **Автоперезапуск**: `Restart=always`, пауза 10 с, не больше 5 стартов за 5 минут. **Если лимит исчерпан, служба остаётся в состоянии `failed` и сама не поднимется** — это заметно только снаружи: `systemctl is-failed claims-assistant` (cron-пинг раз в 5 минут с уведомлением, пока нет мониторинга) или `OnFailure=` с юнитом-уведомлением, когда появится куда слать; поднять — `systemctl reset-failed claims-assistant && systemctl start claims-assistant` после разбора журнала. Проверки, прерванные перезапуском, возвращаются в очередь при старте (S3-03), незавершённые после трёх прерываний — останавливаются.
 - **Копии**: `claims-assistant-backup.timer` — ежедневно в 03:30 по времени сервера (`systemctl list-timers`), снимки в `/var/lib/claims-assistant/backups`, хранится `BACKUP_KEEP`. Копии — те же данные должников: вынести на другой диск или в хранилище с тем же сроком хранения. Проверка/восстановление — [operations.md](operations.md).
