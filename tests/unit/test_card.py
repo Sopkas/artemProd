@@ -17,6 +17,7 @@ from claims_assistant.domain.external import (
     Period,
     Section,
 )
+from claims_assistant.domain.scoring import Assessment, Priority, Signal, combine
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 from claims_assistant.presentation.telegram.card import DETAILS_HINT, format_brief, format_card
 
@@ -51,10 +52,46 @@ async def test_brief_card_says_the_point_first_and_is_much_shorter():
 
 async def test_brief_card_names_the_reason_of_an_alarm():
     brief = await brief_for(DemoScenario.ALARM)
-    # Without the user's own data there is no priority of the list, and the line says so.
-    assert first_line(brief) == "❗️ Высокий — требует внимания (по внешним данным)"
+    # Without the user's own data the only alarm is the register's: it answers by INN,
+    # whatever the company's role, so the card does not sound «высокий» on it (#86 review).
+    assert first_line(brief) == "⚠️ Есть сообщения ЕФРСБ — роль организации не подтверждена"
+    assert "❗️" not in brief
     assert "• Есть сообщения ЕФРСБ о банкротстве" in brief
     assert "Своих данных по этой организации нет" in brief
+
+
+EFRSB = Signal("unresolved_bankruptcy_event", Priority.HIGH, "Есть сообщения ЕФРСБ.")
+LIQUIDATION = Signal("liquidation_status", Priority.CRITICAL, "Статус — ликвидация.")
+REVENUE = Signal("revenue_drop_30", Priority.MEDIUM, "Выручка упала на 40 %.")
+
+
+async def external_only(*signals: Signal) -> str:
+    """The brief card of a company without the owner's data, with these rules fired."""
+    check = await check_company(INN, DemoCompanyDataProvider(DemoScenario.ORDINARY))
+    found = card_assessment(check, None)
+    assessment = Assessment(
+        inn=INN,
+        priority=combine(signals, base_complete=False),
+        signals=signals,
+        missing_data=found.missing_data,
+        coverage=found.coverage,
+        base_complete=False,
+    )
+    return first_line(format_brief(check, assessment))
+
+
+@pytest.mark.parametrize(
+    ("signals", "line"),
+    [
+        # Another external rule decides the mark; the register's messages stay a reason.
+        ((EFRSB, LIQUIDATION), "❗️ Критичный — требует внимания (по внешним данным)"),
+        ((EFRSB, REVENUE), "⚠️ Средний — есть основания присмотреться (по внешним данным)"),
+        ((LIQUIDATION,), "❗️ Критичный — требует внимания (по внешним данным)"),
+        ((EFRSB,), "⚠️ Есть сообщения ЕФРСБ — роль организации не подтверждена"),
+    ],
+)
+async def test_without_own_data_the_register_alone_does_not_make_the_mark(signals, line):
+    assert await external_only(*signals) == line
 
 
 @pytest.mark.parametrize("scenario", [DemoScenario.INCOMPLETE, DemoScenario.ERROR])

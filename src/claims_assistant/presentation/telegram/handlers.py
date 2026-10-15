@@ -512,30 +512,24 @@ def create_dispatcher(
             return
         await state.clear()
         internal = await own_data(message.from_user.id, check)
-        # The brief card first: the conclusion in its first line. «Подробнее» sends the
-        # full one for the same INN, which is all the dialog remembers of it.
-        await state.update_data(card_inn=check.inn)
+        # The brief card first: the conclusion in its first line. «Подробнее» sends the full
+        # card of this same answer, kept with the dialog: no new request to the source (a
+        # failed section is not cached) and no other picture than the brief card's.
+        await state.update_data(card_text=format_card(check, internal))
         await message.answer(
             format_brief(check, card_assessment(check, internal), internal),
             reply_markup=card_menu(),
         )
 
-    @router.message(F.text == DETAILS)
+    # Outside a dialog only: typed at a step of another dialog, the word is that step's.
+    @router.message(StateFilter(None), F.text == DETAILS)
     async def card_details(message: Message, state: FSMContext) -> None:
-        inn = (await state.get_data()).get("card_inn")
+        card = (await state.get_data()).get("card_text")
         await state.clear()
-        if not inn:
+        if not card:
             await message.answer(texts.CARD_NO_DETAILS, reply_markup=main_menu())
             return
-        try:
-            # Within the cache's lifetime this asks the source nothing new.
-            check = await check_company(inn, provider)
-        except Exception as exc:
-            logger.error("check_failed error_type=%s", type(exc).__name__)
-            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
-            return
-        internal = await own_data(message.from_user.id, check)
-        await message.answer(format_card(check, internal), reply_markup=main_menu())
+        await message.answer(card, reply_markup=main_menu())
 
     # --- new check: date → file → launch ---
 
