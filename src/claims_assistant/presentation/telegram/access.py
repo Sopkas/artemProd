@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -6,6 +7,17 @@ from aiogram.enums import ChatType
 from aiogram.types import Message, TelegramObject
 
 from .texts import access_denied
+
+logger = logging.getLogger(__name__)
+
+
+def _kind(message: Message) -> str:
+    """What was sent, in one word: the content itself never goes to the journal."""
+    if message.text:
+        return "command" if message.text.startswith("/") else "text"
+    if message.document:
+        return "file"
+    return "other"
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -23,6 +35,8 @@ class AccessMiddleware(BaseMiddleware):
         if event.from_user is None:
             return None
         if event.from_user.id not in self.allowed_ids:
+            # Who tried to get in, for the operator; the ID is what the reply shows them too.
+            logger.warning("access_denied user_id=%s kind=%s", event.from_user.id, _kind(event))
             await event.answer(access_denied(event.from_user.id))
             return None
         return await handler(event, data)
