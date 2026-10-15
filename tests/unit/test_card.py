@@ -151,8 +151,8 @@ async def test_incomplete_card_separates_partial_and_unavailable():
 
 async def test_error_card_marks_every_section_unavailable_and_promises_nothing():
     text = await card_for(DemoScenario.ERROR)
-    assert text.count("— раздел недоступен") == 3
-    assert text.count("Источник:") == 3
+    assert text.count("— раздел недоступен") == len(Section)
+    assert text.count("Источник:") == len(Section)
     assert "приоритет" not in text.lower()
     assert "риск" not in text.lower()
 
@@ -265,7 +265,7 @@ async def test_partial_empty_bankruptcy_is_not_reported_as_complete_absence():
     text = format_card(check)
     assert "проверка неполная" in text
     assert "За проверенный период сообщений не найдено" not in text
-    assert text.count("Источник:") == 3
+    assert text.count("Источник:") == len(Section)
 
 
 async def test_card_says_what_is_not_checked_and_where_to_look():

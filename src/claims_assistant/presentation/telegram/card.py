@@ -38,6 +38,8 @@ _SECTION_TITLES = {
     Section.COMPANY: "Организация",
     Section.BANKRUPTCY: "Сообщения о банкротстве",
     Section.FINANCES: "Финансы",
+    Section.COURTS: "Арбитражные дела (ответчик, незавершённые)",
+    Section.FEDRESURS: "Намерения кредиторов о банкротстве (Федресурс)",
 }
 _STATUS_LABELS = {
     CompanyStatus.ACTIVE: "действует",
@@ -51,6 +53,10 @@ _FACT_LABELS = {
     FactKind.NET_PROFIT: "Чистая прибыль",
     FactKind.BANKRUPTCY_EVENT: "Событие",
     FactKind.BANKRUPTCY_CLOSED: "Дело прекращено",
+    FactKind.COURT_CASE: "Дело",
+    FactKind.COURT_CASES_ACTIVE: "Незавершённых дел",
+    FactKind.COURT_CLAIMS_TOTAL: "Сумма исков",
+    FactKind.BANKRUPTCY_INTENT: "Сообщение",
 }
 _COVERAGE_LABELS = {
     Coverage.COMPLETE: "проверено полностью",
@@ -128,6 +134,22 @@ def _company_name(check: CompanyCheck, internal: InternalContext | None) -> str 
     return internal.row.name if internal is not None else None
 
 
+def _brief_courts(check: CompanyCheck) -> str | None:
+    """S8-01: the claim load in one line — the customer asked to see it at a glance. The
+    rules do not raise a priority on it yet (no agreed threshold), so it is a figure here."""
+    snapshot = next((s for s in check.snapshots if s.section is Section.COURTS), None)
+    if snapshot is None or snapshot.status is not FetchStatus.OK:
+        return None
+    count = next((f.value for f in snapshot.facts if f.kind is FactKind.COURT_CASES_ACTIVE), None)
+    if not isinstance(count, int):
+        return None
+    if count == 0:
+        return "Арбитраж: незавершённых дел, где организация ответчик, нет."
+    claims = next((f.value for f in snapshot.facts if f.kind is FactKind.COURT_CLAIMS_TOTAL), None)
+    total = f", иски на {_money(claims, 'RUB')}" if isinstance(claims, Decimal) else ""
+    return f"Арбитраж: незавершённых дел, где организация ответчик, — {count}{total}."
+
+
 def _brief_internal(context: InternalContext) -> list[str]:
     row = context.row
     figures = []
@@ -169,6 +191,9 @@ def format_brief(
         lines += [f"• {signal.reason}" for signal in assessment.signals[:_MAX_REASONS]]
         if len(assessment.signals) > _MAX_REASONS:
             lines.append(f"• ещё причин: {len(assessment.signals) - _MAX_REASONS}")
+    courts = _brief_courts(check)
+    if courts:
+        lines += ["", courts]
     if internal is not None:
         lines.append("")
         lines += _brief_internal(internal)
@@ -341,6 +366,8 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
         return lines
     for fact in snapshot.facts:
         lines.append(f"  {_fact(fact)}")
+    if not snapshot.facts and snapshot.section == Section.FEDRESURS:
+        lines.append("  Кредиторы о намерении подать на банкротство не сообщали.")
     if not snapshot.facts and snapshot.section == Section.BANKRUPTCY:
         if snapshot.coverage == Coverage.COMPLETE:
             lines.append("  За проверенный период сообщений не найдено.")
@@ -361,6 +388,8 @@ def _fact(fact: Fact) -> str:
     when = _period(fact.period) if fact.period is not None else _date(fact.observed_on)
     if fact.kind == FactKind.COMPANY_STATUS:
         return f"{label}: {_STATUS_LABELS[fact.value]} (на {when})"
+    if fact.kind is FactKind.COURT_CLAIMS_TOTAL and isinstance(fact.value, Decimal):
+        return f"{label} на {when}: {_money(fact.value, fact.unit)}"
     if isinstance(fact.value, Decimal):
         return f"{label} за {when}: {_money(fact.value, fact.unit)}"
     return f"{label}: {fact.value} ({when})"

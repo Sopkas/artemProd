@@ -10,6 +10,11 @@ class Section(StrEnum):
     COMPANY = "company"
     BANKRUPTCY = "bankruptcy"
     FINANCES = "finances"
+    # S8-01: unfinished arbitration cases where the company is the defendant, and the
+    # creditors' notices on Fedresurs of their intention to file for its bankruptcy. The
+    # bankruptcy register (EFRSB) is silent until a court opens a case; these two are not.
+    COURTS = "courts"
+    FEDRESURS = "fedresurs"
 
 
 class FactKind(StrEnum):
@@ -20,6 +25,14 @@ class FactKind(StrEnum):
     BANKRUPTCY_EVENT = "bankruptcy_event"
     # S3-06: a message about a case that is over; kept as evidence, raises nothing.
     BANKRUPTCY_CLOSED = "bankruptcy_closed"
+    # S8-01: one unfinished arbitration case where the company is the defendant (text).
+    COURT_CASE = "court_case"
+    # S8-01: how many such cases the source counts, and the sum of their claims.
+    COURT_CASES_ACTIVE = "court_cases_active"
+    COURT_CLAIMS_TOTAL = "court_claims_total"
+    # S8-01: a creditor's notice on Fedresurs of its intention to file for the company's
+    # bankruptcy («намерение кредитора обратиться в суд»); published before the filing.
+    BANKRUPTCY_INTENT = "bankruptcy_intent"
 
 
 class CompanyStatus(StrEnum):

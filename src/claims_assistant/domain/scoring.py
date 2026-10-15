@@ -12,7 +12,7 @@ the age of the last payment. Signals that need the payments file or the debt his
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -66,7 +66,12 @@ _SECTION_LABELS = {
     Section.COMPANY: "Сведения об организации",
     Section.BANKRUPTCY: "Сообщения ЕФРСБ",
     Section.FINANCES: "Финансовая отчётность",
+    Section.COURTS: "Арбитражные дела",
+    Section.FEDRESURS: "Сообщения Федресурса",
 }
+# S8-01: a creditor's notice of intention is followed by the filing within weeks; a notice
+# older than a year is history, shown among the grounds but raising nothing.
+INTENT_WINDOW_DAYS = 365
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +185,30 @@ def _bankruptcy_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
             "Есть сообщения ЕФРСБ о банкротстве; смысл и актуальность требуют проверки.",
             tuple(f.id for f in events),
             value=str(len(events)),
+            observed_on=latest,
+        )
+    ]
+
+
+def _intent_signals(snapshot: ExternalSnapshot | None, today: date | None) -> list[Signal]:
+    """S8-01: a creditor announced on Fedresurs that it is going to court to bankrupt the
+    company. The register (EFRSB) stays silent until a court opens the case, so this is the
+    earliest public sign; the customer's debtor of 15.10.2026 had it and nothing in EFRSB."""
+    notices = _facts(snapshot, FactKind.BANKRUPTCY_INTENT)
+    if today is not None:
+        since = today - timedelta(days=INTENT_WINDOW_DAYS)
+        notices = [f for f in notices if f.observed_on is not None and since <= f.observed_on]
+    if not notices:
+        return []
+    latest = max((f.observed_on for f in notices if f.observed_on), default=None)
+    when = f" (последнее — {latest:%d.%m.%Y})" if latest else ""
+    return [
+        Signal(
+            "bankruptcy_intent",
+            Priority.HIGH,
+            f"Кредитор объявил на Федресурсе о намерении подать заявление о банкротстве{when}.",
+            tuple(f.id for f in notices),
+            value=str(len(notices)),
             observed_on=latest,
         )
     ]
@@ -411,6 +440,12 @@ def assess(
         *_company_signals(by_section.get(Section.COMPANY)),
         *_bankruptcy_signals(by_section.get(Section.BANKRUPTCY)),
         *_finance_signals(by_section.get(Section.FINANCES)),
+        *_intent_signals(
+            by_section.get(Section.FEDRESURS),
+            analysis_date
+            or (row.cutoff_date if row is not None else None)
+            or _fetched_on(by_section.get(Section.FEDRESURS)),
+        ),
         *(
             row_signals(row, analysis_date or row.cutoff_date, payment_age=indicators is None)
             if row is not None
@@ -431,6 +466,11 @@ def assess(
         coverage=coverage,
         base_complete=base_complete,
     )
+
+
+def _fetched_on(snapshot: ExternalSnapshot | None) -> date | None:
+    """The card has no analysis date: the day the source answered stands for «today»."""
+    return snapshot.fetched_at.date() if snapshot is not None else None
 
 
 def report_order_key(assessment: Assessment, row: CounterpartyRow | None) -> tuple:

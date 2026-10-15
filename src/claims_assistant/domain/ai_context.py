@@ -61,6 +61,8 @@ _SECTION_TITLES = {
     Section.COMPANY: "Сведения об организации",
     Section.BANKRUPTCY: "Сообщения ЕФРСБ",
     Section.FINANCES: "Финансовая отчётность",
+    Section.COURTS: "Арбитражные дела",
+    Section.FEDRESURS: "Сообщения Федресурса",
 }
 _FACT_TITLES = {
     FactKind.COMPANY_NAME: "Наименование",
@@ -69,6 +71,10 @@ _FACT_TITLES = {
     FactKind.NET_PROFIT: "Чистая прибыль",
     FactKind.BANKRUPTCY_EVENT: "Сообщение ЕФРСБ",
     FactKind.BANKRUPTCY_CLOSED: "ЕФРСБ: дело прекращено",
+    FactKind.COURT_CASE: "Арбитражное дело (организация — ответчик)",
+    FactKind.COURT_CASES_ACTIVE: "Незавершённых арбитражных дел, где организация — ответчик",
+    FactKind.COURT_CLAIMS_TOTAL: "Сумма исков к организации по этим делам",
+    FactKind.BANKRUPTCY_INTENT: "Намерение кредитора подать заявление о банкротстве",
 }
 _STATUS_TITLES = {
     CompanyStatus.ACTIVE: "действует",

@@ -197,7 +197,7 @@ async def test_success_cannot_be_unavailable_and_failure_cannot_claim_facts():
 
 
 async def test_fact_kinds_and_company_status_are_typed_and_point_in_time():
-    company, _, finance = await DemoCompanyDataProvider().fetch(CompanyDataRequest(INN))
+    company, _, finance, *_ = await DemoCompanyDataProvider().fetch(CompanyDataRequest(INN))
     assert all(isinstance(f.kind, FactKind) for f in (*company.facts, *finance.facts))
     status = next(f for f in company.facts if f.kind == FactKind.COMPANY_STATUS)
     assert status.value is CompanyStatus.ACTIVE
