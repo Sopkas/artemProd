@@ -241,7 +241,8 @@ def _finance_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
             Signal(
                 "revenue_drop_30",
                 Priority.MEDIUM,
-                f"Выручка снизилась на {abs(change.percent):.1f}% "
+                # A person reads it: «35,5%»; ``value`` stays machine-read.
+                f"Выручка снизилась на {f'{abs(change.percent):.1f}'.replace('.', ',')}% "
                 f"за {change.year - 1}–{change.year} годы.",
                 change.fact_ids,
                 value=f"{change.percent:.1f}%",
