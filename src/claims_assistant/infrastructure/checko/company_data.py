@@ -22,8 +22,9 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.domain.inn import InnKind, inn_kind
-from claims_assistant.infrastructure.checko import bankruptcy, finances
+from claims_assistant.infrastructure.checko import bankruptcy, courts, fedresurs, finances
 from claims_assistant.infrastructure.checko.errors import (
+    ApiRejected,
     InvalidResponse,
     NotFound,
     is_daily_limit,
@@ -199,6 +200,8 @@ class CheckoCompanyDataProvider:
         *,
         bankruptcy_transport: bankruptcy.BankruptcyTransport | None = None,
         finances_transport: finances.FinancesTransport | None = None,
+        courts_transport: courts.CourtsTransport | None = None,
+        fedresurs_transport: fedresurs.FedresursTransport | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("Checko API key is required")
@@ -206,6 +209,8 @@ class CheckoCompanyDataProvider:
         self._transport = transport if transport is not None else AiohttpCompanyTransport()
         self._bankruptcy_transport = bankruptcy_transport or bankruptcy.AiohttpBankruptcyTransport()
         self._finances_transport = finances_transport or finances.AiohttpFinancesTransport()
+        self._courts_transport = courts_transport or courts.AiohttpCourtsTransport()
+        self._fedresurs_transport = fedresurs_transport or fedresurs.AiohttpFedresursTransport()
         self._clock = clock
 
     async def fetch(self, request: CompanyDataRequest) -> tuple[ExternalSnapshot, ...]:
@@ -216,6 +221,8 @@ class CheckoCompanyDataProvider:
             Section.COMPANY: self._company,
             Section.BANKRUPTCY: self._bankruptcy,
             Section.FINANCES: self._finances,
+            Section.COURTS: self._courts,
+            Section.FEDRESURS: self._fedresurs,
         }
         return tuple([await handlers[section](request, fetched_at) for section in request.sections])
 
@@ -354,3 +361,62 @@ class CheckoCompanyDataProvider:
         except finances.InvalidResponse:
             status, code, message = FetchStatus.INVALID_RESPONSE, "invalid_response", _INVALID
         return _failure(request.inn, Section.FINANCES, fetched_at, status, code, message)
+
+    async def _courts(self, request: CompanyDataRequest, fetched_at: datetime) -> ExternalSnapshot:
+        """S8-01: open arbitration cases where the company is the defendant."""
+
+        def project(payload: object) -> ExternalSnapshot:
+            records, total, claims = courts.read_courts(payload, request.inn)
+            return courts.project_courts(request.inn, records, total, claims, fetched_at)
+
+        return await self._single(
+            request, fetched_at, Section.COURTS, self._courts_transport, project
+        )
+
+    async def _fedresurs(
+        self, request: CompanyDataRequest, fetched_at: datetime
+    ) -> ExternalSnapshot:
+        """S8-01: creditors' notices of their intention to file for bankruptcy."""
+
+        def project(payload: object) -> ExternalSnapshot:
+            records, total, ogrn = fedresurs.read_intents(payload, request.inn)
+            return fedresurs.project_intents(request.inn, records, total, ogrn, fetched_at)
+
+        return await self._single(
+            request, fetched_at, Section.FEDRESURS, self._fedresurs_transport, project
+        )
+
+    async def _single(
+        self,
+        request: CompanyDataRequest,
+        fetched_at: datetime,
+        section: Section,
+        transport: courts.CourtsTransport | fedresurs.FedresursTransport,
+        project: Callable[[object], ExternalSnapshot],
+    ) -> ExternalSnapshot:
+        """One request, one page: the failure mapping every section shares."""
+        status, code, message = (
+            FetchStatus.UNAVAILABLE,
+            "network_error",
+            "Не удалось связаться с Checko.",
+        )
+        try:
+            async with asyncio.timeout(request.limits.timeout_seconds):
+                http_status, payload = await transport.request(
+                    self._api_key, request.inn, request.limits.timeout_seconds
+                )
+            mapped = _http_error(http_status, payload)
+            if mapped is not None:
+                return _failure(request.inn, section, fetched_at, *mapped)
+            return project(payload)
+        except TimeoutError:
+            code, message = "timeout", "Checko не ответил за отведённое время."
+        except (aiohttp.ClientError, OSError):
+            pass
+        except NotFound:
+            status, code, message = FetchStatus.NOT_FOUND, "not_found", _NOT_FOUND
+        except ApiRejected:
+            status, code, message = FetchStatus.UNAVAILABLE, "api_error", _API_ERROR
+        except InvalidResponse:
+            status, code, message = FetchStatus.INVALID_RESPONSE, "invalid_response", _INVALID
+        return _failure(request.inn, section, fetched_at, status, code, message)

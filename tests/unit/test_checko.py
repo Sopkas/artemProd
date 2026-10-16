@@ -43,7 +43,13 @@ class Transport:
 def provider(transport):
     # The same fake stands in for every section transport so company tests stay offline.
     return checko.CheckoCompanyDataProvider(
-        KEY, transport, lambda: NOW, bankruptcy_transport=transport, finances_transport=transport
+        KEY,
+        transport,
+        lambda: NOW,
+        bankruptcy_transport=transport,
+        finances_transport=transport,
+        courts_transport=transport,
+        fedresurs_transport=transport,
     )
 
 

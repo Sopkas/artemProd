@@ -216,8 +216,8 @@ async def test_source_failure_stays_in_the_report_and_is_never_replaced_by_demo(
 async def test_exhausted_budget_keeps_the_checked_part_and_reports_partial(tmp_path):
     run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
     provider = CountingProvider(DemoCompanyDataProvider())
-    # Three sections per company: the second company runs out of requests.
-    limits = RunLimits(max_requests=3, max_seconds=900)
+    # Five sections per company (S8-01): the second company runs out of requests.
+    limits = RunLimits(max_requests=len(Section), max_seconds=900)
     outcome = await pipeline(files, repository, guard(provider), limits=limits).process(run)
 
     assert outcome.status == RunStatus.PARTIAL
