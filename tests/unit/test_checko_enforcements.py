@@ -7,6 +7,7 @@ still to be compared with a live answer.
 """
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -16,12 +17,12 @@ import pytest
 from claims_assistant.application.check_company import CompanyCheck
 from claims_assistant.application.company_data import CompanyDataRequest
 from claims_assistant.application.internal_context import card_assessment
-from claims_assistant.domain.external import Coverage, FactKind, FetchStatus, Section
+from claims_assistant.domain.external import Coverage, DataMode, FactKind, FetchStatus, Section
 from claims_assistant.domain.scoring import assess
-from claims_assistant.infrastructure.checko import enforcements
+from claims_assistant.infrastructure.checko import courts, enforcements
 from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
-from claims_assistant.presentation.telegram.card import format_brief, format_card
+from claims_assistant.presentation.telegram.card import NO_BURDEN, format_brief, format_card
 
 INN = "1234567894"
 NOW = datetime(2026, 10, 16, 9, tzinfo=UTC)
@@ -170,4 +171,19 @@ async def test_the_bailiffs_raise_no_priority_by_themselves():
     assert {s.code for s in assess(INN, demo).signals} == {"unresolved_bankruptcy_event"}
     ordinary = await DemoCompanyDataProvider().fetch(CompanyDataRequest(INN))
     brief = format_brief(CompanyCheck(INN, ordinary), assess(INN, ordinary))
-    assert "ФССП: незавершённых исполнительных производств нет." in brief.splitlines()
+    # Nothing in the courts either: one line for both, the brief card stays short.
+    assert NO_BURDEN in brief.splitlines()
+
+
+async def test_one_empty_line_for_both_only_when_both_are_empty():
+    """The merge of S8-04 and S8-01 (17.10.2026): the brief card kept under 500 signs."""
+    alarm = await DemoCompanyDataProvider(DemoScenario.ALARM).fetch(CompanyDataRequest(INN))
+    empty = courts.project_courts(INN, [], 0, None, alarm[0].fetched_at)
+    empty = replace(empty, mode=DataMode.DEMO)  # one check never mixes demo and live
+    no_cases = tuple(empty if s.section is Section.COURTS else s for s in alarm)
+    lines = format_brief(CompanyCheck(INN, no_cases), assess(INN, no_cases)).splitlines()
+    assert NO_BURDEN not in lines
+    assert "Арбитраж: незавершённых дел, где организация ответчик, нет." in lines
+    assert any(
+        line.startswith("ФССП: незавершённых исполнительных производств — 1") for line in lines
+    )

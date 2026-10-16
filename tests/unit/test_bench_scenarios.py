@@ -147,7 +147,8 @@ def test_the_bench_table_and_the_set_stay_in_step():
 DENIALS = {
     "nothing_alarming": "Признаков банкротства нет, судебных дел не найдено, оплаты поступают.",
     "holes_in_the_package": "Неизвестно, погашен ли долг: в файле нет ни суммы, ни даты.",
-    "creditor_not_debtor": "Организация действует; сведений о процедуре в её отношении нет.",
+    "creditor_not_debtor": "Организация действует; сведений о процедуре в её отношении нет, "
+    "в сообщениях реестра она кредитор.",
 }
 
 
@@ -157,6 +158,57 @@ def test_a_denial_is_not_read_as_a_claim(scenario_id):
     _, result = _review(scenario, {"explanation": DENIALS[scenario_id]})
     assert isinstance(result, Explanation), result
     assert judge(scenario, _outcome(result)) == ()
+
+
+# Right answers the word lists did not know (bench v2, docs/ai-provider.md): they were
+# marked as missing what they said.
+SAID_OTHERWISE = [
+    ("files_disagree", "Давность платежа не установлена из-за несовпадения в выгрузках."),
+    ("holes_in_the_package", "Для оценки недостаточно данных: в файле только ИНН."),
+    ("holes_in_the_package", "Данных о сумме долга и дате последнего платежа нет."),
+]
+
+
+@pytest.mark.parametrize(("scenario_id", "text"), SAID_OTHERWISE)
+def test_the_same_thing_in_other_words_is_not_a_complaint(scenario_id, text):
+    scenario = next(item for item in SCENARIOS if item.id == scenario_id)
+    _, result = _review(scenario, {"explanation": text})
+    assert isinstance(result, Explanation), result
+    assert judge(scenario, _outcome(result)) == ()
+
+
+def test_a_word_far_from_its_gap_is_not_read_as_one():
+    """«данных … нет» within one clause: «нет» of another sentence does not count."""
+    scenario = next(item for item in SCENARIOS if item.id == "holes_in_the_package")
+    text = "Сведения по данных выгрузке приняты. Вопросов нет."
+    _, result = _review(scenario, {"explanation": text})
+    assert isinstance(result, Explanation), result
+    assert judge(scenario, _outcome(result))
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "Рекомендуется усилить контроль за оплатой.",  # «роль» inside «контроль»
+        "Возможно отчуждение имущества.",  # «чуж» inside «отчуждение»
+    ],
+)
+def test_a_word_inside_another_is_not_the_role_caveat(tail):
+    """A on #95: the very miss the check is for passed with an ordinary closing phrase."""
+    scenario = next(item for item in SCENARIOS if item.id == "creditor_not_debtor")
+    text = f"Высокий приоритет установлен из-за наличия сообщений ЕФРСБ о банкротстве. {tail}"
+    _, result = _review(scenario, {"explanation": text})
+    assert isinstance(result, Explanation), result
+    assert judge(scenario, _outcome(result))
+
+
+def test_efrsb_messages_without_the_role_caveat_are_a_complaint():
+    """gemini-3.5-flash-lite, bench v2: true, and read by a person as «he is bankrupt»."""
+    scenario = next(item for item in SCENARIOS if item.id == "creditor_not_debtor")
+    text = "Высокий приоритет установлен из-за наличия сообщений ЕФРСБ о банкротстве."
+    _, result = _review(scenario, {"explanation": text})
+    assert isinstance(result, Explanation), result
+    assert judge(scenario, _outcome(result))
 
 
 def test_on_a_conflict_even_a_correct_sounding_answer_cannot_name_the_dates():

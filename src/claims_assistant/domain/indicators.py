@@ -370,7 +370,9 @@ def _debt_signals(ind: "InternalIndicators") -> list[Signal]:
         Signal(
             "debt_doubled",
             Priority.MEDIUM,
-            f"Долг вырос в {debt.ratio:.2f} раза за месяц (с {_fmt(debt.previous_on)}).",
+            # A person reads the reason: «2,21», as in the card; ``value`` stays machine-read.
+            f"Долг вырос в {f'{debt.ratio:.2f}'.replace('.', ',')} раза за месяц "
+            f"(с {_fmt(debt.previous_on)}).",
             (INTERNAL_DEBT, INTERNAL_DEBT_HISTORY),
             value=f"{debt.ratio:.2f}",
             observed_on=debt.current_on,
