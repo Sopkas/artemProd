@@ -57,7 +57,7 @@ from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.memory.analysis import InMemoryAnalysisRepository
 from claims_assistant.infrastructure.storage.local import LocalFileStorage
 
-from . import texts
+from . import progress, texts
 from .access import AccessMiddleware
 from .card import format_brief, format_card
 from .menu import (
@@ -500,26 +500,32 @@ def create_dispatcher(
     @router.message(InnDialog.waiting_for_inn, F.text)
     async def receive_inn(message: Message, state: FSMContext) -> None:
         try:
-            check = await check_company(message.text or "", provider)
+            validate_inn(message.text or "")
         except InvalidInn as error:
             await message.answer(texts.inn_invalid(str(error)), reply_markup=cancel_menu())
             return
-        except Exception as exc:
-            # The INN and the provider's message may be private; log only the error type.
-            logger.error("check_failed error_type=%s", type(exc).__name__)
+        # S8-03: on a bad link the source takes tens of seconds. The note says at once that
+        # the INN is taken and goes when the answer is sent; «печатает» is on while waiting.
+        async with progress.note(message, texts.COUNTING):
+            try:
+                async with progress.typing(message.bot, message.chat.id):
+                    check = await check_company(message.text or "", provider)
+                    internal = await own_data(message.from_user.id, check)
+            except Exception as exc:
+                # The INN and the provider's message may be private; log only the error type.
+                logger.error("check_failed error_type=%s", type(exc).__name__)
+                await state.clear()
+                await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
+                return
             await state.clear()
-            await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
-            return
-        await state.clear()
-        internal = await own_data(message.from_user.id, check)
-        # The brief card first: the conclusion in its first line. «Подробнее» sends the full
-        # card of this same answer, kept with the dialog: no new request to the source (a
-        # failed section is not cached) and no other picture than the brief card's.
-        await state.update_data(card_text=format_card(check, internal))
-        await message.answer(
-            format_brief(check, card_assessment(check, internal), internal),
-            reply_markup=card_menu(),
-        )
+            # The brief card first: the conclusion in its first line. «Подробнее» sends the
+            # full card of this same answer, kept with the dialog: no new request to the
+            # source (a failed section is not cached) and no other picture than the brief's.
+            await state.update_data(card_text=format_card(check, internal))
+            await message.answer(
+                format_brief(check, card_assessment(check, internal), internal),
+                reply_markup=card_menu(),
+            )
 
     # Outside a dialog only: typed at a step of another dialog, the word is that step's.
     @router.message(StateFilter(None), F.text == DETAILS)

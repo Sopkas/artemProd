@@ -43,6 +43,8 @@ INN_PROMPT = (
     "Введите ИНН организации (10 цифр) или ИП (12 цифр).\nЧтобы вернуться в меню, нажмите «Отмена»."
 )
 INN_RETRY = "Введите ИНН ещё раз или нажмите «Отмена»."
+# S8-03: sent right after a valid INN, deleted when the card comes; the customer's words.
+COUNTING = "💰 Считаю миллионы…"
 INN_CANCELLED = "Проверка отменена."
 NOTHING_TO_CANCEL = "Сейчас нечего отменять. Выберите пункт меню."
 FALLBACK = "Выберите пункт меню или отправьте /help, чтобы увидеть доступные команды."
@@ -133,7 +135,8 @@ FILE_KIND_LABELS = {
 }
 # Both files are counted in companies, not in rows: that is what the user sees in them.
 _BY_COMPANY = frozenset({FileKind.COUNTERPARTIES, FileKind.DEBT_REPORT})
-CHECK_QUEUED_PREFIX = "Проверка поставлена в очередь"
+# S8-03: the same «at work» mark as after an INN; the list is checked in the background.
+CHECK_QUEUED_PREFIX = f"{COUNTING} Проверка поставлена в очередь"
 CHECK_CANCELLED = "Новая проверка отменена. Черновик, если он был создан, не запускается."
 STATUS_TITLE = "Последняя проверка"
 STATUS_EMPTY = "Проверок пока нет. Нажмите «Новая проверка», чтобы загрузить список."
