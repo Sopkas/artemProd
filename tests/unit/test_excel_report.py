@@ -1,6 +1,7 @@
 """S2-05: the four-sheet Excel report — readable, ordered, source-linked, formula-safe."""
 
 import io
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from hashlib import sha256
@@ -10,7 +11,15 @@ from openpyxl import load_workbook
 
 from claims_assistant.domain.analysis import FileKind, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow
-from claims_assistant.domain.external import DataMode, Period
+from claims_assistant.domain.external import (
+    Coverage,
+    DataMode,
+    ExternalSnapshot,
+    FetchStatus,
+    Period,
+    ProviderError,
+    Section,
+)
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.report import (
     DEMO_SCORE_NOTE,
@@ -21,7 +30,7 @@ from claims_assistant.domain.report import (
     file_labels,
 )
 from claims_assistant.domain.scoring import Priority, assess
-from claims_assistant.infrastructure.checko import bankruptcy, finances
+from claims_assistant.infrastructure.checko import bankruptcy, courts, enforcements, finances
 from claims_assistant.infrastructure.checko.company_data import normalize_company
 from claims_assistant.infrastructure.excel.control_package import DEMO_SCORES, demo_report
 from claims_assistant.infrastructure.excel.report import PRIORITY_LABELS, SHEETS, build_report
@@ -105,6 +114,10 @@ def test_file_reads_back_with_four_sheets_and_a_fixed_layout():
         "Обещания оплаты",
         "Договоров",
         "Худшая просрочка по договору, дн.",
+        "Арбитраж: незавершённых дел (ответчик)",
+        "Арбитраж: сумма исков, ₽",
+        "ФССП: незавершённых производств",
+        "ФССП: остаток долга, ₽",
     ]
     assert priorities.freeze_panes == "A3"
 
@@ -343,3 +356,52 @@ def test_about_sheet_says_when_no_source_was_queried():
     meta = ReportMeta("run-2", DAY, DataMode.DEMO, NOW)  # checked_at is None
     rows = dict(data_rows(open_report(AnalysisReport(meta))["О проверке"])[:10])
     assert rows["Внешние данные не старее"] == "внешние источники не запрашивались"
+
+
+# --- S8-10: the claim load and the bailiffs in the priorities sheet -------------------
+
+
+def burden_row(inn, cases=None, proceedings=None):
+    """A live row whose courts and bailiffs answered (None: the section did not answer)."""
+
+    def failed(section):
+        return ExternalSnapshot(
+            inn,
+            section,
+            "checko",
+            DataMode.LIVE,
+            CHECKED,
+            FetchStatus.RATE_LIMITED,
+            Coverage.UNAVAILABLE,
+            missing=("Лимит запросов исчерпан.",),
+            error=ProviderError("rate_limited", "Лимит запросов исчерпан."),
+        )
+
+    row = live_row(inn, Decimal("100.00"), 5)
+    if cases is None:
+        court = failed(Section.COURTS)
+    else:
+        court = courts.project_courts(inn, [], cases, Decimal(cases * 1_000_000), CHECKED)
+    if proceedings is None:
+        bailiffs = failed(Section.ENFORCEMENTS)
+    else:
+        records = [
+            {"ИспПрНомер": f"{n}/26/1-ИП", "ИспПрДата": "2026-09-01", "ОстЗадолж": 50_000.0}
+            for n in range(proceedings)
+        ]
+        bailiffs = enforcements.project_enforcements(inn, records, 1, CHECKED)
+    return replace(row, snapshots=(*row.snapshots, court, bailiffs))
+
+
+def test_the_claim_load_and_the_bailiffs_are_columns_to_sort_by():
+    sheet = open_report(live_report([burden_row(INN_B, cases=14, proceedings=6)]))["Приоритеты"]
+    (row,) = data_rows(sheet)
+    assert row[12:16] == (14, 14_000_000, 6, 300_000)
+    assert sheet.cell(row=3, column=14).number_format == "#,##0.00"
+
+
+def test_none_found_is_zero_and_not_read_is_empty():
+    rows = [burden_row(INN_A, cases=0, proceedings=0), burden_row(INN_B)]
+    by_inn = {row[0]: row for row in data_rows(open_report(live_report(rows))["Приоритеты"])}
+    assert by_inn[INN_A][12:16] == (0, 0, 0, 0)
+    assert by_inn[INN_B][12:16] == (None, None, None, None)  # «не знаем», not «дел нет»
