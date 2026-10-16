@@ -127,9 +127,13 @@ async def test_a_changed_structure_is_never_read_as_no_cases(field, value):
 async def test_a_creditors_notice_is_a_fact_and_the_companys_own_is_not():
     snapshot, _ = await section(Section.FEDRESURS, fixture("fedresurs_doc_shape"))
     intents = kinds(snapshot, FactKind.BANKRUPTCY_INTENT)
-    # Three records: a creditor's notice against the company; the company's own notice
-    # against someone else (publisher = its ОГРН); a pledge — only the first counts.
+    filings = kinds(snapshot, FactKind.BANKRUPTCY_FILING)
+    # Five records: a creditor's notice against the company; the company's own notice
+    # against someone else (publisher = its ОГРН); a pledge; the tax authority's filing
+    # with the company as the participant; a filing about someone else. Two count.
     assert [f.observed_on for f in intents] == [date(2026, 3, 20)]
+    assert [f.observed_on for f in filings] == [date(2026, 4, 10)]
+    assert filings[0].value.startswith("Направление в арбитражный суд заявления уполномоченного")
     assert intents[0].value == "Намерение кредитора обратиться в суд с заявлением о банкротстве"
     link = {item.id: item.url for item in snapshot.evidence}[intents[0].evidence_ids[0]]
     assert link.startswith("https://fedresurs.ru/")
@@ -140,13 +144,15 @@ async def test_without_the_companys_ogrn_the_publisher_is_said_to_be_unchecked()
     payload = fixture("fedresurs_doc_shape")
     del payload["company"]
     snapshot, _ = await section(Section.FEDRESURS, payload)
-    # The company's own notice can no longer be told apart: it stays, and the gap is said.
+    # Neither the publisher nor the participants can be matched by ОГРН: every notice of
+    # the two types stays rather than none — the gap is said, not read as «nothing found».
     assert len(kinds(snapshot, FactKind.BANKRUPTCY_INTENT)) == 2
+    assert len(kinds(snapshot, FactKind.BANKRUPTCY_FILING)) == 2
     assert snapshot.coverage is Coverage.PARTIAL
-    assert "кто публикатор — не сверено" in snapshot.missing[-1]
+    assert "кто публикатор и участник — не сверено" in snapshot.missing[-1]
 
 
-async def test_the_requests_ask_for_open_cases_as_defendant_and_for_the_intention_only(
+async def test_the_requests_ask_for_open_cases_as_defendant_and_every_fedresurs_type(
     monkeypatch,
 ):
     sent = []
@@ -204,7 +210,6 @@ async def test_the_requests_ask_for_open_cases_as_defendant_and_for_the_intentio
             {
                 "key": KEY,
                 "inn": INN,
-                "type": "CreditorIntentionGoToCourt",
                 "sort": "-date",
                 "limit": 100,
             },
@@ -217,7 +222,12 @@ async def test_the_requests_ask_for_open_cases_as_defendant_and_for_the_intentio
 
 
 async def snapshots_with_intent(published_on: str) -> list:
+    """A creditor's intention and nothing filed yet."""
     payload = fixture("fedresurs_doc_shape")
+    payload["data"]["Записи"] = [
+        r for r in payload["data"]["Записи"] if r["Тип"] == "CreditorIntentionGoToCourt"
+    ]
+    payload["data"]["ЗапВсего"] = len(payload["data"]["Записи"])
     payload["data"]["Записи"][0]["Дата"] = published_on
     demo = await DemoCompanyDataProvider().fetch(CompanyDataRequest(INN))
     live, _ = await section(Section.FEDRESURS, payload)
@@ -288,3 +298,102 @@ async def test_the_brief_card_names_the_claim_load_and_the_notice():
         "Арбитраж: незавершённых дел, где организация ответчик, — 2, иски на 3 400 000,00 ₽."
         in lines
     )
+
+
+# --- the filing in court (live check of 15.10.2026) ---
+
+
+def test_legal_forms_are_shortened_in_the_case_line():
+    assert courts.short_name('ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ТЕСТ"') == 'ООО "ТЕСТ"'
+    assert courts.short_name("НЕПУБЛИЧНОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО «Х»") == "АО «Х»"
+    assert courts.short_name("ПУБЛИЧНОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО «Х»") == "ПАО «Х»"
+    assert (
+        courts.short_name("МЕЖРАЙОННАЯ ИНСПЕКЦИЯ ФЕДЕРАЛЬНОЙ НАЛОГОВОЙ СЛУЖБЫ № 0 ПО ОБЛАСТИ")
+        == "МИФНС № 0 ПО ОБЛАСТИ"
+    )
+    assert courts.short_name("ООО «Уже коротко»") == "ООО «Уже коротко»"
+
+
+async def test_a_bankruptcy_case_of_the_company_is_its_own_fact():
+    """The customer's debtor: an open case of the bankruptcy kind, the tax authority filed,
+    the company among the defendants. The other «Б» case — someone else's bankruptcy, where
+    the company is not the debtor — stays an ordinary case."""
+    snapshot, _ = await section(Section.COURTS, fixture("courts_bankruptcy_live_shape"))
+    assert snapshot.status is FetchStatus.OK and snapshot.coverage is Coverage.COMPLETE
+    (case,) = kinds(snapshot, FactKind.BANKRUPTCY_CASE)
+    assert case.observed_on == date(2026, 4, 10)
+    assert case.value == (
+        "дело о банкротстве А00-1/2026 · АС Синтетической области · требование 1 000 000 ₽ · "
+        "заявитель: МИФНС № 0 ПО СИНТЕТИЧЕСКОЙ ОБЛАСТИ"
+    )
+    (other,) = kinds(snapshot, FactKind.COURT_CASE)
+    assert other.value.startswith("А00-9/2026")
+
+
+async def customers_debtor() -> list:
+    """EFRSB empty; in court a bankruptcy case filed by the tax authority; on Fedresurs its
+    notice of the filing and an earlier creditor's intention — what A saw live."""
+    demo = await DemoCompanyDataProvider().fetch(CompanyDataRequest(INN))
+    courts_live, _ = await section(Section.COURTS, fixture("courts_bankruptcy_live_shape"))
+    fedresurs_live, _ = await section(Section.FEDRESURS, fixture("fedresurs_doc_shape"))
+    live = {Section.COURTS: courts_live, Section.FEDRESURS: fedresurs_live}
+    return [replace(live[s.section], mode=s.mode) if s.section in live else s for s in demo]
+
+
+async def test_the_filing_is_one_high_reason_with_both_grounds():
+    assessment = assess(INN, await customers_debtor(), analysis_date=NOW.date())
+    codes = [s.code for s in assessment.signals]
+    # One reason, not two: the creditor's earlier intention adds nothing once filed.
+    assert codes == ["bankruptcy_filed"]
+    (signal,) = assessment.signals
+    assert signal.level is Priority.HIGH and assessment.priority is Priority.HIGH
+    assert signal.reason == (
+        "В арбитражном суде заявление о признании организации банкротом (заявление от 10.04.2026)."
+    )
+    assert {fact_id.split("-")[0] for fact_id in signal.fact_ids} == {"court", "fedresurs"}
+
+
+async def test_the_court_case_alone_is_enough():
+    """Whoever filed: the case in court raises it even with nothing on Fedresurs."""
+    snapshots = [s for s in await customers_debtor() if s.section is not Section.FEDRESURS]
+    assessment = assess(INN, snapshots, analysis_date=NOW.date())
+    assert [s.code for s in assessment.signals] == ["bankruptcy_filed"]
+
+
+async def test_an_old_filing_notice_without_a_case_is_history():
+    payload = fixture("fedresurs_doc_shape")
+    payload["data"]["Записи"] = [
+        r for r in payload["data"]["Записи"] if r["Тип"] == "DebtorBankruptcyCourtNotification"
+    ]
+    payload["data"]["ЗапВсего"] = len(payload["data"]["Записи"])
+    snapshot, _ = await section(Section.FEDRESURS, payload)
+    demo = await DemoCompanyDataProvider().fetch(CompanyDataRequest(INN))
+    snapshots = [
+        replace(snapshot, mode=s.mode) if s.section is Section.FEDRESURS else s for s in demo
+    ]
+    later = date(2027, 6, 1)  # more than a year after 10.04.2026
+    assert "bankruptcy_filed" not in {
+        s.code for s in assess(INN, snapshots, analysis_date=later).signals
+    }
+    assert "bankruptcy_filed" in {
+        s.code for s in assess(INN, snapshots, analysis_date=NOW.date()).signals
+    }
+
+
+async def test_the_brief_card_of_the_customers_debtor_says_bankruptcy_first():
+    """The complaint of 15.10.2026, answered in the first lines of the card."""
+    from claims_assistant.application.check_company import CompanyCheck
+    from claims_assistant.application.internal_context import card_assessment
+    from claims_assistant.presentation.telegram.card import format_brief, format_card
+
+    check = CompanyCheck(INN, tuple(await customers_debtor()))
+    brief = format_brief(check, card_assessment(check, None))
+    lines = brief.splitlines()
+    assert lines[2] == "❗️ Высокий — требует внимания (по внешним данным)"
+    bullets = [line for line in lines if line.startswith("• ")]
+    assert bullets[0] == (
+        "• В арбитражном суде заявление о признании организации банкротом "
+        "(заявление от 10.04.2026)."
+    )
+    full = format_card(check, None)
+    assert "Дело о банкротстве: дело о банкротстве А00-1/2026" in full

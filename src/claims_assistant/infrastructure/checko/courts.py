@@ -15,8 +15,14 @@ not yet compared with a live answer — reconcile here when it is:
 
 Why only open cases as the defendant: that is the claim load — what the company may yet
 have to pay — and what the customer asked to watch (15.10.2026). Cases where it sues
-someone else say nothing against it. The source does not say which case is a bankruptcy
-case; the creditors' notices of intention (``fedresurs``) and the register (EFRSB) do.
+someone else say nothing against it.
+
+CHECKED LIVE on 15.10.2026 (developer A, the customer's debtor): the envelope is as above,
+sums come as floats, the sides' ``Адрес`` may be null, and a record carries more than the
+documentation says — ``Тип`` («Б» for a bankruptcy case, «А», «Г» for others), ``ПрАктуал``,
+``ПрАктив``, ``ДатаСлед``, ``ИсходКод``, ``ИсходТекст``, ``Победитель``, ``ИсходДост``. In a
+bankruptcy case the debtor is among ``Ответ``: that case is the filing the card missed,
+whoever filed it (there it was the tax authority), so it becomes its own fact.
 
 One page of the newest hundred: the count and the sum of claims come from the source's own
 totals, so a busy defendant is not cut down to a hundred cases; only the list is.
@@ -49,6 +55,19 @@ SOURCE = "checko-legal-cases-v2"
 COURTS_URL = "https://api.checko.ru/v2/legal-cases"
 PAGE_SIZE = 100
 UNIT = "RUB"
+BANKRUPTCY_KIND = "Б"
+# The sides come by their full legal names; the card has one line for a case.
+_SHORT_FORMS = (
+    ("НЕПУБЛИЧНОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО", "АО"),  # before ПАО: it contains «ПУБЛИЧНОЕ»
+    ("ПУБЛИЧНОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО", "ПАО"),
+    ("АКЦИОНЕРНОЕ ОБЩЕСТВО", "АО"),
+    ("ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ", "ООО"),
+    ("ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ", "ИП"),
+    ("МЕЖРАЙОННАЯ ИНСПЕКЦИЯ ФЕДЕРАЛЬНОЙ НАЛОГОВОЙ СЛУЖБЫ", "МИФНС"),
+    ("ИНСПЕКЦИЯ ФЕДЕРАЛЬНОЙ НАЛОГОВОЙ СЛУЖБЫ", "ИФНС"),
+    ("УПРАВЛЕНИЕ ФЕДЕРАЛЬНОЙ НАЛОГОВОЙ СЛУЖБЫ", "УФНС"),
+    ("ФЕДЕРАЛЬНАЯ НАЛОГОВАЯ СЛУЖБА", "ФНС"),
+)
 
 
 class CourtsTransport(Protocol):
@@ -89,22 +108,45 @@ def read_courts(payload: object, inn: str) -> tuple[list[dict], int, Decimal | N
     return records, total, claims
 
 
-def _label(record: dict) -> str:
+def short_name(name: str) -> str:
+    """«ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ТЕСТ"» → «ООО "ТЕСТ"»; the legal form only."""
+    upper = name.upper()
+    for full, short in _SHORT_FORMS:
+        index = upper.find(full)
+        if index != -1:
+            return (name[:index] + short + name[index + len(full) :]).strip()
+    return name
+
+
+def _is_debtor(record: dict, inn: str) -> bool:
+    """A bankruptcy case of this company: of the bankruptcy kind, with it among the
+    defendants. A case in someone else's bankruptcy where it answers a claim is not."""
+    if record.get("Тип") != BANKRUPTCY_KIND:
+        return False
+    defendants = record.get("Ответ")
+    return isinstance(defendants, list) and any(
+        isinstance(side, dict) and side.get("ИНН") == inn for side in defendants
+    )
+
+
+def _label(record: dict, *, bankruptcy: bool = False) -> str:
     """The case as a person reads it: number, court and the sum claimed."""
-    parts = [_text(record.get("Номер"), 100) or "номер не указан"]
+    number = _text(record.get("Номер"), 100) or "номер не указан"
+    parts = [f"дело о банкротстве {number}" if bankruptcy else number]
     court = _text(record.get("Суд"), 200)
     if court:
         parts.append(court)
     claim = _amount(record.get("СуммИск"))
     if claim is not None and claim > 0:
         whole = f"{claim:,.0f}".replace(",", " ")
-        parts.append(f"иск {whole} ₽")
+        parts.append(f"{'требование' if bankruptcy else 'иск'} {whole} ₽")
     plaintiffs = record.get("Ист")
     if isinstance(plaintiffs, list):
-        names = [_text(p.get("Наим"), 150) for p in plaintiffs if isinstance(p, dict)]
-        names = [name for name in names if name]
+        names = [_text(p.get("Наим"), 300) for p in plaintiffs if isinstance(p, dict)]
+        names = [short_name(name) for name in names if name]
         if names:
-            parts.append("истец: " + (names[0] if len(names) == 1 else f"{names[0]} и др."))
+            who = "заявитель" if bankruptcy else "истец"
+            parts.append(f"{who}: " + (names[0] if len(names) == 1 else f"{names[0]} и др."))
     return " · ".join(parts)[:500]
 
 
@@ -146,12 +188,13 @@ def project_courts(
         record_id = _text(record.get("UUID")) or _text(record.get("Номер")) or f"{inn}:{index}"
         item = Evidence(f"court-{index}", SOURCE, record_id, url=_url(record.get("СтрКАД")))
         evidence.append(item)
+        bankruptcy = _is_debtor(record, inn)
         facts.append(
             Fact(
-                f"court-case-{index}",
+                f"court-{'bankruptcy' if bankruptcy else 'case'}-{index}",
                 inn,
-                FactKind.COURT_CASE,
-                _label(record),
+                FactKind.BANKRUPTCY_CASE if bankruptcy else FactKind.COURT_CASE,
+                _label(record, bankruptcy=bankruptcy),
                 (item.id,),
                 observed_on=filed_on,
             )

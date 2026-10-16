@@ -190,14 +190,48 @@ def _bankruptcy_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
     ]
 
 
+def _recent(facts: list[Fact], today: date | None) -> list[Fact]:
+    """A Fedresurs notice older than a year is history (``INTENT_WINDOW_DAYS``)."""
+    if today is None:
+        return facts
+    since = today - timedelta(days=INTENT_WINDOW_DAYS)
+    return [f for f in facts if f.observed_on is not None and since <= f.observed_on]
+
+
+def _filing_signals(
+    courts: ExternalSnapshot | None, fedresurs: ExternalSnapshot | None, today: date | None
+) -> list[Signal]:
+    """S8-01: an application to declare the company bankrupt is in court. Two sources say
+    it — an open arbitration case of the bankruptcy kind with the company as the debtor
+    (whoever filed), and the tax authority's notice on Fedresurs that it has filed — and
+    they are one event, so one signal with both as grounds. The customer's debtor of
+    15.10.2026 had both and nothing in EFRSB. High, not critical: a court may yet reject
+    the application, and a procedure is confirmed by the register or the company's status.
+    """
+    cases = _facts(courts, FactKind.BANKRUPTCY_CASE)  # open ones only: the request says so
+    notices = _recent(_facts(fedresurs, FactKind.BANKRUPTCY_FILING), today)
+    grounds = cases + notices
+    if not grounds:
+        return []
+    filed = max((f.observed_on for f in grounds if f.observed_on), default=None)
+    when = f" (заявление от {filed:%d.%m.%Y})" if filed else ""
+    return [
+        Signal(
+            "bankruptcy_filed",
+            Priority.HIGH,
+            f"В арбитражном суде заявление о признании организации банкротом{when}.",
+            tuple(f.id for f in grounds),
+            value=str(len(cases) or len(notices)),
+            observed_on=filed,
+        )
+    ]
+
+
 def _intent_signals(snapshot: ExternalSnapshot | None, today: date | None) -> list[Signal]:
     """S8-01: a creditor announced on Fedresurs that it is going to court to bankrupt the
     company. The register (EFRSB) stays silent until a court opens the case, so this is the
-    earliest public sign; the customer's debtor of 15.10.2026 had it and nothing in EFRSB."""
-    notices = _facts(snapshot, FactKind.BANKRUPTCY_INTENT)
-    if today is not None:
-        since = today - timedelta(days=INTENT_WINDOW_DAYS)
-        notices = [f for f in notices if f.observed_on is not None and since <= f.observed_on]
+    earliest public sign."""
+    notices = _recent(_facts(snapshot, FactKind.BANKRUPTCY_INTENT), today)
     if not notices:
         return []
     latest = max((f.observed_on for f in notices if f.observed_on), default=None)
@@ -435,17 +469,25 @@ def assess(
         if snapshot.inn != inn:
             raise ValueError("Snapshot belongs to another INN")
         by_section[snapshot.section] = snapshot
+    # The card has no analysis date: the day the source answered stands for «today».
+    today = (
+        analysis_date
+        or (row.cutoff_date if row is not None else None)
+        or _fetched_on(by_section.get(Section.FEDRESURS))
+    )
 
     signals = [
         *_company_signals(by_section.get(Section.COMPANY)),
-        *_bankruptcy_signals(by_section.get(Section.BANKRUPTCY)),
-        *_finance_signals(by_section.get(Section.FINANCES)),
-        *_intent_signals(
-            by_section.get(Section.FEDRESURS),
-            analysis_date
-            or (row.cutoff_date if row is not None else None)
-            or _fetched_on(by_section.get(Section.FEDRESURS)),
+        # A filing in court comes first among the reasons, and once it is there the creditors'
+        # earlier intentions say nothing more: one reason, not two (review A on #89).
+        *(
+            filed := _filing_signals(
+                by_section.get(Section.COURTS), by_section.get(Section.FEDRESURS), today
+            )
         ),
+        *_bankruptcy_signals(by_section.get(Section.BANKRUPTCY)),
+        *([] if filed else _intent_signals(by_section.get(Section.FEDRESURS), today)),
+        *_finance_signals(by_section.get(Section.FINANCES)),
         *(
             row_signals(row, analysis_date or row.cutoff_date, payment_age=indicators is None)
             if row is not None

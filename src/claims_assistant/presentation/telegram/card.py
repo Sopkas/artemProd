@@ -39,7 +39,7 @@ _SECTION_TITLES = {
     Section.BANKRUPTCY: "Сообщения о банкротстве",
     Section.FINANCES: "Финансы",
     Section.COURTS: "Арбитражные дела (ответчик, незавершённые)",
-    Section.FEDRESURS: "Намерения кредиторов о банкротстве (Федресурс)",
+    Section.FEDRESURS: "Заявления о банкротстве (Федресурс)",
 }
 _STATUS_LABELS = {
     CompanyStatus.ACTIVE: "действует",
@@ -57,6 +57,8 @@ _FACT_LABELS = {
     FactKind.COURT_CASES_ACTIVE: "Незавершённых дел",
     FactKind.COURT_CLAIMS_TOTAL: "Сумма исков",
     FactKind.BANKRUPTCY_INTENT: "Сообщение",
+    FactKind.BANKRUPTCY_CASE: "Дело о банкротстве",
+    FactKind.BANKRUPTCY_FILING: "Сообщение",
 }
 _COVERAGE_LABELS = {
     Coverage.COMPLETE: "проверено полностью",
@@ -367,7 +369,7 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
     for fact in snapshot.facts:
         lines.append(f"  {_fact(fact)}")
     if not snapshot.facts and snapshot.section == Section.FEDRESURS:
-        lines.append("  Кредиторы о намерении подать на банкротство не сообщали.")
+        lines.append("  Сообщений о заявлении о банкротстве организации нет.")
     if not snapshot.facts and snapshot.section == Section.BANKRUPTCY:
         if snapshot.coverage == Coverage.COMPLETE:
             lines.append("  За проверенный период сообщений не найдено.")

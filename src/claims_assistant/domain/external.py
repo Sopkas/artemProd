@@ -33,6 +33,12 @@ class FactKind(StrEnum):
     # S8-01: a creditor's notice on Fedresurs of its intention to file for the company's
     # bankruptcy («намерение кредитора обратиться в суд»); published before the filing.
     BANKRUPTCY_INTENT = "bankruptcy_intent"
+    # S8-01 (live check of 15.10.2026): the filing itself. An open arbitration case of the
+    # bankruptcy kind (``Тип: "Б"``) with the company as the debtor, and the tax
+    # authority's notice on Fedresurs that it has sent such an application to court —
+    # the tax authority files without announcing an intention first.
+    BANKRUPTCY_CASE = "bankruptcy_case"
+    BANKRUPTCY_FILING = "bankruptcy_filing"
 
 
 class CompanyStatus(StrEnum):
