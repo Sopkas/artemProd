@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import statistics
 import sys
 import time
@@ -115,7 +116,9 @@ def judge(scenario: BenchScenario, outcome: ExplanationOutcome) -> tuple[str, ..
     for phrase in scenario.forbidden:
         if phrase.casefold() in text:
             complaints.append(f"сказано «{phrase}»")
-    if scenario.mentions and not any(word.casefold() in text for word in scenario.mentions):
+    if scenario.mentions and not any(
+        re.search(pattern, text, re.IGNORECASE) for pattern in scenario.mentions
+    ):
         complaints.append("не названо " + " / ".join(scenario.mentions))
     if scenario.promises_expected is not None:
         found = len(explanation.promises)
