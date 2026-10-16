@@ -50,6 +50,7 @@ def provider(transport):
         finances_transport=transport,
         courts_transport=transport,
         fedresurs_transport=transport,
+        enforcements_transport=transport,
     )
 
 

@@ -68,6 +68,7 @@ _SECTION_LABELS = {
     Section.FINANCES: "Финансовая отчётность",
     Section.COURTS: "Арбитражные дела",
     Section.FEDRESURS: "Сообщения Федресурса",
+    Section.ENFORCEMENTS: "Исполнительные производства",
 }
 # S8-01: a creditor's notice of intention is followed by the filing within weeks; a notice
 # older than a year is history, shown among the grounds but raising nothing.

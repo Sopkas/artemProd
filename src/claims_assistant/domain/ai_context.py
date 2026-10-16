@@ -63,6 +63,7 @@ _SECTION_TITLES = {
     Section.FINANCES: "Финансовая отчётность",
     Section.COURTS: "Арбитражные дела",
     Section.FEDRESURS: "Сообщения Федресурса",
+    Section.ENFORCEMENTS: "Исполнительные производства (ФССП)",
 }
 _FACT_TITLES = {
     FactKind.COMPANY_NAME: "Наименование",
@@ -77,6 +78,9 @@ _FACT_TITLES = {
     FactKind.BANKRUPTCY_INTENT: "Намерение кредитора подать заявление о банкротстве",
     FactKind.BANKRUPTCY_CASE: "Дело о банкротстве организации (арбитражный суд)",
     FactKind.BANKRUPTCY_FILING: "Заявление о банкротстве направлено в суд (Федресурс)",
+    FactKind.ENFORCEMENT: "Исполнительное производство (ФССП)",
+    FactKind.ENFORCEMENTS_OPEN: "Незавершённых исполнительных производств",
+    FactKind.ENFORCEMENT_DEBT_LEFT: "Остаток долга по исполнительным производствам",
 }
 _STATUS_TITLES = {
     CompanyStatus.ACTIVE: "действует",

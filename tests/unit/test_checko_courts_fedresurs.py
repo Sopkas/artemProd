@@ -52,6 +52,7 @@ async def section(which: Section, payload) -> tuple:
         lambda: NOW,
         courts_transport=transport,
         fedresurs_transport=transport,
+        enforcements_transport=transport,
     )
     (snapshot,) = await provider.fetch(CompanyDataRequest(INN, (which,)))
     return snapshot, transport

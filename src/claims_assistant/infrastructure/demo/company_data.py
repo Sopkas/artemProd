@@ -145,6 +145,18 @@ class DemoCompanyDataProvider:
                 facts[-1] = _renamed(facts[-1], f"{inn}:{section}:{FactKind.COURT_CASE}:2")
             else:
                 add(FactKind.COURT_CASES_ACTIVE, 0)
+        elif section == Section.ENFORCEMENTS:
+            # S8-01: the alarm has one open proceeding; a figure, it raises nothing alone.
+            if scenario == DemoScenario.ALARM:
+                add(FactKind.ENFORCEMENTS_OPEN, 1)
+                add(FactKind.ENFORCEMENT_DEBT_LEFT, Decimal("125000.00"), unit="RUB")
+                add(
+                    FactKind.ENFORCEMENT,
+                    "ДЕМО № 1/25/00001-ИП · налог, включая пени · остаток 125 000 ₽",
+                )
+            else:
+                add(FactKind.ENFORCEMENTS_OPEN, 0)
+                add(FactKind.ENFORCEMENT_DEBT_LEFT, Decimal("0.00"), unit="RUB")
         return ExternalSnapshot(
             **base,
             status=FetchStatus.OK,
