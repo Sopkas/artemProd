@@ -10,7 +10,12 @@ from claims_assistant.application.company_data import CompanyDataRequest
 from claims_assistant.domain.external import Section
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 from claims_assistant.presentation.telegram import texts
-from claims_assistant.presentation.telegram.card import DEMO_BANNER, REVIEW_MONTH, REVIEW_TITLE
+from claims_assistant.presentation.telegram.card import (
+    DEMO_BANNER,
+    REVIEW_MONTH,
+    REVIEW_NOT_PREPARED,
+    REVIEW_TITLE,
+)
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 
 # Synthetic value built for the checksum, not a real organization.
@@ -450,7 +455,10 @@ async def test_the_reading_comes_after_the_card_with_its_own_note(bot, update_fa
     assert f"ИНН {VALID_INN}" in texts_sent[1]
     assert texts_sent[2] == texts.REVIEWING
     assert REVIEW_MONTH in reply.text and REVIEW_TITLE not in reply.text
-    assert buttons(reply) == ["Подробнее", *MAIN_MENU]
+    # The reading names the company: another card may have come in between.
+    assert f"ИНН {VALID_INN}" in reply.text
+    # No keyboard of its own: the card's stays, and after «Подробнее» the main menu does.
+    assert reply.reply_markup is None
     assert kinds(calls)[-1] == "DeleteMessage"  # the reading's note does not stay
     assert reviewer.calls == [(VALID_INN, VALID_INN, None)]
     # «Подробнее» still answers with the full card of the same answer.
@@ -461,7 +469,8 @@ async def test_the_reading_comes_after_the_card_with_its_own_note(bot, update_fa
 async def test_a_failed_reading_leaves_the_card_and_says_so(bot, update_factory, caplog):
     dispatcher = create_dispatcher(frozenset({42}), card_reviewer=Reviewer(fail=True))
     reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
-    assert "Карточка выше — по правилам" in reply.text
+    assert REVIEW_NOT_PREPARED in reply.text and "по правилам" in reply.text
+    assert "модель" not in reply.text
     assert "private debtor note" not in caplog.text
     assert "card_review_failed error_type=RuntimeError" in caplog.text
 

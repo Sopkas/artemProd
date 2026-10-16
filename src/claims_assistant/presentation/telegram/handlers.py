@@ -541,7 +541,10 @@ def create_dispatcher(
             except Exception as exc:
                 # The card is already there; log the type only, the INN may be private.
                 logger.error("card_review_failed error_type=%s", type(exc).__name__)
-            await message.answer(format_review(review), reply_markup=card_menu())
+            # No keyboard of its own: the one on screen stays. If «Подробнее» was pressed
+            # while the model read, the full card is out and its button would answer
+            # «Сначала проверьте организацию».
+            await message.answer(format_review(review, check, internal))
 
     # Outside a dialog only: typed at a step of another dialog, the word is that step's.
     @router.message(StateFilter(None), F.text == DETAILS)

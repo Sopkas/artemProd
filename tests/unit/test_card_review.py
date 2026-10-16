@@ -12,11 +12,15 @@ from decimal import Decimal
 
 import pytest
 
-from claims_assistant.application.ai_guard import AiPolicy, GuardedRecommendationProvider
+from claims_assistant.application.ai_guard import (
+    BUDGET_MESSAGE,
+    AiPolicy,
+    GuardedRecommendationProvider,
+)
 from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.card_review import CARD_REFERENCE, CardReview, CardReviewer
 from claims_assistant.application.check_company import CompanyCheck
-from claims_assistant.application.recommendation import AiErrorCode, AiUnavailable
+from claims_assistant.application.recommendation import AiErrorCode, AiLimits, AiUnavailable
 from claims_assistant.domain.ai_context import (
     CARD_CONTEXT_VERSION,
     CARD_INSTRUCTION,
@@ -31,10 +35,16 @@ from claims_assistant.domain.scoring import assess
 from claims_assistant.infrastructure.checko import courts, finances
 from claims_assistant.infrastructure.llm.stub import StubRecommendationProvider
 from claims_assistant.presentation.telegram.card import (
+    REVIEW_CARD_LIMIT,
+    REVIEW_FAILED,
     REVIEW_FOOTER,
     REVIEW_MONTH,
+    REVIEW_NO_DATA,
+    REVIEW_NOT_PREPARED,
     REVIEW_REJECTED,
+    REVIEW_TIMEOUT,
     REVIEW_TITLE,
+    REVIEW_TOO_MUCH,
     format_review,
 )
 
@@ -291,23 +301,52 @@ async def test_a_failed_spend_write_does_not_take_the_reading_away(caplog):
 # --- what the user reads ----------------------------------------------------------------
 
 
-def test_the_reading_is_marked_as_the_models():
+def failed(error: AiUnavailable) -> CardReview:
+    return CardReview(type("Outcome", (), {"explanation": None, "rejected": None, "error": error}))
+
+
+def test_the_reading_is_marked_as_the_models_and_names_the_company():
+    """It comes up to 90 s after the card: another card may be in between."""
     model_answer = review_answer(answer(GOOD), context())
     outcome = type("Outcome", (), {"explanation": model_answer, "rejected": None, "error": None})
-    text = format_review(CardReview(outcome))
-    assert text.startswith(REVIEW_TITLE) and GOOD in text and text.endswith(REVIEW_FOOTER)
+    text = format_review(CardReview(outcome), check())
+    assert text.splitlines()[0] == f"{REVIEW_TITLE} — ИНН {INN}"
+    assert GOOD in text and text.endswith(REVIEW_FOOTER)
 
 
 def test_no_reading_says_why_in_one_line():
-    month = format_review(CardReview(month_exhausted=True))
-    assert REVIEW_MONTH in month and "по правилам" in month
+    month = format_review(CardReview(month_exhausted=True), check())
+    assert month.startswith(f"🤖 Разбора ИИ нет (ИНН {INN}): {REVIEW_MONTH}")
+    assert "по правилам" in month and "\n" not in month
     rejected = review_answer(answer("Иски на 9 млн ₽."), context())
     outcome = type("Outcome", (), {"explanation": None, "rejected": rejected, "error": None})
-    assert REVIEW_REJECTED in format_review(CardReview(outcome))
-    error = AiUnavailable(AiErrorCode.TIMEOUT, "Модель не ответила в срок.")
-    outcome = type("Outcome", (), {"explanation": None, "rejected": None, "error": error})
-    assert "модель недоступна (модель не ответила в срок)" in format_review(CardReview(outcome))
-    assert "модель недоступна" in format_review(None)
+    assert REVIEW_REJECTED in format_review(CardReview(outcome), check())
+    timeout = AiUnavailable(AiErrorCode.TIMEOUT, "Модель не ответила в срок.")
+    assert REVIEW_TIMEOUT in format_review(failed(timeout), check())
+    down = AiUnavailable(AiErrorCode.UNAVAILABLE, "Сервис ИИ недоступен.")
+    assert REVIEW_FAILED in format_review(failed(down), check())
+
+
+def test_our_own_limits_are_not_called_the_models_failure():
+    """A request too large and a card's money spent are ours: the model was fine, and the
+    guard's figures («71684 > 24000») are for the log."""
+    large = AiUnavailable(AiErrorCode.BUDGET, "Запрос больше лимита (71684 > 24000).")
+    text = format_review(failed(large), check())
+    assert REVIEW_TOO_MUCH in text and "недоступна" not in text and "71684" not in text
+    spent = format_review(failed(AiUnavailable(AiErrorCode.BUDGET, BUDGET_MESSAGE)), check())
+    assert REVIEW_CARD_LIMIT in spent and "недоступна" not in spent
+    # The reviewer itself failed (the month's spend unread): nobody asked the model.
+    unread = format_review(None, check())
+    assert REVIEW_NOT_PREPARED in unread and "модель" not in unread
+
+
+async def test_a_card_too_large_for_the_request_says_so():
+    company = check()
+    review = await CardReviewer(
+        StubRecommendationProvider(), limits=AiLimits(max_request_chars=500)
+    ).review(company, assess(INN, company.snapshots), None)
+    assert review.outcome.error.code is AiErrorCode.BUDGET
+    assert REVIEW_TOO_MUCH in format_review(review, company)
 
 
 # --- review A on #96 ------------------------------------------------------------------
@@ -410,4 +449,4 @@ async def test_no_open_data_no_question_to_the_model():
     model = Priced(lambda request: answer(GOOD))
     review = await reviewer(model).review(company, assess(INN, company.snapshots), None)
     assert review.no_data and model.requests == []
-    assert "источник открытых данных не ответил" in format_review(review)
+    assert REVIEW_NO_DATA in format_review(review, company)
