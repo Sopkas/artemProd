@@ -1,10 +1,13 @@
-from datetime import date
+from collections.abc import Sequence
+from datetime import date, time
 
 from claims_assistant.application.analysis_pipeline import RunSummary
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
 from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
+from claims_assistant.domain.plural import companies
 from claims_assistant.domain.scoring import Priority
+from claims_assistant.domain.watchlist import WatchEntry
 
 START = (
     "Здравствуйте! Это «Помощник претензионщика».\n\n"
@@ -12,6 +15,8 @@ START = (
     "очередь и почему: объединяет долги, платежи и взаимодействия из ваших файлов со "
     "сведениями об организации, сообщениями о банкротстве и финансами.\n\n"
     "• «Проверить ИНН» — карточка одной организации.\n"
+    "• «Мониторинг» — каждый день проверяю ваш список и пишу, если появилось новое: "
+    "банкротство, суды, ФССП.\n"
     "• «Новая проверка» — список из Excel и отчёт с приоритетами.\n"
     "Подробнее — «Помощь»."
 )
@@ -19,6 +24,7 @@ HELP = (
     "Команды:\n"
     "/start — главное меню\n"
     "/inn — карточка одной организации по ИНН\n"
+    "/monitor — мониторинг: список организаций и ежедневные уведомления\n"
     "/check — новая проверка по файлу «Контрагенты»\n"
     "/status — состояние последней проверки\n"
     "/report — прислать отчёт по последней проверке ещё раз\n"
@@ -51,7 +57,8 @@ INN_CANCELLED = "Проверка отменена."
 NOTHING_TO_CANCEL = "Сейчас нечего отменять. Выберите пункт меню."
 FALLBACK = "Выберите пункт меню или отправьте /help, чтобы увидеть доступные команды."
 FILE_UNSUPPORTED = (
-    "Файлы принимаются только внутри новой проверки: нажмите «Новая проверка» или /check."
+    "Файлы принимаются внутри новой проверки («Новая проверка» или /check) и в мониторинге "
+    "(«Мониторинг» → «Добавить на мониторинг»)."
 )
 ERROR = "Не удалось обработать сообщение. Попробуйте ещё раз или отправьте /start."
 CHECK_FAILED = "Не удалось выполнить проверку. Попробуйте позже или отправьте /start."
@@ -425,3 +432,105 @@ def access_denied(user_id: int) -> str:
         f"Ваш Telegram ID: {user_id}\n"
         "Передайте его разработчику для подключения."
     )
+
+
+# --- S8-09: monitoring ---
+
+WATCH_UNAVAILABLE = "Мониторинг в этом запуске бота выключен."
+WATCH_RULES = (
+    "Пишу, когда появляется новое: дело о банкротстве, заявление или намерение кредитора "
+    "подать на банкротство, сообщение ЕФРСБ, исполнительное производство ФССП, "
+    "арбитражный иск к организации от 100 000 ₽, смена статуса. Первая проверка — точка "
+    "отсчёта: об изменениях пишу со следующей."
+)
+WATCH_ADD_PROMPT = (
+    "Пришлите ИНН сообщением — можно списком: через запятую, столбиком, вместе с "
+    "названиями. Или файл: отчёт из 1С с колонкой «ИНН» либо таблицу, где одна из колонок "
+    "называется «ИНН» (.xlsx или .xls, до 10 МБ).\n"
+    "Чтобы вернуться, нажмите «Отмена»."
+)
+WATCH_REMOVE_PROMPT = (
+    "Пришлите ИНН, которые убрать с мониторинга, — можно списком.\n"
+    "Чтобы вернуться, нажмите «Отмена»."
+)
+WATCH_NO_INN = (
+    "В сообщении не нашлось ИНН — 10 цифр у организации или 12 у ИП. "
+    "Пришлите ещё раз или нажмите «Отмена»."
+)
+WATCH_FILE_TYPE = "Нужен файл .xlsx или .xls. Пришлите другой файл или нажмите «Отмена»."
+WATCH_FILE_UNREADABLE = "Файл не удалось прочитать. Пришлите другой файл или ИНН сообщением."
+WATCH_MENU_HINT = "Выберите действие на клавиатуре ниже."
+WATCH_STEP_CANCELLED = "Отменено. " + WATCH_MENU_HINT
+WATCH_CLEAR_HINT = "Нажмите «Да, очистить список» или «Отмена»."
+WATCH_FILE_NOT_HERE = (
+    "Файл здесь не нужен: пришлите ИНН сообщением или нажмите «Отмена». Добавить список "
+    "файлом — «Добавить на мониторинг»."
+)
+BACK_TO_MENU = "Главное меню."
+UNWATCHED_SHORT = "Убрано с мониторинга"
+WATCH_LIST_EMPTY = "На мониторинге пока никого нет: «Добавить на мониторинг»."
+WATCH_CLEAR_EMPTY = "Список и так пуст."
+WATCH_CLEAR_KEPT = "Список не тронут."
+WATCH_FAILED = "Не удалось обновить список мониторинга. Попробуйте ещё раз позже."
+UNWATCH_ABSENT = "Этой организации уже нет на мониторинге."
+_RECENT = 5
+
+
+def watch_schedule(run_at: time, utc_offset_hours: int) -> str:
+    zone = "по Москве" if utc_offset_hours == 3 else f"(UTC{utc_offset_hours:+d})"
+    return f"Проверка — каждый день в {run_at:%H:%M} {zone}."
+
+
+def _watched(entry: WatchEntry) -> str:
+    return f"{entry.inn} — {entry.name}" if entry.name else entry.inn
+
+
+def watch_overview(entries: Sequence[WatchEntry], limit: int, schedule: str) -> str:
+    """The «Мониторинг» screen: how many, when, the newest few; the rest is the file."""
+    if not entries:
+        return "\n".join(
+            [
+                "🔔 Мониторинг: в списке пока никого нет.",
+                schedule,
+                "",
+                WATCH_RULES,
+                "",
+                "Нажмите «Добавить на мониторинг» и пришлите ИНН сообщением или файлом.",
+            ]
+        )
+    lines = [f"🔔 Мониторинг: {len(entries)} из {limit}.", schedule]
+    checked = [entry.last_checked_on for entry in entries if entry.last_checked_on]
+    if checked:
+        lines.append(f"Последняя проверка: {_date(max(checked))}.")
+    waiting = sum(1 for entry in entries if entry.last_checked_on is None)
+    if waiting:
+        lines.append(f"Ждут первой проверки: {waiting}.")
+    lines += ["", "Последние добавленные:"]
+    lines += [f"  {_watched(entry)}" for entry in entries[:_RECENT]]
+    if len(entries) > _RECENT:
+        lines.append(f"  …и ещё {len(entries) - _RECENT} — весь список: «Список файлом».")
+    lines += ["", WATCH_RULES]
+    return "\n".join(lines)
+
+
+def watch_added_footer(schedule: str) -> str:
+    return f"{schedule} Первая проверка — точка отсчёта: об изменениях пишу со следующей."
+
+
+def watch_clear_prompt(count: int) -> str:
+    return (
+        f"Убрать с мониторинга весь список — {companies(count)}? Прошлые проверки забудутся: "
+        "если добавить организацию снова, первая проверка станет новой точкой отсчёта."
+    )
+
+
+def watch_cleared(count: int) -> str:
+    return f"Список очищен: убрано {companies(count)}."
+
+
+def watch_file_caption(count: int, limit: int) -> str:
+    return f"Список на мониторинге: {count} из {limit}."
+
+
+def unwatched(inn: str, total: int, limit: int) -> str:
+    return f"ИНН {inn} убран с мониторинга. Сейчас на мониторинге: {total} из {limit}."

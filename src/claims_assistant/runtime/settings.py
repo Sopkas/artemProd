@@ -1,6 +1,7 @@
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -41,6 +42,27 @@ class AiSettings:
     month_rub_limit: Decimal = Decimal("1000")
 
 
+@dataclass(frozen=True, slots=True)
+class MonitoringSettings:
+    """S8-09: the daily monitoring. The hour is by BUSINESS_UTC_OFFSET_HOURS; whether a
+    quiet day gets its summary is the customer's call (S8-07), on until he says."""
+
+    enabled: bool = True
+    run_at: time = time(9, 0)
+    quiet_summary: bool = True
+    request_limit: int = 1000
+
+
+def _clock_time(values: dict[str, str | None], key: str, default: time) -> time:
+    raw = (values.get(key) or "").strip()
+    if not raw:
+        return default
+    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", raw)
+    if match is None:
+        raise ConfigurationError(f"{key}: укажите время ЧЧ:ММ, например 09:00.")
+    return time(int(match.group(1)), int(match.group(2)))
+
+
 def _money(values: dict[str, str | None], key: str, default: str) -> Decimal:
     """A rouble limit from the environment; never a float — this number is money."""
     raw = (values.get(key) or default).strip().replace(",", ".")
@@ -61,9 +83,9 @@ _ON = frozenset({"true", "1", "yes"})
 _OFF = frozenset({"false", "0", "no"})
 
 
-def _switch(values: dict[str, str | None], key: str) -> bool:
-    """An on/off setting: true/false, 1/0 or yes/no in any case; empty means off."""
-    raw = (values.get(key) or "false").strip().lower()
+def _switch(values: dict[str, str | None], key: str, default: str = "false") -> bool:
+    """An on/off setting: true/false, 1/0 or yes/no in any case; empty means the default."""
+    raw = (values.get(key) or default).strip().lower()
     if raw not in _ON | _OFF:
         raise ConfigurationError(f"{key}: допустимы true или false.")
     return raw in _ON
@@ -114,6 +136,7 @@ class Settings:
     # the card's open data go to the model; needs a provider (AI_PROVIDER) to work.
     ai_card_review: bool = False
     ai: AiSettings = AiSettings()
+    monitoring: MonitoringSettings = MonitoringSettings()
 
     @classmethod
     def load(cls, env_file: Path = Path(".env")) -> "Settings":
@@ -210,6 +233,14 @@ class Settings:
             ) from None
         if not -12 <= offset <= 14:
             raise ConfigurationError("BUSINESS_UTC_OFFSET_HOURS: допустимы значения от -12 до 14.")
+        monitoring = MonitoringSettings(
+            enabled=_switch(values, "MONITORING_ENABLED", "true"),
+            run_at=_clock_time(values, "MONITORING_TIME", time(9, 0)),
+            quiet_summary=_switch(values, "MONITORING_QUIET_SUMMARY", "true"),
+            request_limit=_number(
+                values, "MONITORING_REQUEST_LIMIT", 1000, integer=True, minimum=1
+            ),
+        )
         return cls(
             token=token,
             allowed_ids=allowed_ids,
@@ -225,6 +256,7 @@ class Settings:
             ai_send_comments=ai_send_comments,
             ai_card_review=ai_card_review,
             ai=ai,
+            monitoring=monitoring,
             database_path=database_path,
             storage_path=storage_path,
             external=external,
