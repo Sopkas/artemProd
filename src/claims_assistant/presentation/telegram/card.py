@@ -1,4 +1,10 @@
-"""Plain-text company card for Telegram (S1-03). Shows facts and limits, never a priority."""
+"""Plain-text company card for Telegram (S1-03).
+
+Two forms of one card. The brief one is what the user gets first: the conclusion with its
+mark in the first line, the reasons, the owner's key figures (customer's request,
+11.10.2026: less text, the point up front). The full one — every fact with its source,
+date and coverage — is sent on «Подробнее».
+"""
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -22,6 +28,9 @@ from claims_assistant.domain.indicators import (
     PaymentStatus,
 )
 from claims_assistant.domain.manual_checks import MANUAL_CHECKS
+from claims_assistant.domain.scoring import Assessment, Priority, combine
+
+from .texts import PRIORITY_MARKS
 
 DEMO_BANNER = "ДЕМО: синтетические данные, не сведения о реальной организации."
 
@@ -60,6 +69,134 @@ _CARD_BUDGET = TELEGRAM_MESSAGE_LIMIT - 96
 _MAX_CONTRACTS = 5  # the rest are counted: the card is one Telegram message
 
 
+# The words of the first line, after the mark of the priority (``texts.PRIORITY_MARKS``).
+_HEADLINES = {
+    Priority.CRITICAL: "Критичный — требует внимания",
+    Priority.HIGH: "Высокий — требует внимания",
+    Priority.MEDIUM: "Средний — есть основания присмотреться",
+    Priority.LOW: "Низкий — проверено полностью, значимых сигналов нет",
+    Priority.UNKNOWN: "Недостаточно данных — проверка неполная",
+}
+_PART_TITLES = {
+    Section.COMPANY.value: "организация",
+    Section.BANKRUPTCY.value: "сообщения о банкротстве",
+    Section.FINANCES.value: "финансы",
+    "internal": "внутренние данные",
+}
+_MAX_REASONS = 3
+DETAILS_HINT = "Все факты с источниками и датами — «Подробнее»."
+# The register answers by INN whatever the company's role in the case (#52): it lists the
+# creditor's messages too. Without the owner's data they alone do not make the mark.
+_ROLE_UNCONFIRMED = "unresolved_bankruptcy_event"
+ROLE_UNCONFIRMED_LINE = (
+    f"{PRIORITY_MARKS[Priority.MEDIUM]} Есть сообщения ЕФРСБ — роль организации не подтверждена"
+)
+
+
+# Neither good nor bad: the external sections were read in full and said nothing alarming,
+# but there is no data of the owner's, so no priority of the list.
+EXTERNAL_CLEAN_MARK = "ℹ️"
+
+
+def _headline(assessment: Assessment, internal: InternalContext | None) -> str:
+    priority = assessment.priority
+    if internal is not None:
+        return f"{PRIORITY_MARKS[priority]} {_HEADLINES[priority]}"
+    # Without the owner's data there is no priority of the list: only what the external
+    # sections say, and whether they were read in full.
+    if assessment.signals:
+        # The mark comes from the other external rules; the register's messages stay
+        # among the reasons below.
+        others = [signal for signal in assessment.signals if signal.code != _ROLE_UNCONFIRMED]
+        if not others:
+            return ROLE_UNCONFIRMED_LINE
+        priority = combine(others, base_complete=False)
+        return f"{PRIORITY_MARKS[priority]} {_HEADLINES[priority]} (по внешним данным)"
+    external = [part for part in assessment.coverage if part != "internal"]
+    if all(assessment.coverage[part] is Coverage.COMPLETE for part in external):
+        # Not ✅: without the owner's data the check is not complete, and a green tick read
+        # first would pass for «reliable» (review A on #86). ✅ belongs to Priority.LOW only.
+        return f"{EXTERNAL_CLEAN_MARK} Во внешних данных значимых сигналов нет"
+    return f"{PRIORITY_MARKS[Priority.UNKNOWN]} Внешние данные неполные"
+
+
+def _company_name(check: CompanyCheck, internal: InternalContext | None) -> str | None:
+    for snapshot in check.snapshots:
+        for fact in snapshot.facts:
+            if fact.kind is FactKind.COMPANY_NAME and isinstance(fact.value, str):
+                return fact.value
+    return internal.row.name if internal is not None else None
+
+
+def _brief_internal(context: InternalContext) -> list[str]:
+    row = context.row
+    figures = []
+    if row.debt is not None:
+        figures.append(f"Долг {_money(row.debt, 'RUB')}")
+    if row.overdue_days is not None:
+        figures.append(f"просрочка {row.overdue_days} дн.")
+    payment = context.indicators.payment
+    if payment.status is PaymentStatus.CONFIRMED:
+        figures.append(f"платёж {_date(payment.last_payment)}")
+    elif payment.status is PaymentStatus.NONE_SINCE:
+        figures.append(f"поступлений нет с {_date(payment.no_payments_since)}")
+    lines = [f"Внутренние данные — проверка от {_date(context.run.analysis_date)}"]
+    if figures:
+        line = " · ".join(figures)
+        lines.append(line[0].upper() + line[1:])
+    if context.contracts:
+        lines.append(f"Договоры с просрочкой: {len(context.contracts)}")
+    if context.interactions:
+        last = context.interactions[-1]
+        lines.append(
+            f"Взаимодействия: {len(context.interactions)}, последнее {_date(last.happened_on)}"
+        )
+    return lines
+
+
+def format_brief(
+    check: CompanyCheck, assessment: Assessment, internal: InternalContext | None = None
+) -> str:
+    """The card in a few lines: the conclusion first, then why, then the owner's figures."""
+    lines: list[str] = []
+    if check.mode == "demo":
+        lines += [DEMO_BANNER, ""]
+    lines.append(_headline(assessment, internal))
+    name = _company_name(check, internal)
+    lines.append(f"{name}, ИНН {check.inn}" if name else f"ИНН {check.inn}")
+    if assessment.signals:
+        lines.append("")
+        lines += [f"• {signal.reason}" for signal in assessment.signals[:_MAX_REASONS]]
+        if len(assessment.signals) > _MAX_REASONS:
+            lines.append(f"• ещё причин: {len(assessment.signals) - _MAX_REASONS}")
+    if internal is not None:
+        lines.append("")
+        lines += _brief_internal(internal)
+    else:
+        lines += [
+            "",
+            "Своих данных по этой организации нет: приоритет считается в проверке списка.",
+        ]
+    gaps = [
+        _PART_TITLES.get(part, part)
+        for part, coverage in assessment.coverage.items()
+        if coverage is not Coverage.COMPLETE and (part != "internal" or internal is not None)
+    ]
+    if gaps:
+        lines.append("Проверено не полностью: " + ", ".join(gaps) + ".")
+        # Why, when the source gave one reason for all of it: a spent limit or a lost
+        # connection reads differently from «nothing found» and must not be a button away.
+        causes = {
+            snapshot.error.message
+            for snapshot in check.snapshots
+            if snapshot.status is not FetchStatus.OK and snapshot.error is not None
+        }
+        if len(causes) == 1:
+            lines.append(f"Причина: {causes.pop()}")
+    lines += ["", *(f"{manual.title}: бот не проверяет." for manual in MANUAL_CHECKS), DETAILS_HINT]
+    return "\n".join(lines)
+
+
 def format_card(check: CompanyCheck, internal: InternalContext | None = None) -> str:
     lines: list[str] = []
     if check.mode == "demo":
@@ -73,7 +210,7 @@ def format_card(check: CompanyCheck, internal: InternalContext | None = None) ->
         "",
         *(manual.line() for manual in MANUAL_CHECKS),
         "",
-        "Карточка показывает полученные факты и полноту проверки без оценки очерёдности.",
+        "Здесь факты и полнота проверки; вывод — в краткой карточке.",
     ]
     if internal is None:
         return "\n".join(lines + footer)

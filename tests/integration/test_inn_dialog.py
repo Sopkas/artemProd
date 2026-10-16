@@ -11,6 +11,9 @@ from claims_assistant.presentation.telegram.handlers import create_dispatcher
 VALID_INN = "1234567894"
 
 
+MAIN_MENU = ["Проверить ИНН", "Новая проверка", "Статус", "Отчёт", "О сервисе", "Помощь"]
+
+
 def buttons(reply: SendMessage) -> list[str]:
     return [button.text for row in reply.reply_markup.keyboard for button in row]
 
@@ -43,17 +46,19 @@ async def test_main_menu_has_check_inn_button(bot, update_factory):
 async def test_valid_inn_shows_the_demo_card_and_dialog_ends(bot, update_factory):
     dispatcher = create_dispatcher(frozenset({42}))
     reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", f" {VALID_INN} ")
+    # The brief card: the conclusion with its mark right under the demo banner.
     assert reply.text.startswith(DEMO_BANNER)
     assert f"ИНН {VALID_INN}" in reply.text
-    assert "Организация" in reply.text
-    assert buttons(reply) == [
-        "Проверить ИНН",
-        "Новая проверка",
-        "Статус",
-        "Отчёт",
-        "О сервисе",
-        "Помощь",
-    ]
+    assert reply.text.splitlines()[2].startswith("ℹ️ ")  # no data of the user's: not ✅
+    assert "Источник:" not in reply.text and len(reply.text) < 500
+    assert buttons(reply) == ["Подробнее", *MAIN_MENU]
+    # «Подробнее» sends the full card for the same INN and gives the main menu back.
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее")
+    assert reply.text.startswith(DEMO_BANNER)
+    assert f"ИНН {VALID_INN}" in reply.text
+    assert "Организация — проверено полностью" in reply.text
+    assert reply.text.count("Источник:") == 3
+    assert buttons(reply) == MAIN_MENU
     # The dialog is over: plain text goes back to the fallback, not to the validator.
     reply = await feed(dispatcher, bot, update_factory, "привет")
     assert reply.text == texts.FALLBACK
@@ -169,15 +174,13 @@ async def test_group_cannot_enter_private_dialog(bot, update_factory):
 async def test_configured_scenario_is_used_for_the_card(bot, update_factory):
     dispatcher = create_dispatcher(frozenset({42}), DemoCompanyDataProvider(DemoScenario.ERROR))
     reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
+    # Nothing was read: the brief card says so and names the source's one reason.
+    assert "❔ Внешние данные неполные" in reply.text
+    assert "Причина: Синтетический пример сбоя источника." in reply.text
+    assert "✅" not in reply.text
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее")
     assert reply.text.count("— раздел недоступен") == 3
-    assert buttons(reply) == [
-        "Проверить ИНН",
-        "Новая проверка",
-        "Статус",
-        "Отчёт",
-        "О сервисе",
-        "Помощь",
-    ]
+    assert buttons(reply) == MAIN_MENU
 
 
 async def test_provider_bug_gives_a_safe_reply_and_leaves_the_dialog(bot, update_factory, caplog):
@@ -213,6 +216,10 @@ async def test_card_works_through_the_guarded_provider(bot, update_factory):
     dispatcher = create_dispatcher(frozenset({42}), provider)
     reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
     assert reply.text.startswith(DEMO_BANNER)
+    # The register's message is the reason of the first line; its text is in the details.
+    assert "⚠️ Есть сообщения ЕФРСБ — роль организации не подтверждена" in reply.text
+    assert "ЕФРСБ" in reply.text
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее")
     assert "наблюдени" in reply.text
 
 
@@ -253,7 +260,64 @@ async def test_card_includes_the_owners_data_after_a_finished_check(bot, update_
     )
     reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", VALID_INN)
     assert "Внутренние данные — проверка от 01.09.2026" in reply.text
+    assert "Долг 10,00 ₽" in reply.text
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее")
+    assert "Внутренние данные — проверка от 01.09.2026" in reply.text
     assert "Долг: 10,00 ₽" in reply.text
     # Another allowed user gets the plain card: the package is not theirs.
     reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", VALID_INN, user_id=43)
     assert "Внутренние данные" not in reply.text
+    assert "Своих данных по этой организации нет" in reply.text
+    # …and «Подробнее» for them is their own card of the INN, without the owner's block.
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее", user_id=43)
+    assert f"ИНН {VALID_INN}" in reply.text and "Внутренние данные" not in reply.text
+
+
+async def test_details_without_a_card_asks_to_check_an_inn_first(bot, update_factory):
+    dispatcher = create_dispatcher(frozenset({42}))
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее")
+    assert reply.text == texts.CARD_NO_DETAILS
+    assert buttons(reply) == MAIN_MENU
+    # The remembered INN does not outlive another action of the menu.
+    await feed(dispatcher, bot, update_factory, "/inn", VALID_INN, "/start")
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее")
+    assert reply.text == texts.CARD_NO_DETAILS
+
+
+class FailsThenAnswers:
+    """The source fails the first time and answers in full afterwards. A failure is not
+    cached, so a second request would show the user a card other than the brief one."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def fetch(self, request: CompanyDataRequest):
+        self.calls += 1
+        scenario = DemoScenario.ERROR if self.calls == 1 else DemoScenario.ORDINARY
+        return await DemoCompanyDataProvider(scenario).fetch(request)
+
+
+async def test_details_send_the_card_of_the_same_answer_without_asking_the_source(
+    bot, update_factory
+):
+    """«Подробнее» is the rest of the card already shown: no new request to the source
+    (3 of the day's 100 at Checko) and no other picture than the brief card's (#86 review)."""
+    provider = FailsThenAnswers()
+    dispatcher = create_dispatcher(frozenset({42}), provider)
+    reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
+    assert "❔ Внешние данные неполные" in reply.text
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее")
+    assert reply.text.count("— раздел недоступен") == 3
+    assert provider.calls == 1
+
+
+async def test_details_typed_inside_another_dialog_leave_that_dialog_alone(bot, update_factory):
+    """The word is a button of the brief card only; typed at the date step it is a bad date,
+    and the new check goes on (#86 review)."""
+    dispatcher = create_dispatcher(frozenset({42}))
+    reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN, "Новая проверка")
+    assert reply.text == texts.CHECK_DATE_PROMPT
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее")
+    assert reply.text == texts.CHECK_DATE_INVALID
+    reply = await feed(dispatcher, bot, update_factory, "01.10.2026")
+    assert reply.text != texts.CHECK_DATE_INVALID

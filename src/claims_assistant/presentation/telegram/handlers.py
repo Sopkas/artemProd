@@ -28,7 +28,7 @@ from claims_assistant.application.check_package import (
 )
 from claims_assistant.application.company_data import CompanyDataProvider
 from claims_assistant.application.imports import SheetReader
-from claims_assistant.application.internal_context import internal_context
+from claims_assistant.application.internal_context import card_assessment, internal_context
 from claims_assistant.application.package_checks import (
     PACKAGE_SHEET,
     PackageIntegrityError,
@@ -59,7 +59,7 @@ from claims_assistant.infrastructure.storage.local import LocalFileStorage
 
 from . import texts
 from .access import AccessMiddleware
-from .card import format_card
+from .card import format_brief, format_card
 from .menu import (
     ADD_DEBT_REPORT,
     ADD_HISTORY,
@@ -67,6 +67,7 @@ from .menu import (
     ADD_PAYMENTS,
     CANCEL,
     CHECK_INN,
+    DETAILS,
     LAUNCH,
     NEW_CHECK,
     PAYMENTS_EXPORT,
@@ -75,6 +76,7 @@ from .menu import (
     STATUS,
     TODAY,
     cancel_menu,
+    card_menu,
     date_menu,
     launch_menu,
     main_menu,
@@ -477,6 +479,24 @@ def create_dispatcher(
         await state.clear()
         await message.answer(texts.INN_CANCELLED, reply_markup=main_menu())
 
+    async def own_data(owner_id: int, check):
+        """S4-04: the owner's own files on this company, if a finished check names it."""
+        try:
+            finances = next((s for s in check.snapshots if s.section is Section.FINANCES), None)
+            return await internal_context(
+                owner_id,
+                check.inn,
+                repository,
+                files,
+                reader,
+                finances=finances,
+                steps=repository,
+            )
+        except Exception as exc:
+            # The card is still useful without the internal block; log the type only.
+            logger.error("internal_context_failed error_type=%s", type(exc).__name__)
+            return None
+
     @router.message(InnDialog.waiting_for_inn, F.text)
     async def receive_inn(message: Message, state: FSMContext) -> None:
         try:
@@ -491,23 +511,25 @@ def create_dispatcher(
             await message.answer(texts.CHECK_FAILED, reply_markup=main_menu())
             return
         await state.clear()
-        # S4-04: the owner's own files on this company, if a finished check names it.
-        internal = None
-        try:
-            finances = next((s for s in check.snapshots if s.section is Section.FINANCES), None)
-            internal = await internal_context(
-                message.from_user.id,
-                check.inn,
-                repository,
-                files,
-                reader,
-                finances=finances,
-                steps=repository,
-            )
-        except Exception as exc:
-            # The card is still useful without the internal block; log the type only.
-            logger.error("internal_context_failed error_type=%s", type(exc).__name__)
-        await message.answer(format_card(check, internal), reply_markup=main_menu())
+        internal = await own_data(message.from_user.id, check)
+        # The brief card first: the conclusion in its first line. «Подробнее» sends the full
+        # card of this same answer, kept with the dialog: no new request to the source (a
+        # failed section is not cached) and no other picture than the brief card's.
+        await state.update_data(card_text=format_card(check, internal))
+        await message.answer(
+            format_brief(check, card_assessment(check, internal), internal),
+            reply_markup=card_menu(),
+        )
+
+    # Outside a dialog only: typed at a step of another dialog, the word is that step's.
+    @router.message(StateFilter(None), F.text == DETAILS)
+    async def card_details(message: Message, state: FSMContext) -> None:
+        card = (await state.get_data()).get("card_text")
+        await state.clear()
+        if not card:
+            await message.answer(texts.CARD_NO_DETAILS, reply_markup=main_menu())
+            return
+        await message.answer(card, reply_markup=main_menu())
 
     # --- new check: date → file → launch ---
 

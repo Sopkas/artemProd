@@ -65,8 +65,10 @@ async def test_summary_then_file_and_delivery_is_recorded(bot, tmp_path):
     assert message.text == texts.run_finished(run, SUMMARY)
     assert "завершена частично" in message.text
     assert "Организаций: 3, проверено полностью: 2" in message.text
-    assert "критичный — 1" in message.text and "низкий — 1" in message.text
-    assert "недостаточно данных — 1" in message.text
+    # One line a priority, its mark first.
+    assert "❗️ Критичный — 1" in message.text.splitlines()
+    assert "✅ Низкий — 1" in message.text.splitlines()
+    assert "❔ Недостаточно данных — 1" in message.text.splitlines()
     assert "демонстрационные" in message.text
     assert isinstance(document, SendDocument) and document.chat_id == OWNER
     assert document.caption == texts.report_caption(run)
@@ -111,3 +113,16 @@ async def test_send_failure_marks_delivery_failed_and_keeps_the_report(bot, tmp_
     artifact = await repository.get_report(OWNER, run.id)
     assert artifact.delivery is DeliveryStatus.FAILED and artifact.delivery_error
     assert files.read(artifact.stored_path) == b"xlsx-bytes"
+
+
+async def test_a_summary_with_no_priority_says_so(tmp_path):
+    """Every row had errors: the summary says «Приоритетов нет» instead of leaving a gap."""
+    from dataclasses import replace
+
+    run = await finished(
+        InMemoryAnalysisRepository(),
+        LocalFileStorage(tmp_path / "uploads"),
+        outcome=RunOutcome(RunStatus.PARTIAL, "Организаций с неполными: 1."),
+    )
+    text = texts.run_finished(run, replace(SUMMARY, priorities={}))
+    assert "Приоритетов нет." in text.splitlines()

@@ -301,11 +301,15 @@ async def test_live_card_through_telegram_without_real_api(bot, update_factory):
     dispatcher = create_dispatcher(frozenset({42}), provider(Transport()))
     await dispatcher.feed_update(bot, update_factory("/inn"))
     await dispatcher.feed_update(bot, update_factory(INN))
+    brief = bot.session.calls[-1].text
+    assert "ИНН " + INN in brief
+    assert "синтетические данные" not in brief
+    await dispatcher.feed_update(bot, update_factory("Подробнее"))
     text = bot.session.calls[-1].text
     assert "ИНН " + INN in text
     assert "синтетические данные" not in text
     assert "checko-company-v2" in text
-    assert KEY not in text
+    assert KEY not in text and KEY not in brief
 
 
 async def test_source_error_is_visible_in_live_card_without_fallback(bot, update_factory):
@@ -315,9 +319,11 @@ async def test_source_error_is_visible_in_live_card_without_fallback(bot, update
     await dispatcher.feed_update(bot, update_factory("/inn"))
     await dispatcher.feed_update(bot, update_factory(INN))
     text = bot.session.calls[-1].text
+    # The reason is in the brief card itself, not a button away, and nothing reads as «ok».
     assert "Достигнут лимит запросов Checko" in text
     assert "ДЕМО" not in text
     assert "сообщений не найдено" not in text
+    assert "✅" not in text
 
 
 async def test_full_name_is_used_when_short_name_is_missing():

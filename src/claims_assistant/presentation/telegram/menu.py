@@ -13,6 +13,7 @@ ADD_INTERACTIONS = "Добавить взаимодействия"
 ADD_DEBT_REPORT = "Добавить отчёт по договорам"
 PAYMENTS_TEMPLATE = "По нашему шаблону"
 PAYMENTS_EXPORT = "Выгрузка из 1С"
+DETAILS = "Подробнее"
 
 
 def _keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
@@ -25,6 +26,11 @@ def _keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
 
 def main_menu() -> ReplyKeyboardMarkup:
     return _keyboard([[CHECK_INN, NEW_CHECK, STATUS], [REPORT, "О сервисе", "Помощь"]])
+
+
+def card_menu() -> ReplyKeyboardMarkup:
+    """After the brief card: the full one is a button away, the main menu stays."""
+    return _keyboard([[DETAILS], [CHECK_INN, NEW_CHECK, STATUS], [REPORT, "О сервисе", "Помощь"]])
 
 
 def cancel_menu() -> ReplyKeyboardMarkup:
