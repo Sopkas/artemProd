@@ -370,13 +370,25 @@ SCENARIOS: tuple[BenchScenario, ...] = (
         # The caveat itself: the messages are someone else's cases, or the role is not
         # confirmed. Without it «высокий приоритет из-за сообщений ЕФРСБ о банкротстве»
         # passed (gemini-3.5-flash-lite, bench v2) — true, and read as «he is bankrupt».
-        mentions=("кредитор", "роль", "чуж", "не подтвержд", "не относ", "не является должник"),
+        # Word starts, not substrings: «роль» sits inside «контроль» and «чуж» inside
+        # «отчуждение» — both common in this talk, and either let the miss pass (A on #95).
+        mentions=(
+            r"\bкредитор",
+            r"\bрол[ьиеяю]",
+            r"\bчуж",
+            "не подтвержд",
+            "не относ",
+            "не является должник",
+        ),
         promises_expected=0,
         read_me=True,
         notes=(
             "Самая дорогая ошибка из возможных: письмо о банкротстве живому клиенту.",
             "Автоматически ловится прямое утверждение и ответ без оговорки о роли; "
             "остальное читает человек.",
+            "«Кредитор» засчитывается и во фразе «кредиторы подали заявление о "
+            "банкротстве» — это утверждение, а не оговорка; словарь его не отличит, "
+            "читает человек (A на #95).",
         ),
     ),
     BenchScenario(

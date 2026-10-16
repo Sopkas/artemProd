@@ -186,6 +186,22 @@ def test_a_word_far_from_its_gap_is_not_read_as_one():
     assert judge(scenario, _outcome(result))
 
 
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "Рекомендуется усилить контроль за оплатой.",  # «роль» inside «контроль»
+        "Возможно отчуждение имущества.",  # «чуж» inside «отчуждение»
+    ],
+)
+def test_a_word_inside_another_is_not_the_role_caveat(tail):
+    """A on #95: the very miss the check is for passed with an ordinary closing phrase."""
+    scenario = next(item for item in SCENARIOS if item.id == "creditor_not_debtor")
+    text = f"Высокий приоритет установлен из-за наличия сообщений ЕФРСБ о банкротстве. {tail}"
+    _, result = _review(scenario, {"explanation": text})
+    assert isinstance(result, Explanation), result
+    assert judge(scenario, _outcome(result))
+
+
 def test_efrsb_messages_without_the_role_caveat_are_a_complaint():
     """gemini-3.5-flash-lite, bench v2: true, and read by a person as «he is bankrupt»."""
     scenario = next(item for item in SCENARIOS if item.id == "creditor_not_debtor")
