@@ -132,6 +132,8 @@ def test_revenue_drop_of_exactly_30_percent_is_medium():
     assert [s.code for s in result.signals] == ["revenue_drop_30"]
     assert result.priority is Priority.MEDIUM
     assert result.signals[0].fact_ids == ("revenue-2024", "revenue-2025")
+    assert result.signals[0].reason == "Выручка снизилась на 30,0% за 2024–2025 годы."
+    assert result.signals[0].value == "-30.0%"
 
 
 def test_loss_and_revenue_drop_are_two_medium_signals_so_high():

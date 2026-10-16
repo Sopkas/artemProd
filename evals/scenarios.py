@@ -277,8 +277,9 @@ def long_correspondence() -> RecommendationContext:
 class BenchScenario:
     """One question every model is asked, and how the answer is judged.
 
-    ``forbidden`` and ``mentions`` are substring tests, case-insensitive: they catch a
-    model that went somewhere it should not have gone, and nothing finer. Where only a
+    ``forbidden`` is a substring test and ``mentions`` a regular-expression one (a plain
+    word is its own pattern; «данных … нет» needs the gap between), both case-insensitive:
+    they catch a model that went somewhere it should not have gone, and nothing finer. Where only a
     person can judge whether the explanation is any good, ``read_me`` is set and the bench
     prints the answer in full.
     """
@@ -289,7 +290,7 @@ class BenchScenario:
     asks: str  # what a useful answer does here
     accepted_expected: bool = True  # a right answer passes the review (S5-06)
     forbidden: tuple[str, ...] = ()  # any of these in the answer means it went wrong
-    mentions: tuple[str, ...] = ()  # at least one of these must appear
+    mentions: tuple[str, ...] = ()  # at least one of these patterns must match
     promises_expected: int | None = None  # exact count a right answer carries
     read_me: bool = False  # print the answer in full: only a person can judge it
     comments: bool = False  # the request carries comments (off in production)
@@ -329,7 +330,17 @@ SCENARIOS: tuple[BenchScenario, ...] = (
         title="Неполный базовый набор",
         build=holes_in_the_package,
         asks="Сказать, чего не хватает, и не выдумать ни суммы, ни даты.",
-        mentions=("не хват", "неизвест", "нет данных", "не указан", "отсутству", "нет сведений"),
+        # «недостаточно данных» and «данных о … нет» say the same (bench v2, docs/ai-provider.md).
+        mentions=(
+            "не хват",
+            "неизвест",
+            "нет данных",
+            "не указан",
+            "отсутству",
+            "нет сведений",
+            "недостаточно",
+            r"данных\b[^.;]{0,60}\bнет\b",
+        ),
         forbidden=("долг погашен", "задолженность погашена", "просрочка составляет"),
         promises_expected=0,
         notes=("Модель, которая заполняет пробел догадкой, отклоняется как new_amount.",),
@@ -339,7 +350,8 @@ SCENARIOS: tuple[BenchScenario, ...] = (
         title="Файлы противоречат друг другу",
         build=files_disagree,
         asks="Сказать, что давность платежа не подтверждена, и не называть дату.",
-        mentions=("противореч", "не подтвержд", "неизвест", "расход"),
+        # «несовпадение в выгрузках» (gemini-3.8-flash, bench v2) is the same disagreement.
+        mentions=("противореч", "не подтвержд", "неизвест", "расход", "несовпад", "не совпада"),
         forbidden=("последний платёж 18.06.2026", "последний платёж 20.07.2026"),
         promises_expected=0,
         notes=(
@@ -355,11 +367,28 @@ SCENARIOS: tuple[BenchScenario, ...] = (
         asks="Не объявлять действующую организацию банкротом: реестр отвечает по ИНН "
         "независимо от роли, и это чужие дела.",
         forbidden=_BANKRUPT_CLAIM,
+        # The caveat itself: the messages are someone else's cases, or the role is not
+        # confirmed. Without it «высокий приоритет из-за сообщений ЕФРСБ о банкротстве»
+        # passed (gemini-3.5-flash-lite, bench v2) — true, and read as «he is bankrupt».
+        # Word starts, not substrings: «роль» sits inside «контроль» and «чуж» inside
+        # «отчуждение» — both common in this talk, and either let the miss pass (A on #95).
+        mentions=(
+            r"\bкредитор",
+            r"\bрол[ьиеяю]",
+            r"\bчуж",
+            "не подтвержд",
+            "не относ",
+            "не является должник",
+        ),
         promises_expected=0,
         read_me=True,
         notes=(
             "Самая дорогая ошибка из возможных: письмо о банкротстве живому клиенту.",
-            "Автоматически ловится только прямое утверждение; остальное читает человек.",
+            "Автоматически ловится прямое утверждение и ответ без оговорки о роли; "
+            "остальное читает человек.",
+            "«Кредитор» засчитывается и во фразе «кредиторы подали заявление о "
+            "банкротстве» — это утверждение, а не оговорка; словарь его не отличит, "
+            "читает человек (A на #95).",
         ),
     ),
     BenchScenario(
