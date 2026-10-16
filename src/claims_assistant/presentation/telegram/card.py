@@ -134,8 +134,14 @@ EXTERNAL_CLEAN_MARK = "ℹ️"
 # than the first one; otherwise only the direction.
 TREND_MARKS = {Trend.UP: "🔺", Trend.DOWN: "🔻", Trend.FLAT: "➖"}
 _TREND_TITLES = {FactKind.REVENUE: "Выручка", FactKind.NET_PROFIT: "Чистая прибыль"}
-# A figure to read at a glance; the exact sums are in «Подробнее».
-_SCALES = ((Decimal(10**9), "млрд", 1), (Decimal(10**6), "млн", 1), (Decimal(10**3), "тыс.", 0))
+# A figure to read at a glance; the exact sums are in «Подробнее». Smallest first: a figure
+# is printed at the first scale where, rounded, it stays under a thousand.
+_SCALES = (
+    (Decimal(1), "", 0),
+    (Decimal(10**3), "тыс.", 0),
+    (Decimal(10**6), "млн", 1),
+    (Decimal(10**9), "млрд", 1),
+)
 
 
 def _headline(assessment: Assessment, internal: InternalContext | None) -> str:
@@ -206,15 +212,16 @@ def _percent(trend: FinanceTrend) -> str:
 
 
 def _short_figure(value: Decimal) -> str:
-    """«112 млн ₽», «1,5 млн ₽», «760 тыс. ₽», «убыток 300 тыс. ₽»."""
+    """«112 млн ₽», «1,5 млн ₽», «760 тыс. ₽», «убыток 300 тыс. ₽». The scale is chosen after
+    rounding: 999 950 ₽ is «1 млн ₽», not «1 000 тыс. ₽» (review B on #97)."""
     amount = abs(value)
-    text = f"{amount:,.0f}".replace(",", " ")
     for scale, word, places in _SCALES:
-        if amount >= scale:
-            figure = f"{amount / scale:,.{places}f}".replace(",", " ").replace(".", ",")
-            text = f"{figure.removesuffix(',0')} {word}"
+        figure = (amount / scale).quantize(Decimal(1).scaleb(-places))
+        if figure < 1000:
             break
-    return f"{'убыток ' if value < 0 else ''}{text} ₽"
+    text = f"{figure:,f}".replace(",", " ").replace(".", ",").removesuffix(",0")
+    unit = f" {word}" if word else ""
+    return f"{'убыток ' if value < 0 else ''}{text}{unit} ₽"
 
 
 def _brief_courts(check: CompanyCheck) -> str | None:
