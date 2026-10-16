@@ -10,8 +10,11 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import ROUND_DOWN, Decimal
 
+from claims_assistant.application.ai_guard import BUDGET_MESSAGE
+from claims_assistant.application.card_review import CardReview
 from claims_assistant.application.check_company import CompanyCheck
 from claims_assistant.application.internal_context import InternalContext
+from claims_assistant.application.recommendation import AiErrorCode
 from claims_assistant.domain.external import (
     CompanyStatus,
     Coverage,
@@ -538,3 +541,54 @@ def _date(value: date | datetime | None) -> str:
     if value is None:
         return "дата неизвестна"
     return value.strftime("%d.%m.%Y")
+
+
+# S8-05: the model's reading, a message of its own under the card. The card is the rules'
+# and stays whatever the model says; the reading is marked as the model's. It names the
+# company: it comes up to 90 s after the card, and the user may have checked another INN
+# in between (updates are handled concurrently).
+REVIEW_TITLE = "🤖 Разбор ИИ по открытым данным"
+REVIEW_FOOTER = "Проверен по данным карточки; приоритет — по правилам."
+REVIEW_NONE = "🤖 Разбора ИИ нет ({who}): {why}. Карточка — по правилам."
+REVIEW_MONTH = "лимит расходов на ИИ за месяц исчерпан, модель не спрашивали"
+REVIEW_REJECTED = "ответ модели не прошёл проверку по данным карточки"
+REVIEW_TOO_MUCH = "данных слишком много для одного разбора, модель не спрашивали"
+REVIEW_CARD_LIMIT = "исчерпан лимит расходов на одну карточку"
+REVIEW_TIMEOUT = "модель не ответила вовремя"
+REVIEW_FAILED = "модель недоступна"
+REVIEW_NOT_PREPARED = "не удалось подготовить разбор"
+REVIEW_NO_DATA = "источник открытых данных не ответил, модель не спрашивали"
+
+
+def format_review(
+    review: CardReview | None, check: CompanyCheck, internal: InternalContext | None = None
+) -> str:
+    """The reading under the card, or one line on why there is none."""
+    name = _company_name(check, internal)
+    who = f"{name}, ИНН {check.inn}" if name else f"ИНН {check.inn}"
+    if review is not None and review.text is not None:
+        return f"{REVIEW_TITLE} — {who}\n\n{review.text}\n\n{REVIEW_FOOTER}"
+    return REVIEW_NONE.format(who=who, why=_no_review(review))
+
+
+def _no_review(review: CardReview | None) -> str:
+    """Why there is no reading, in the user's words: the guard's own messages are for the
+    log («Запрос больше лимита (71684 > 24000).»), and not every failure is the model's."""
+    if review is None:
+        # The reviewer itself failed — the month's spend unread, say: nobody asked the model.
+        return REVIEW_NOT_PREPARED
+    if review.no_data:
+        # Not one section answered: nothing to read, so the model was not paid to say so.
+        return REVIEW_NO_DATA
+    if review.month_exhausted:
+        return REVIEW_MONTH
+    outcome = review.outcome
+    if outcome is not None and outcome.rejected is not None:
+        return REVIEW_REJECTED
+    error = outcome.error if outcome is not None else None
+    if error is not None and error.code is AiErrorCode.BUDGET:
+        # Our limits, not the model: the card's money is spent, or the request is too large.
+        return REVIEW_CARD_LIMIT if error.message == BUDGET_MESSAGE else REVIEW_TOO_MUCH
+    if error is not None and error.code is AiErrorCode.TIMEOUT:
+        return REVIEW_TIMEOUT
+    return REVIEW_FAILED

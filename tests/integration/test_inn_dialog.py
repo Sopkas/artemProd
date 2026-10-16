@@ -5,11 +5,17 @@ from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import DeleteMessage, SendChatAction, SendMessage
 
+from claims_assistant.application.card_review import CardReview
 from claims_assistant.application.company_data import CompanyDataRequest
 from claims_assistant.domain.external import Section
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 from claims_assistant.presentation.telegram import texts
-from claims_assistant.presentation.telegram.card import DEMO_BANNER
+from claims_assistant.presentation.telegram.card import (
+    DEMO_BANNER,
+    REVIEW_MONTH,
+    REVIEW_NOT_PREPARED,
+    REVIEW_TITLE,
+)
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 
 # Synthetic value built for the checksum, not a real organization.
@@ -415,3 +421,62 @@ async def test_card_stands_even_if_the_note_cannot_be_deleted(bot, update_factor
     assert f"ИНН {VALID_INN}" in reply.text
     assert reply.text != texts.ERROR
     assert isinstance(bot.session.calls[-1], DeleteMessage)
+
+
+# --- S8-05: the model's reading under the card ---
+
+
+class Reviewer:
+    """The card reviewer as the dialog sees it: one call per card, or a failure."""
+
+    def __init__(self, review=None, fail: bool = False) -> None:
+        self.review_ = review
+        self.fail = fail
+        self.calls = []
+
+    async def review(self, check, assessment, internal):
+        self.calls.append((check.inn, assessment.inn, internal))
+        if self.fail:
+            raise RuntimeError("private debtor note")
+        return self.review_
+
+
+async def test_the_reading_comes_after_the_card_with_its_own_note(bot, update_factory):
+
+    reviewer = Reviewer(CardReview(month_exhausted=True))
+    dispatcher = create_dispatcher(frozenset({42}), card_reviewer=reviewer)
+    await feed(dispatcher, bot, update_factory, "/inn")
+    before = len(bot.session.calls)
+    reply = await feed(dispatcher, bot, update_factory, VALID_INN)
+    calls = [c for c in bot.session.calls[before:] if not isinstance(c, SendChatAction)]
+    texts_sent = [c.text for c in calls if isinstance(c, SendMessage)]
+    # Counting note, the card, the reading's note, the one line on why there is none.
+    assert texts_sent[0] == texts.COUNTING
+    assert f"ИНН {VALID_INN}" in texts_sent[1]
+    assert texts_sent[2] == texts.REVIEWING
+    assert REVIEW_MONTH in reply.text and REVIEW_TITLE not in reply.text
+    # The reading names the company: another card may have come in between.
+    assert f"ИНН {VALID_INN}" in reply.text
+    # No keyboard of its own: the card's stays, and after «Подробнее» the main menu does.
+    assert reply.reply_markup is None
+    assert kinds(calls)[-1] == "DeleteMessage"  # the reading's note does not stay
+    assert reviewer.calls == [(VALID_INN, VALID_INN, None)]
+    # «Подробнее» still answers with the full card of the same answer.
+    reply = await feed(dispatcher, bot, update_factory, "Подробнее")
+    assert "Организация — проверено полностью" in reply.text
+
+
+async def test_a_failed_reading_leaves_the_card_and_says_so(bot, update_factory, caplog):
+    dispatcher = create_dispatcher(frozenset({42}), card_reviewer=Reviewer(fail=True))
+    reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
+    assert REVIEW_NOT_PREPARED in reply.text and "по правилам" in reply.text
+    assert "модель" not in reply.text
+    assert "private debtor note" not in caplog.text
+    assert "card_review_failed error_type=RuntimeError" in caplog.text
+
+
+async def test_without_a_reviewer_the_card_is_the_last_word(bot, update_factory):
+    dispatcher = create_dispatcher(frozenset({42}))
+    reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
+    assert f"ИНН {VALID_INN}" in reply.text
+    assert texts.REVIEWING not in [c.text for c in bot.session.calls if isinstance(c, SendMessage)]

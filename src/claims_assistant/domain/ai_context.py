@@ -26,7 +26,13 @@ from decimal import Decimal
 from typing import Any
 
 from claims_assistant.domain.counterparties import CounterpartyRow
-from claims_assistant.domain.external import CompanyStatus, ExternalSnapshot, FactKind, Section
+from claims_assistant.domain.external import (
+    CompanyStatus,
+    ExternalSnapshot,
+    Fact,
+    FactKind,
+    Section,
+)
 from claims_assistant.domain.indicators import (
     DebtTrend,
     InternalIndicators,
@@ -38,11 +44,13 @@ from claims_assistant.domain.scoring import (
     INTERNAL_LAST_PAYMENT,
     INTERNAL_OVERDUE,
     Assessment,
+    Trend,
+    finance_trends,
 )
 
 # Both versions go to the report and the stored explanation (S5-02): a changed context or
 # instruction must be visible in what was produced with it.
-CONTEXT_VERSION = "2"
+CONTEXT_VERSION = "3"
 INSTRUCTION_VERSION = "2"
 
 # The rules' levels as the report names them (lower case: they go inside a sentence).
@@ -88,6 +96,12 @@ _STATUS_TITLES = {
     CompanyStatus.LIQUIDATED: "ликвидирована",
 }
 
+_TREND_TITLES = {
+    FactKind.REVENUE: "Изменение выручки",
+    FactKind.NET_PROFIT: "Изменение чистой прибыли",
+}
+_TREND_WORDS = {Trend.UP: "рост", Trend.DOWN: "снижение", Trend.FLAT: "без изменений"}
+
 INSTRUCTION = """\
 Ты помогаешь специалисту по работе с задолженностью. Тебе дают данные об одной организации
 и готовый результат правил: приоритет, сигналы и базовую рекомендацию.
@@ -122,6 +136,46 @@ INSTRUCTION = """\
 Ответ, не соответствующий формату или называющий данные не из контекста, отклоняется
 целиком, и специалист видит базовую рекомендацию.
 """
+
+# S8-05: the /inn card. The customer (15.10.2026): «по текущим данным из Checko нет
+# скоринга от ИИ — оч важно по арбитражным делам и банкротству, и выручка год к году».
+# The same answer format and the same review (S5-06); the task is the open data, not the
+# list's priority, and there are no comments to read.
+CARD_CONTEXT_VERSION = "card-1"
+CARD_INSTRUCTION_VERSION = "card-1"
+CARD_INSTRUCTION = """\
+Ты помогаешь специалисту по работе с задолженностью. Тебе дают открытые данные об одной
+организации (сведения о ней, банкротство, арбитражные дела, исполнительные производства,
+финансовую отчётность) и сигналы, которые по ним нашли правила.
+
+Задача: в 2–4 предложениях сказать специалисту, что в этих данных важно для работы с
+задолженностью организации: банкротство, иски к ней, долги у приставов, изменение выручки
+и прибыли год к году; чем это опасно для взыскания и что стоит проверить.
+
+Правила:
+1. Не называй уровень приоритета или риска словами («высокий», «средний», «низкий»,
+   «критичный»): приоритет в карточке уже показан правилами.
+2. Пиши только то, что есть во входных данных. Не добавляй суммы, даты, события и выводы,
+   которых там нет. Не пользуйся сведениями об этой организации из других источников.
+3. Ссылайся только на переданные ID оснований и пиши их только в grounds, не в тексте
+   explanation. Называй факт словами («выручка за 2025 год выросла на 12 %»).
+4. Сообщения ЕФРСБ приходят по ИНН и бывают о чужих делах, где организация — кредитор.
+   Если роль организации не подтверждена, так и скажи; не называй её банкротом.
+5. Не давай юридических указаний, не называй процессуальные сроки и не оценивай
+   вероятность банкротства.
+6. Если данных мало или раздел не проверен, так и скажи; не заполняй пробелы догадками.
+7. Отвечай по-русски, деловым языком, без эмоций. Крупные суммы можно округлять:
+   «3,4 млн ₽».
+
+Формат ответа — один объект JSON без текста вокруг и без других полей:
+{"explanation": "...", "promises": [], "grounds": ["id", ...]}
+- explanation: 2–4 предложения, не длиннее 1200 символов;
+- promises: всегда пустой список;
+- grounds: ID переданных оснований, на которые опирается разбор.
+Ответ, не соответствующий формату или называющий данные не из контекста, отклоняется
+целиком, и специалист видит карточку по правилам.
+"""
+INSTRUCTIONS = {INSTRUCTION_VERSION: INSTRUCTION, CARD_INSTRUCTION_VERSION: CARD_INSTRUCTION}
 
 
 def _text(value: object) -> str:
@@ -406,11 +460,52 @@ def _mask(text: str | None, inn: str, reference: str | None) -> str | None:
     return text.replace(inn, reference or "ref")
 
 
-def _facts(snapshots: Iterable[ExternalSnapshot]) -> list[FactLine]:
-    lines = []
+# A defendant with a hundred cases and a hundred proceedings made a request of 71 684
+# characters against the limit of 24 000 (review A on #96): the model was never asked for
+# exactly the companies the customer wanted it for. The totals of a section stay whole;
+# of its records the newest go, and the rest are counted. Every record of a bankruptcy
+# goes — there are few, and they are what matters most.
+FACT_CAPS = {
+    FactKind.COURT_CASE: 8,
+    FactKind.ENFORCEMENT: 8,
+    FactKind.BANKRUPTCY_EVENT: 10,
+    FactKind.BANKRUPTCY_CLOSED: 3,
+}
+
+
+def _newest_first(fact: Fact) -> tuple[bool, date]:
+    return (fact.observed_on is not None, fact.observed_on or date.min)
+
+
+def _kept(snapshot: ExternalSnapshot, cited: set[str]) -> tuple[list[Fact], list[str]]:
+    """The facts of a section that go to the model, in their order, and a note for each
+    kind cut short. A fact a signal cites always goes: the answer may name it."""
+    dropped: set[str] = set()
+    notes = []
+    for kind, cap in FACT_CAPS.items():
+        facts = [fact for fact in snapshot.facts if fact.kind is kind and fact.value is not None]
+        newest = {fact.id for fact in sorted(facts, key=_newest_first, reverse=True)[:cap]}
+        cut = {fact.id for fact in facts} - newest - cited
+        if cut:
+            dropped |= cut
+            section = _SECTION_TITLES.get(snapshot.section, snapshot.section.value)
+            title = _FACT_TITLES.get(kind, kind.value)
+            notes.append(
+                f"{section}: «{title}» — в запросе {len(facts) - len(cut)} новейших из "
+                f"{len(facts)}; итоги раздела — по всем."
+            )
+    return [fact for fact in snapshot.facts if fact.id not in dropped], notes
+
+
+def _facts(
+    snapshots: Iterable[ExternalSnapshot], cited: set[str] = frozenset()
+) -> tuple[list[FactLine], list[str]]:
+    lines, notes = [], []
     for snapshot in snapshots:
         evidence = {item.id: item for item in snapshot.evidence}
-        for fact in snapshot.facts:
+        facts, cut = _kept(snapshot, set(cited))
+        notes += cut
+        for fact in facts:
             if fact.value is None:  # an unknown value is a gap, it belongs to missing_data
                 continue
             source = next(
@@ -433,7 +528,7 @@ def _facts(snapshots: Iterable[ExternalSnapshot]) -> list[FactLine]:
                     unit=fact.unit,
                 )
             )
-    return lines
+    return lines, notes
 
 
 def _comments(
@@ -481,18 +576,105 @@ def build_context(
     they come from the shared file.
     """
     inn = row.inn
-    if assessment.inn != inn:
-        raise ValueError("Assessment belongs to another INN")
     if indicators is not None and indicators.inn != inn:
         raise ValueError("Indicators belong to another INN")
+    comments, omitted = _comments([r for r in interactions if r.inn == inn], limits)
+    return _assemble(
+        inn,
+        assessment,
+        analysis_date,
+        _row_values(row, indicators),
+        snapshots,
+        limits,
+        reference,
+        comments=tuple(comments),
+        comments_omitted=omitted,
+    )
+
+
+def _trend_values(snapshots: Sequence[ExternalSnapshot]) -> list[ValueLine]:
+    """S8-05: revenue and profit year over year, as the card's marks read them (S8-04).
+
+    The model may only retell numbers it was given: without these lines «выручка выросла
+    на 12 %» would be a new number and the whole answer would go.
+    """
+    finances = next((s for s in snapshots if s.section is Section.FINANCES), None)
+    values = []
+    for trend in finance_trends(finances):
+        title = _TREND_TITLES[trend.kind]
+        span = f"{trend.year - 1}–{trend.year} годы"
+        if trend.percent is not None:
+            change = f"{trend.percent:+.1f}% за {span}"
+        else:
+            # No percent of a base that is not positive: a loss, or nothing at all.
+            base = "убыток" if trend.previous < 0 else "ноль"
+            change = f"{_TREND_WORDS[trend.trend]} за {span}; в {trend.year - 1} году {base}"
+        values.append(
+            ValueLine(
+                f"finance-trend-{trend.kind.value}",
+                title,
+                f"{change} (было {_text(trend.previous)}, стало {_text(trend.value)})",
+            )
+        )
+    return values
+
+
+def build_card_context(
+    inn: str,
+    assessment: Assessment,
+    analysis_date: date,
+    snapshots: Iterable[ExternalSnapshot],
+    row: CounterpartyRow | None = None,
+    indicators: InternalIndicators | None = None,
+    limits: ContextLimits = ContextLimits(),
+    reference: str | None = None,
+) -> RecommendationContext:
+    """S8-05: the /inn card — the open data of one company, and the owner's row if a
+    finished check of the owner has it. Comments are never sent here."""
+    if row is not None and row.inn != inn:
+        raise ValueError("Row belongs to another INN")
+    if indicators is not None and indicators.inn != inn:
+        raise ValueError("Indicators belong to another INN")
+    snapshots = tuple(snapshots)
+    values = _row_values(row, indicators) if row is not None else []
+    return _assemble(
+        inn,
+        assessment,
+        analysis_date,
+        values + _trend_values(snapshots),
+        snapshots,
+        limits,
+        reference,
+        context_version=CARD_CONTEXT_VERSION,
+        instruction_version=CARD_INSTRUCTION_VERSION,
+    )
+
+
+def _assemble(
+    inn: str,
+    assessment: Assessment,
+    analysis_date: date,
+    values: Sequence[ValueLine],
+    snapshots: Iterable[ExternalSnapshot],
+    limits: ContextLimits,
+    reference: str | None,
+    *,
+    comments: tuple[CommentLine, ...] = (),
+    comments_omitted: int = 0,
+    context_version: str = CONTEXT_VERSION,
+    instruction_version: str = INSTRUCTION_VERSION,
+) -> RecommendationContext:
+    if assessment.inn != inn:
+        raise ValueError("Assessment belongs to another INN")
     snapshots = tuple(snapshots)
     if any(snapshot.inn != inn for snapshot in snapshots):
         raise ValueError("Snapshot belongs to another INN")
     if reference is not None and inn in reference:
         raise ValueError("The reference must not contain the INN")
-    comments, omitted = _comments([r for r in interactions if r.inn == inn], limits)
-    values = tuple(_row_values(row, indicators))
-    facts = tuple(_facts(snapshots))
+    values = tuple(values)
+    cited = {fact_id for signal in assessment.signals for fact_id in signal.fact_ids}
+    fact_lines, cut = _facts(snapshots, cited)
+    facts = tuple(fact_lines)
     signals = tuple(
         SignalLine(
             code=signal.code,
@@ -534,11 +716,13 @@ def build_context(
         values=values,
         facts=facts,
         signals=signals,
-        comments=tuple(comments),
-        missing_data=assessment.missing_data,
-        comments_omitted=omitted,
+        comments=comments,
+        missing_data=assessment.missing_data + tuple(cut),
+        comments_omitted=comments_omitted,
         reference=reference,
         sends_inn=limits.include_inn,
+        context_version=context_version,
+        instruction_version=instruction_version,
     )
 
 
@@ -554,7 +738,7 @@ class Request:
 
 def build_request(context: RecommendationContext) -> Request:
     return Request(
-        instruction=INSTRUCTION,
+        instruction=INSTRUCTIONS[context.instruction_version],
         context=context.as_dict(),
         instruction_version=context.instruction_version,
         context_version=context.context_version,

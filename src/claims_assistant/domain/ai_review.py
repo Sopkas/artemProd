@@ -54,6 +54,13 @@ _BOUND_MORE = re.compile(r"(?:более|больше|свыше|превыша\
 _BOUND_AT_LEAST = re.compile(r"не\s+менее\s*$", re.IGNORECASE)
 _BOUND_LESS = re.compile(r"(?:менее|меньше)(?:\s+чем)?\s*$", re.IGNORECASE)
 _BOUND_SLACK = Decimal("1.25")  # «более 90» may stand for up to 112, not for 200
+# S8-05: the card speaks of millions — «иски на 3,4 млн ₽» retells 3 412 000. A number
+# followed by a scale word is compared in that scale, rounded as it is written.
+_SCALE = re.compile(
+    r"\s*(?:(тыс(?:\.|яч\w*)?)|(млн\.?|миллион\w*)|(млрд\.?|миллиард\w*))(?!\w)",
+    re.IGNORECASE,
+)
+_SCALES = (Decimal(1000), Decimal(1_000_000), Decimal(1_000_000_000))
 
 # The priority is the rules' answer; naming another one or asking to change it is a reason
 # to reject, whatever the wording around it.
@@ -178,9 +185,9 @@ def _numbers(text: str) -> set[Decimal]:
     return found
 
 
-def _claims(text: str) -> list[tuple[Decimal, str | None]]:
-    """Every number of the text with the bound written before it: «more», «at_least»,
-    «less» or None for a plain number."""
+def _claims(text: str) -> list[tuple[Decimal, str | None, Decimal]]:
+    """Every number of the text with the bound written before it — «more», «at_least»,
+    «less» or None for a plain number — and the scale written after it (1 when none)."""
     stripped = _strip_dates(text)
     found = []
     for match in _NUMBER.finditer(stripped):
@@ -195,7 +202,10 @@ def _claims(text: str) -> list[tuple[Decimal, str | None]]:
             bound = "more"
         elif _BOUND_LESS.search(before):
             bound = "less"
-        found.append((value, bound))
+        scale = Decimal(1)
+        if word := _SCALE.match(stripped, match.end()):
+            scale = next(_SCALES[i] for i, group in enumerate(word.groups()) if group)
+        found.append((value, bound, scale))
     return found
 
 
@@ -404,13 +414,16 @@ def review_answer(payload: object, context: RecommendationContext) -> Explanatio
             written = f"{day:02d}.{month:02d}" + (f".{year}" if year else "")
             return _reject(RejectionCode.NEW_DATE, written)
     known_numbers = _numbers(source)
-    for number, bound in _claims(text_only):
+    for number, bound, scale in _claims(text_only):
         # A bound is checked as a bound: «более 75 дней» is not true of 75 days.
         if not any(
-            _bound_holds(known, number, bound) if bound else _rounds_to(known, number)
+            _bound_holds(known / scale, number, bound)
+            if bound
+            else _rounds_to(known / scale, number)
             for known in known_numbers
         ):
-            return _reject(RejectionCode.NEW_AMOUNT, str(number))
+            written = str(number) if scale == 1 else f"{number}×{scale:,}".replace(",", " ")
+            return _reject(RejectionCode.NEW_AMOUNT, written)
 
     promises = _promises(raw_promises, context)
     if isinstance(promises, Rejected):

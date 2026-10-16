@@ -110,6 +110,9 @@ class Settings:
     # Whether the «Взаимодействия» comments may be sent to the model (S5-02/S5-05):
     # the customer's employees' and clients' words leave the premises only with consent.
     ai_send_comments: bool = False
+    # S8-05: the model's reading under the /inn card. Off until the customer agrees that
+    # the card's open data go to the model; needs a provider (AI_PROVIDER) to work.
+    ai_card_review: bool = False
     ai: AiSettings = AiSettings()
 
     @classmethod
@@ -168,6 +171,7 @@ class Settings:
         if raw_structured not in {"json_schema", "none"}:
             raise ConfigurationError("AI_RESPONSE_FORMAT: допустимы json_schema, none.")
         ai_send_comments = _switch(values, "AI_SEND_COMMENTS")
+        ai_card_review = _switch(values, "AI_CARD_REVIEW")
         ai = AiSettings(
             timeout_seconds=_number(values, "AI_TIMEOUT_SECONDS", 30.0, minimum=0.001),
             max_retries=_number(values, "AI_MAX_RETRIES", 1, integer=True, minimum=0),
@@ -219,6 +223,7 @@ class Settings:
             ai_model=ai_model,
             ai_structured=raw_structured == "json_schema",
             ai_send_comments=ai_send_comments,
+            ai_card_review=ai_card_review,
             ai=ai,
             database_path=database_path,
             storage_path=storage_path,

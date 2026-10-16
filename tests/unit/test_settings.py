@@ -397,3 +397,32 @@ def test_run_limits_come_from_the_settings():
 
     limits = run_limits(Settings(TOKEN, frozenset({42})))
     assert (limits.max_requests, limits.max_tokens, limits.max_seconds) == (100, 400_000, 600.0)
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, False), ("true", True), ("no", False)])
+def test_the_card_reading_is_off_unless_switched_on(tmp_path, monkeypatch, raw, expected):
+    """S8-05: the card's open data go to the model only once the customer agrees."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    if raw is not None:
+        monkeypatch.setenv("AI_CARD_REVIEW", raw)
+    assert Settings.load(tmp_path / "missing.env").ai_card_review is expected
+
+
+@pytest.mark.parametrize(
+    ("provider", "switch", "expected"),
+    [("stub", "true", True), ("off", "true", False), ("stub", "false", False)],
+)
+def test_the_card_reader_needs_both_the_switch_and_a_provider(
+    tmp_path, monkeypatch, provider, switch, expected
+):
+    from claims_assistant.runtime.ai import build_recommendation_provider
+    from claims_assistant.runtime.app import _card_reviewer
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("AI_PROVIDER", provider)
+    monkeypatch.setenv("AI_CARD_REVIEW", switch)
+    settings = Settings.load(tmp_path / "missing.env")
+    reviewer = _card_reviewer(settings, build_recommendation_provider(settings), object())
+    assert (reviewer is not None) is expected
