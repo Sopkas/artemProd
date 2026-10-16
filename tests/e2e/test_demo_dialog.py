@@ -92,7 +92,7 @@ class Show:
 
     async def say(self, update_factory, text: str) -> str:
         await self.dispatcher.feed_update(self.bot, update_factory(text, user_id=PRESENTER))
-        return self.bot.session.calls[-1].text
+        return self.bot.session.last_message.text
 
     async def send(self, update_factory, name: str) -> str:
         data = self.package[name]

@@ -1,5 +1,9 @@
+import asyncio
+
 import pytest
-from aiogram.methods import SendMessage
+from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.methods import DeleteMessage, SendChatAction, SendMessage
 
 from claims_assistant.application.company_data import CompanyDataRequest
 from claims_assistant.domain.external import Section
@@ -22,7 +26,7 @@ def buttons(reply: SendMessage) -> list[str]:
 async def feed(dispatcher, bot, update_factory, *messages: str, user_id: int = 42) -> SendMessage:
     for text in messages:
         await dispatcher.feed_update(bot, update_factory(text, user_id=user_id))
-    return bot.session.calls[-1]
+    return bot.session.last_message
 
 
 @pytest.mark.parametrize("entry", ["Проверить ИНН", "/inn"])
@@ -322,3 +326,92 @@ async def test_details_typed_inside_another_dialog_leave_that_dialog_alone(bot, 
     assert reply.text == texts.CHECK_DATE_INVALID
     reply = await feed(dispatcher, bot, update_factory, "01.10.2026")
     assert reply.text != texts.CHECK_DATE_INVALID
+
+
+# --- S8-03: «💰 Считаю миллионы…» and «печатает» while the source is asked ---
+
+
+class SlowProvider:
+    """The demo source a little slower: what the user had seen when the source was asked."""
+
+    def __init__(self, session, *, fail: bool = False) -> None:
+        self.session = session
+        self.fail = fail
+        self.seen: list = []
+
+    async def fetch(self, request: CompanyDataRequest):
+        self.seen = list(self.session.calls)
+        await asyncio.sleep(0.05)
+        if self.fail:
+            raise RuntimeError("private debtor note")
+        return await DemoCompanyDataProvider().fetch(request)
+
+
+def kinds(calls) -> list[str]:
+    return [type(call).__name__ for call in calls]
+
+
+async def test_counting_note_comes_before_the_source_and_goes_with_the_card(bot, update_factory):
+    provider = SlowProvider(bot.session)
+    dispatcher = create_dispatcher(frozenset({42}), provider)
+    await feed(dispatcher, bot, update_factory, "/inn")
+    before = len(bot.session.calls)
+    await feed(dispatcher, bot, update_factory, VALID_INN)
+    # The note is already in the chat when the source is asked.
+    assert provider.seen[-1].text == texts.COUNTING
+    calls = bot.session.calls[before:]
+    # «печатает» while waiting and not after the card: it would hang under the answer.
+    assert kinds(calls) == ["SendMessage", "SendChatAction", "SendMessage", "DeleteMessage"]
+    assert calls[1].action == ChatAction.TYPING and calls[1].chat_id == 42
+    assert f"ИНН {VALID_INN}" in calls[2].text
+    assert buttons(calls[2]) == ["Подробнее", *MAIN_MENU]
+    assert (calls[3].chat_id, calls[3].message_id) == (42, 100)
+
+
+async def test_counting_note_does_not_stay_when_the_source_fails(bot, update_factory):
+    dispatcher = create_dispatcher(frozenset({42}), SlowProvider(bot.session, fail=True))
+    await feed(dispatcher, bot, update_factory, "/inn")
+    before = len(bot.session.calls)
+    reply = await feed(dispatcher, bot, update_factory, VALID_INN)
+    assert reply.text == texts.CHECK_FAILED
+    calls = bot.session.calls[before:]
+    assert kinds(calls) == ["SendMessage", "SendChatAction", "SendMessage", "DeleteMessage"]
+    assert calls[0].text == texts.COUNTING
+
+
+async def test_mistyped_inn_gets_no_counting_note(bot, update_factory):
+    dispatcher = create_dispatcher(frozenset({42}))
+    await feed(dispatcher, bot, update_factory, "/inn")
+    before = len(bot.session.calls)
+    reply = await feed(dispatcher, bot, update_factory, "12345")
+    assert reply.text.endswith(texts.INN_RETRY)
+    assert kinds(bot.session.calls[before:]) == ["SendMessage"]
+
+
+async def test_card_comes_even_if_telegram_drops_the_note(bot, update_factory):
+    dispatcher = create_dispatcher(frozenset({42}))
+    await feed(dispatcher, bot, update_factory, "/inn")
+    before = len(bot.session.calls)
+    # The next request to Telegram is the note itself.
+    bot.session.fail_once = TelegramNetworkError(SendMessage(chat_id=42, text="x"), "down")
+    reply = await feed(dispatcher, bot, update_factory, VALID_INN)
+    assert f"ИНН {VALID_INN}" in reply.text
+    assert "DeleteMessage" not in kinds(bot.session.calls[before:])
+
+
+async def test_card_stands_even_if_the_note_cannot_be_deleted(bot, update_factory, monkeypatch):
+    original = bot.session.make_request
+
+    async def make_request(bot_, method, timeout=None):
+        if isinstance(method, DeleteMessage | SendChatAction):
+            bot.session.calls.append(method)
+            raise TelegramNetworkError(method, "down")
+        return await original(bot_, method, timeout)
+
+    monkeypatch.setattr(bot.session, "make_request", make_request)
+    dispatcher = create_dispatcher(frozenset({42}), SlowProvider(bot.session))
+    reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
+    # No error reply after the card: a lost hint is not a failed check.
+    assert f"ИНН {VALID_INN}" in reply.text
+    assert reply.text != texts.ERROR
+    assert isinstance(bot.session.calls[-1], DeleteMessage)
