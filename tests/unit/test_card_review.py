@@ -308,3 +308,106 @@ def test_no_reading_says_why_in_one_line():
     outcome = type("Outcome", (), {"explanation": None, "rejected": None, "error": error})
     assert "модель недоступна (модель не ответила в срок)" in format_review(CardReview(outcome))
     assert "модель недоступна" in format_review(None)
+
+
+# --- review A on #96 ------------------------------------------------------------------
+
+
+def busy_defendant() -> CompanyCheck:
+    """A hundred open cases and a hundred proceedings: 71 684 characters before the cap."""
+    from claims_assistant.infrastructure.checko import enforcements
+
+    records = [case(f"А00-{n}/2026", 500_000) for n in range(100)]
+    for n, record in enumerate(records):
+        record["Дата"] = f"2026-{1 + n % 9:02d}-{1 + n % 28:02d}"
+    bankruptcy = dict(case("А00-999/2026", 2_000_000), Тип="Б", Дата="2026-03-01")
+    proceedings = [
+        {
+            "ИспПрНомер": f"{n}/26/00001-ИП",
+            "ИспПрДата": f"2026-{1 + n % 9:02d}-{1 + n % 28:02d}",
+            "ПредмИсп": "Налог (сбор), включая пени",
+            "СудПристНаим": "ОСП по Синтетическому району",
+            "ОстЗадолж": 10_000.0,
+        }
+        for n in range(100)
+    ]
+    return CompanyCheck(
+        INN,
+        (
+            finances.project_finances(INN, YEARS, NOW),
+            courts.project_courts(INN, [bankruptcy, *records[:99]], 101, Decimal(52_000_000), NOW),
+            enforcements.project_enforcements(INN, proceedings, 1, NOW),
+        ),
+    )
+
+
+def test_a_busy_defendant_still_fits_the_request_with_its_totals_whole():
+    from claims_assistant.application.recommendation import request_size
+    from claims_assistant.domain.ai_context import FACT_CAPS
+    from claims_assistant.domain.external import FactKind
+
+    company = busy_defendant()
+    built = build_card_context(INN, assess(INN, company.snapshots), NOW.date(), company.snapshots)
+    request = build_request(built)
+    assert request_size(request) < 24_000
+    titles = [fact.title for fact in built.facts]
+    assert (
+        titles.count("Арбитражное дело (организация — ответчик)") == FACT_CAPS[FactKind.COURT_CASE]
+    )
+    assert titles.count("Исполнительное производство (ФССП)") == FACT_CAPS[FactKind.ENFORCEMENT]
+    # The bankruptcy case goes whatever its date, and so do the section's totals.
+    assert "Дело о банкротстве организации (арбитражный суд)" in titles
+    totals = {fact.title: fact.value for fact in built.facts}
+    assert totals["Незавершённых арбитражных дел, где организация — ответчик"] == "101"
+    assert any("новейших из 99; итоги раздела — по всем" in note for note in built.missing_data)
+    # The newest go: the latest date of the cases is among those sent.
+    dates = [f.observed_on for f in built.facts if f.title.startswith("Арбитражное дело")]
+    every = [
+        f.observed_on for s in company.snapshots for f in s.facts if f.kind is FactKind.COURT_CASE
+    ]
+    assert max(dates) == max(every)
+
+
+def test_a_fact_a_signal_cites_is_never_cut():
+    from claims_assistant.domain.scoring import Priority, Signal
+
+    company = busy_defendant()
+    assessment = assess(INN, company.snapshots)
+    oldest = min(
+        (f for s in company.snapshots for f in s.facts if f.id.startswith("court-case-")),
+        key=lambda f: f.observed_on,
+    )
+    signal = Signal("test", Priority.MEDIUM, "Проверка.", (oldest.id,))
+    cited = replace(assessment, signals=(*assessment.signals, signal))
+    built = build_card_context(INN, cited, NOW.date(), company.snapshots)
+    assert any(fact.id.endswith(oldest.id.split(":")[-1]) for fact in built.facts)
+
+
+async def test_no_open_data_no_question_to_the_model():
+    from claims_assistant.domain.external import (
+        Coverage,
+        DataMode,
+        ExternalSnapshot,
+        FetchStatus,
+        ProviderError,
+        Section,
+    )
+
+    def failed(section):
+        return ExternalSnapshot(
+            INN,
+            section,
+            "checko",
+            DataMode.LIVE,
+            NOW,
+            FetchStatus.RATE_LIMITED,
+            Coverage.UNAVAILABLE,
+            missing=("Лимит запросов исчерпан.",),
+            error=ProviderError("rate_limited", "Лимит запросов исчерпан."),
+        )
+
+    company = CompanyCheck(INN, (failed(Section.COMPANY), failed(Section.COURTS)))
+    model = Priced(lambda request: answer(GOOD))
+    review = await reviewer(model).review(company, assess(INN, company.snapshots), None)
+    assert review.no_data and model.requests == []
+    assert "источник открытых данных не ответил" in format_review(review)

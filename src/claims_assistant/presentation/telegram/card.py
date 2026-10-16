@@ -461,13 +461,16 @@ REVIEW_NONE = "🤖 Разбора ИИ нет: {why}. Карточка выше
 REVIEW_MONTH = "лимит расходов на ИИ за месяц исчерпан, модель не спрашивали"
 REVIEW_REJECTED = "ответ модели не прошёл проверку по данным карточки"
 REVIEW_FAILED = "модель недоступна"
+REVIEW_NO_DATA = "источник открытых данных не ответил, модель не спрашивали"
 
 
 def format_review(review: CardReview | None) -> str:
     """The reading under the card, or one line on why there is none."""
     if review is not None and review.text is not None:
         return f"{REVIEW_TITLE}\n\n{review.text}\n\n{REVIEW_FOOTER}"
-    if review is not None and review.month_exhausted:
+    if review is not None and review.no_data:
+        why = REVIEW_NO_DATA
+    elif review is not None and review.month_exhausted:
         why = REVIEW_MONTH
     elif review is not None and review.outcome is not None and review.outcome.rejected:
         why = REVIEW_REJECTED

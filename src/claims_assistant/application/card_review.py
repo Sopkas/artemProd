@@ -28,6 +28,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from claims_assistant.domain.ai_context import build_card_context, build_request
+from claims_assistant.domain.external import FetchStatus
 from claims_assistant.domain.scoring import Assessment
 
 from .ai_guard import AiBudget, AiRunLimits, ScopedExplainerFactory
@@ -65,6 +66,9 @@ class CardReview:
     outcome: ExplanationOutcome | None = None
     month_exhausted: bool = False
     cached: bool = False
+    # Not one section of the source answered: nothing to read, so the model is not paid
+    # to say «данных мало» (review A on #96).
+    no_data: bool = False
 
     @property
     def text(self) -> str | None:
@@ -96,6 +100,9 @@ class CardReviewer:
     async def review(
         self, check: CompanyCheck, assessment: Assessment, internal: InternalContext | None
     ) -> CardReview:
+        if not any(snapshot.status is FetchStatus.OK for snapshot in check.snapshots):
+            logger.info("ai_card_no_open_data")
+            return CardReview(no_data=True)
         context = build_card_context(
             check.inn,
             assessment,

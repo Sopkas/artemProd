@@ -26,7 +26,13 @@ from decimal import Decimal
 from typing import Any
 
 from claims_assistant.domain.counterparties import CounterpartyRow
-from claims_assistant.domain.external import CompanyStatus, ExternalSnapshot, FactKind, Section
+from claims_assistant.domain.external import (
+    CompanyStatus,
+    ExternalSnapshot,
+    Fact,
+    FactKind,
+    Section,
+)
 from claims_assistant.domain.indicators import (
     DebtTrend,
     InternalIndicators,
@@ -44,7 +50,7 @@ from claims_assistant.domain.scoring import (
 
 # Both versions go to the report and the stored explanation (S5-02): a changed context or
 # instruction must be visible in what was produced with it.
-CONTEXT_VERSION = "2"
+CONTEXT_VERSION = "3"
 INSTRUCTION_VERSION = "2"
 
 # The rules' levels as the report names them (lower case: they go inside a sentence).
@@ -454,11 +460,52 @@ def _mask(text: str | None, inn: str, reference: str | None) -> str | None:
     return text.replace(inn, reference or "ref")
 
 
-def _facts(snapshots: Iterable[ExternalSnapshot]) -> list[FactLine]:
-    lines = []
+# A defendant with a hundred cases and a hundred proceedings made a request of 71 684
+# characters against the limit of 24 000 (review A on #96): the model was never asked for
+# exactly the companies the customer wanted it for. The totals of a section stay whole;
+# of its records the newest go, and the rest are counted. Every record of a bankruptcy
+# goes — there are few, and they are what matters most.
+FACT_CAPS = {
+    FactKind.COURT_CASE: 8,
+    FactKind.ENFORCEMENT: 8,
+    FactKind.BANKRUPTCY_EVENT: 10,
+    FactKind.BANKRUPTCY_CLOSED: 3,
+}
+
+
+def _newest_first(fact: Fact) -> tuple[bool, date]:
+    return (fact.observed_on is not None, fact.observed_on or date.min)
+
+
+def _kept(snapshot: ExternalSnapshot, cited: set[str]) -> tuple[list[Fact], list[str]]:
+    """The facts of a section that go to the model, in their order, and a note for each
+    kind cut short. A fact a signal cites always goes: the answer may name it."""
+    dropped: set[str] = set()
+    notes = []
+    for kind, cap in FACT_CAPS.items():
+        facts = [fact for fact in snapshot.facts if fact.kind is kind and fact.value is not None]
+        newest = {fact.id for fact in sorted(facts, key=_newest_first, reverse=True)[:cap]}
+        cut = {fact.id for fact in facts} - newest - cited
+        if cut:
+            dropped |= cut
+            section = _SECTION_TITLES.get(snapshot.section, snapshot.section.value)
+            title = _FACT_TITLES.get(kind, kind.value)
+            notes.append(
+                f"{section}: «{title}» — в запросе {len(facts) - len(cut)} новейших из "
+                f"{len(facts)}; итоги раздела — по всем."
+            )
+    return [fact for fact in snapshot.facts if fact.id not in dropped], notes
+
+
+def _facts(
+    snapshots: Iterable[ExternalSnapshot], cited: set[str] = frozenset()
+) -> tuple[list[FactLine], list[str]]:
+    lines, notes = [], []
     for snapshot in snapshots:
         evidence = {item.id: item for item in snapshot.evidence}
-        for fact in snapshot.facts:
+        facts, cut = _kept(snapshot, set(cited))
+        notes += cut
+        for fact in facts:
             if fact.value is None:  # an unknown value is a gap, it belongs to missing_data
                 continue
             source = next(
@@ -481,7 +528,7 @@ def _facts(snapshots: Iterable[ExternalSnapshot]) -> list[FactLine]:
                     unit=fact.unit,
                 )
             )
-    return lines
+    return lines, notes
 
 
 def _comments(
@@ -625,7 +672,9 @@ def _assemble(
     if reference is not None and inn in reference:
         raise ValueError("The reference must not contain the INN")
     values = tuple(values)
-    facts = tuple(_facts(snapshots))
+    cited = {fact_id for signal in assessment.signals for fact_id in signal.fact_ids}
+    fact_lines, cut = _facts(snapshots, cited)
+    facts = tuple(fact_lines)
     signals = tuple(
         SignalLine(
             code=signal.code,
@@ -668,7 +717,7 @@ def _assemble(
         facts=facts,
         signals=signals,
         comments=comments,
-        missing_data=assessment.missing_data,
+        missing_data=assessment.missing_data + tuple(cut),
         comments_omitted=comments_omitted,
         reference=reference,
         sends_inn=limits.include_inn,
