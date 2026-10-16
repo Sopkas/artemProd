@@ -11,7 +11,7 @@ the age of the last payment. Signals that need the payments file or the debt his
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
@@ -241,7 +241,8 @@ def _finance_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
             Signal(
                 "revenue_drop_30",
                 Priority.MEDIUM,
-                f"Выручка снизилась на {abs(change.percent):.1f}% "
+                # A person reads it: «35,5%»; ``value`` stays machine-read.
+                f"Выручка снизилась на {f'{abs(change.percent):.1f}'.replace('.', ',')}% "
                 f"за {change.year - 1}–{change.year} годы.",
                 change.fact_ids,
                 value=f"{change.percent:.1f}%",
@@ -262,6 +263,84 @@ def _finance_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
                 )
             )
     return signals
+
+
+class Trend(StrEnum):
+    UP = "up"
+    DOWN = "down"
+    FLAT = "flat"
+
+
+# Less than half a percent either way reads as «без изменений» in whole percents.
+FLAT_BELOW_PERCENT = Decimal("0.5")
+
+
+@dataclass(frozen=True, slots=True)
+class FinanceTrend:
+    """S8-04: one indicator year over year, for a mark beside its figure in the card.
+
+    ``alarm`` is the code of the rule of this module that fires on it, and only then: a
+    mark never says more than the priority does. A profit falling by 80 % without a loss
+    has a downward trend and no alarm — there is no such rule (docs/scoring.md).
+    """
+
+    kind: FactKind
+    year: int
+    previous: Decimal
+    value: Decimal
+    unit: str | None
+    # None when the previous year was not positive: «−150 %» of a loss means nothing.
+    percent: Decimal | None
+    trend: Trend
+    alarm: str | None
+    fact_ids: tuple[str, str]  # previous year, new year
+
+
+def _trend(kind: FactKind, years: dict[int, Fact]) -> FinanceTrend | None:
+    """The two latest consecutive full years, as ``revenue_change`` picks them."""
+    year = next((y for y in sorted(years, reverse=True) if y - 1 in years), None)
+    if year is None:
+        return None
+    new, prev = years[year], years[year - 1]
+    if not (isinstance(new.value, Decimal) and isinstance(prev.value, Decimal)):
+        return None
+    if new.unit != prev.unit:
+        return None
+    percent = None
+    if prev.value > 0:
+        percent = (new.value - prev.value) / prev.value * 100
+        flat = abs(percent) < FLAT_BELOW_PERCENT
+    else:
+        flat = new.value == prev.value
+    if flat:
+        trend = Trend.FLAT
+    else:
+        trend = Trend.UP if new.value > prev.value else Trend.DOWN
+    return FinanceTrend(
+        kind, year, prev.value, new.value, new.unit, percent, trend, None, (prev.id, new.id)
+    )
+
+
+def finance_trends(snapshot: ExternalSnapshot | None) -> tuple[FinanceTrend, ...]:
+    """Revenue and net profit year over year; an indicator without two years is left out.
+
+    The alarm is taken from the finance rules themselves, matched by the new year's fact,
+    so a changed threshold changes the mark and the priority together.
+    """
+    fired = {
+        (signal.code, fact_id)
+        for signal in _finance_signals(snapshot)
+        for fact_id in signal.fact_ids
+    }
+    trends = []
+    for kind, code in ((FactKind.REVENUE, "revenue_drop_30"), (FactKind.NET_PROFIT, "net_loss")):
+        trend = _trend(kind, _by_year(_facts(snapshot, kind)))
+        if trend is None:
+            continue
+        if (code, trend.fact_ids[1]) in fired:
+            trend = replace(trend, alarm=code)
+        trends.append(trend)
+    return tuple(trends)
 
 
 def payment_age_days(row: CounterpartyRow, analysis_date: date) -> int | None:
