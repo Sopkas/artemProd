@@ -79,7 +79,7 @@ def test_a_wrong_inn_is_named_by_its_place_without_its_value():
     assert [c.inn for c in parsed.candidates] == [ONE, THREE]
     assert parsed.invalid == (
         Invalid(2, InnProblem.CHECKSUM),
-        Invalid(3, InnProblem.WRONG_LENGTH),  # nine digits: one lost, not skipped
+        Invalid(3, InnProblem.NINE_DIGITS),  # nine digits: one lost, not skipped
     )
     text = format_added(add([], parsed.candidates), parsed.invalid)
     assert "№ 2: Контрольная цифра ИНН не совпадает" in text

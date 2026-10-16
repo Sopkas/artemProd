@@ -16,6 +16,7 @@ _ELEVENTH_WEIGHTS = (7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
 _TWELFTH_WEIGHTS = (3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
 _LEGAL_LENGTH = 10
 _INDIVIDUAL_LENGTH = 12
+_KPP_LENGTH = 9
 
 
 class InnKind(StrEnum):
@@ -32,6 +33,9 @@ class InnProblem(StrEnum):
     EMPTY = "empty"
     NOT_DIGITS = "not_digits"
     WRONG_LENGTH = "wrong_length"
+    # S8-03 (customer, 15.10.2026): he typed the КПП first. Nine digits are a КПП — or an
+    # INN with a digit lost; either way the user is told what an INN looks like.
+    NINE_DIGITS = "nine_digits"
     UNSUPPORTED_TYPE = "unsupported_type"
     CHECKSUM = "checksum"
 
@@ -40,6 +44,10 @@ _MESSAGES = {
     InnProblem.EMPTY: "ИНН не указан.",
     InnProblem.NOT_DIGITS: "ИНН должен состоять только из цифр.",
     InnProblem.WRONG_LENGTH: "ИНН состоит из 10 цифр у организации или из 12 у ИП.",
+    InnProblem.NINE_DIGITS: (
+        "9 цифр — похоже на КПП или в ИНН потеряна цифра. "
+        "ИНН состоит из 10 цифр у организации или из 12 у ИП."
+    ),
     InnProblem.UNSUPPORTED_TYPE: "Этот тип контрагента не поддерживается.",
     InnProblem.CHECKSUM: "Контрольная цифра ИНН не совпадает; проверьте значение.",
 }
@@ -64,6 +72,8 @@ def validate_inn(raw: str) -> str:
         raise InvalidInn(InnProblem.EMPTY)
     if not value.isascii() or not value.isdigit():
         raise InvalidInn(InnProblem.NOT_DIGITS)
+    if len(value) == _KPP_LENGTH:
+        raise InvalidInn(InnProblem.NINE_DIGITS)
     if len(value) not in (_LEGAL_LENGTH, _INDIVIDUAL_LENGTH):
         raise InvalidInn(InnProblem.WRONG_LENGTH)
     digits = [int(char) for char in value]
