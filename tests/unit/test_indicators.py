@@ -252,6 +252,16 @@ def test_debt_doubled_fires_from_exactly_twice(current, fires):
         assert signals[0].fact_ids == ("internal-debt", INTERNAL_DEBT_HISTORY)
 
 
+def test_the_debt_ratio_is_written_with_a_comma_for_a_person():
+    """«Долг вырос в 2.21 раза» was on the demo screen; the machine value keeps the dot."""
+    indicators = internal_indicators(
+        row(debt=Decimal("2210")), DAY, history=[snap(date(2026, 8, 1), "1000")]
+    )
+    (signal,) = [s for s in indicators.signals if s.code == "debt_doubled"]
+    assert signal.reason.startswith("Долг вырос в 2,21 раза за месяц")
+    assert signal.value == "2.21"
+
+
 # --- signals and the assessment ---
 
 

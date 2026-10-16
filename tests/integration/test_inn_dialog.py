@@ -6,6 +6,7 @@ from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import DeleteMessage, SendChatAction, SendMessage
 
 from claims_assistant.application.company_data import CompanyDataRequest
+from claims_assistant.domain.external import Section
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 from claims_assistant.presentation.telegram import texts
 from claims_assistant.presentation.telegram.card import DEMO_BANNER
@@ -61,7 +62,7 @@ async def test_valid_inn_shows_the_demo_card_and_dialog_ends(bot, update_factory
     assert reply.text.startswith(DEMO_BANNER)
     assert f"ИНН {VALID_INN}" in reply.text
     assert "Организация — проверено полностью" in reply.text
-    assert reply.text.count("Источник:") == 3
+    assert reply.text.count("Источник:") == len(Section)
     assert buttons(reply) == MAIN_MENU
     # The dialog is over: plain text goes back to the fallback, not to the validator.
     reply = await feed(dispatcher, bot, update_factory, "привет")
@@ -183,7 +184,7 @@ async def test_configured_scenario_is_used_for_the_card(bot, update_factory):
     assert "Причина: Синтетический пример сбоя источника." in reply.text
     assert "✅" not in reply.text
     reply = await feed(dispatcher, bot, update_factory, "Подробнее")
-    assert reply.text.count("— раздел недоступен") == 3
+    assert reply.text.count("— раздел недоступен") == len(Section)
     assert buttons(reply) == MAIN_MENU
 
 
@@ -311,7 +312,7 @@ async def test_details_send_the_card_of_the_same_answer_without_asking_the_sourc
     reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
     assert "❔ Внешние данные неполные" in reply.text
     reply = await feed(dispatcher, bot, update_factory, "Подробнее")
-    assert reply.text.count("— раздел недоступен") == 3
+    assert reply.text.count("— раздел недоступен") == len(Section)
     assert provider.calls == 1
 
 

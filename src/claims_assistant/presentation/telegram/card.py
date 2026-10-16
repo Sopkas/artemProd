@@ -44,8 +44,13 @@ DEMO_BANNER = "ДЕМО: синтетические данные, не свед�
 
 _SECTION_TITLES = {
     Section.COMPANY: "Организация",
-    Section.BANKRUPTCY: "Сообщения о банкротстве",
+    # S8-01: the register by its name. «Сообщения о банкротстве — не найдено» read as «no
+    # bankruptcy» to the customer, while a case was in court; EFRSB is one source of several.
+    Section.BANKRUPTCY: "Сообщения ЕФРСБ",
     Section.FINANCES: "Финансы",
+    Section.COURTS: "Арбитражные дела (ответчик, незавершённые)",
+    Section.FEDRESURS: "Заявления о банкротстве (Федресурс)",
+    Section.ENFORCEMENTS: "Исполнительные производства (ФССП, незавершённые)",
 }
 _STATUS_LABELS = {
     CompanyStatus.ACTIVE: "действует",
@@ -59,7 +64,18 @@ _FACT_LABELS = {
     FactKind.NET_PROFIT: "Чистая прибыль",
     FactKind.BANKRUPTCY_EVENT: "Событие",
     FactKind.BANKRUPTCY_CLOSED: "Дело прекращено",
+    FactKind.COURT_CASE: "Дело",
+    FactKind.COURT_CASES_ACTIVE: "Незавершённых дел",
+    FactKind.COURT_CLAIMS_TOTAL: "Сумма исков",
+    FactKind.BANKRUPTCY_INTENT: "Сообщение",
+    FactKind.BANKRUPTCY_CASE: "Дело о банкротстве",
+    FactKind.BANKRUPTCY_FILING: "Сообщение",
+    FactKind.ENFORCEMENT: "Производство",
+    FactKind.ENFORCEMENTS_OPEN: "Незавершённых производств",
+    FactKind.ENFORCEMENT_DEBT_LEFT: "Остаток долга",
 }
+# Totals that are true on a day, not over a period: «на 15.10.2026», not «за».
+_AS_OF = frozenset({FactKind.COURT_CLAIMS_TOTAL, FactKind.ENFORCEMENT_DEBT_LEFT})
 _COVERAGE_LABELS = {
     Coverage.COMPLETE: "проверено полностью",
     Coverage.PARTIAL: "неполные данные",
@@ -85,10 +101,14 @@ _HEADLINES = {
     Priority.LOW: "Низкий — проверено полностью, значимых сигналов нет",
     Priority.UNKNOWN: "Недостаточно данных — проверка неполная",
 }
+# Every section has one (a test holds it): a missing title showed the code, «courts».
 _PART_TITLES = {
     Section.COMPANY.value: "организация",
-    Section.BANKRUPTCY.value: "сообщения о банкротстве",
+    Section.BANKRUPTCY.value: "сообщения ЕФРСБ",
     Section.FINANCES.value: "финансы",
+    Section.COURTS.value: "арбитражные дела",
+    Section.FEDRESURS.value: "Федресурс",
+    Section.ENFORCEMENTS.value: "ФССП",
     "internal": "внутренние данные",
 }
 _MAX_REASONS = 3
@@ -194,6 +214,58 @@ def _short_figure(value: Decimal) -> str:
     return f"{'убыток ' if value < 0 else ''}{text} ₽"
 
 
+def _brief_courts(check: CompanyCheck) -> str | None:
+    """S8-01: the claim load in one line — the customer asked to see it at a glance. The
+    rules do not raise a priority on it yet (no agreed threshold), so it is a figure here."""
+    snapshot = next((s for s in check.snapshots if s.section is Section.COURTS), None)
+    if snapshot is None or snapshot.status is not FetchStatus.OK:
+        return None
+    count = next((f.value for f in snapshot.facts if f.kind is FactKind.COURT_CASES_ACTIVE), None)
+    if not isinstance(count, int):
+        return None
+    if count == 0:
+        return "Арбитраж: незавершённых дел, где организация ответчик, нет."
+    claims = next((f.value for f in snapshot.facts if f.kind is FactKind.COURT_CLAIMS_TOTAL), None)
+    total = f", иски на {_money(claims, 'RUB')}" if isinstance(claims, Decimal) else ""
+    return f"Арбитраж: незавершённых дел, где организация ответчик, — {count}{total}."
+
+
+def _brief_enforcements(check: CompanyCheck) -> str | None:
+    """S8-01: the bailiffs in one line, next to the claim load: a debt already decided.
+    Like the courts, a figure here — no agreed threshold raises a priority on it yet."""
+    snapshot = next((s for s in check.snapshots if s.section is Section.ENFORCEMENTS), None)
+    if snapshot is None or snapshot.status is not FetchStatus.OK:
+        return None
+    count = next((f.value for f in snapshot.facts if f.kind is FactKind.ENFORCEMENTS_OPEN), None)
+    if not isinstance(count, int):
+        return None
+    if count == 0:
+        return "ФССП: незавершённых исполнительных производств нет."
+    left = next((f.value for f in snapshot.facts if f.kind is FactKind.ENFORCEMENT_DEBT_LEFT), None)
+    total = f", остаток долга {_money(left, 'RUB')}" if isinstance(left, Decimal) and left else ""
+    return f"ФССП: незавершённых исполнительных производств — {count}{total}."
+
+
+NO_BURDEN = "Арбитраж и ФССП: незавершённых дел и производств нет."
+
+
+def _open_count(check: CompanyCheck, section: Section, kind: FactKind) -> int | None:
+    snapshot = next((s for s in check.snapshots if s.section is section), None)
+    if snapshot is None or snapshot.status is not FetchStatus.OK:
+        return None
+    count = next((f.value for f in snapshot.facts if f.kind is kind), None)
+    return count if isinstance(count, int) else None
+
+
+def _brief_burden(check: CompanyCheck) -> list[str]:
+    """The courts and the bailiffs; when both were read and found nothing — one line."""
+    cases = _open_count(check, Section.COURTS, FactKind.COURT_CASES_ACTIVE)
+    proceedings = _open_count(check, Section.ENFORCEMENTS, FactKind.ENFORCEMENTS_OPEN)
+    if cases == 0 and proceedings == 0:
+        return [NO_BURDEN]
+    return [line for line in (_brief_courts(check), _brief_enforcements(check)) if line]
+
+
 def _brief_internal(context: InternalContext) -> list[str]:
     row = context.row
     figures = []
@@ -235,7 +307,9 @@ def format_brief(
         lines += [f"• {signal.reason}" for signal in assessment.signals[:_MAX_REASONS]]
         if len(assessment.signals) > _MAX_REASONS:
             lines.append(f"• ещё причин: {len(assessment.signals) - _MAX_REASONS}")
-    figures = _brief_finances(check, assessment)
+    # The figures in one paragraph: revenue and profit (S8-04), then the claim load and
+    # the bailiffs (S8-01). The brief card stays short, as the customer asked.
+    figures = _brief_finances(check, assessment) + _brief_burden(check)
     if figures:
         lines += ["", *figures]
     if internal is not None:
@@ -402,14 +476,19 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
     title = _SECTION_TITLES[snapshot.section]
     lines = [f"{title} — {_COVERAGE_LABELS[snapshot.coverage]}"]
     if snapshot.status != FetchStatus.OK:
-        if snapshot.error is not None:
-            lines.append(f"  Причина: {snapshot.error.message}")
+        cause = snapshot.error.message if snapshot.error is not None else None
+        if cause is not None:
+            lines.append(f"  Причина: {cause}")
+        # S8-01: the live source puts the same text in both; said once, as the reason.
         for reason in snapshot.missing:
-            lines.append(f"  Ограничение: {reason}")
+            if reason != cause:
+                lines.append(f"  Ограничение: {reason}")
         lines.append(f"  Источник: {snapshot.source}, получено {_date(snapshot.fetched_at)}")
         return lines
     for fact in snapshot.facts:
         lines.append(f"  {_fact(fact)}")
+    if not snapshot.facts and snapshot.section == Section.FEDRESURS:
+        lines.append("  Сообщений о заявлении о банкротстве организации нет.")
     if not snapshot.facts and snapshot.section == Section.BANKRUPTCY:
         if snapshot.coverage == Coverage.COMPLETE:
             lines.append("  За проверенный период сообщений не найдено.")
@@ -430,6 +509,8 @@ def _fact(fact: Fact) -> str:
     when = _period(fact.period) if fact.period is not None else _date(fact.observed_on)
     if fact.kind == FactKind.COMPANY_STATUS:
         return f"{label}: {_STATUS_LABELS[fact.value]} (на {when})"
+    if fact.kind in _AS_OF and isinstance(fact.value, Decimal):
+        return f"{label} на {when}: {_money(fact.value, fact.unit)}"
     if isinstance(fact.value, Decimal):
         return f"{label} за {when}: {_money(fact.value, fact.unit)}"
     return f"{label}: {fact.value} ({when})"

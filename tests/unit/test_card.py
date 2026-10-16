@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from claims_assistant.application.check_company import check_company
+from claims_assistant.application.check_company import CompanyCheck, check_company
 from claims_assistant.application.internal_context import card_assessment
 from claims_assistant.domain.external import (
     CompanyStatus,
@@ -15,11 +15,17 @@ from claims_assistant.domain.external import (
     FactKind,
     FetchStatus,
     Period,
+    ProviderError,
     Section,
 )
 from claims_assistant.domain.scoring import Assessment, Priority, Signal, combine
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
-from claims_assistant.presentation.telegram.card import DETAILS_HINT, format_brief, format_card
+from claims_assistant.presentation.telegram.card import (
+    _PART_TITLES,
+    DETAILS_HINT,
+    format_brief,
+    format_card,
+)
 
 INN = "1234567894"
 
@@ -151,8 +157,8 @@ async def test_incomplete_card_separates_partial_and_unavailable():
 
 async def test_error_card_marks_every_section_unavailable_and_promises_nothing():
     text = await card_for(DemoScenario.ERROR)
-    assert text.count("— раздел недоступен") == 3
-    assert text.count("Источник:") == 3
+    assert text.count("— раздел недоступен") == len(Section)
+    assert text.count("Источник:") == len(Section)
     assert "приоритет" not in text.lower()
     assert "риск" not in text.lower()
 
@@ -265,7 +271,7 @@ async def test_partial_empty_bankruptcy_is_not_reported_as_complete_absence():
     text = format_card(check)
     assert "проверка неполная" in text
     assert "За проверенный период сообщений не найдено" not in text
-    assert text.count("Источник:") == 3
+    assert text.count("Источник:") == len(Section)
 
 
 async def test_card_says_what_is_not_checked_and_where_to_look():
@@ -276,3 +282,61 @@ async def test_card_says_what_is_not_checked_and_where_to_look():
         assert "Блокировки счетов ФНС: не проверяются автоматически" in text
         assert "https://service.nalog.ru/bi.do" in text
         assert "БИК любого банка" in text
+
+
+# --- S8-01 (A): the register by its name, one reason once, every section in Russian ---
+
+LIMIT = "Достигнут лимит запросов Checko."
+
+
+def live_failure(section: Section) -> ExternalSnapshot:
+    """A section the live source could not read: its text is both the error and the gap."""
+    return ExternalSnapshot(
+        inn=INN,
+        section=section,
+        source="checko-company-v2",
+        mode=DataMode.LIVE,
+        fetched_at=datetime(2026, 10, 15, 6, 0, tzinfo=UTC),
+        status=FetchStatus.UNAVAILABLE,
+        coverage=Coverage.UNAVAILABLE,
+        missing=(LIMIT,),
+        error=ProviderError("rate_limited", LIMIT),
+    )
+
+
+def failed_check() -> CompanyCheck:
+    return CompanyCheck(INN, tuple(live_failure(section) for section in Section))
+
+
+def test_failed_section_says_its_reason_once():
+    """The customer saw «Причина» and «Ограничение» with one text under every section."""
+    card = format_card(failed_check())
+    assert card.count(f"Причина: {LIMIT}") == len(Section)
+    assert f"Ограничение: {LIMIT}" not in card
+
+
+async def test_failed_section_keeps_a_limitation_of_its_own():
+    """A gap that says something else than the error is still shown."""
+    card = await card_for(DemoScenario.ERROR)
+    assert "Причина: Синтетический пример сбоя источника." in card
+    assert "Ограничение: Демонстрационный источник недоступен; раздел не проверен." in card
+
+
+async def test_bankruptcy_section_is_named_by_its_register():
+    """«Сообщения о банкротстве — не найдено» read as «no bankruptcy» while a case was in
+    court (15.10.2026): the section says which register was read."""
+    card = await card_for(DemoScenario.ORDINARY)
+    assert "Сообщения ЕФРСБ — проверено полностью" in card
+    assert "Сообщения о банкротстве" not in card
+
+
+def test_every_section_is_named_in_russian_in_the_brief_card():
+    """A section without a title showed its code («courts, fedresurs») in the gaps line."""
+    check = failed_check()
+    brief = format_brief(check, card_assessment(check, None))
+    assert {section.value for section in Section} <= set(_PART_TITLES)
+    gaps = next(line for line in brief.splitlines() if line.startswith("Проверено не полностью"))
+    assert gaps == (
+        "Проверено не полностью: организация, сообщения ЕФРСБ, финансы, "
+        "арбитражные дела, Федресурс, ФССП."
+    )

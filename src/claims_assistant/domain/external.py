@@ -10,6 +10,13 @@ class Section(StrEnum):
     COMPANY = "company"
     BANKRUPTCY = "bankruptcy"
     FINANCES = "finances"
+    # S8-01: unfinished arbitration cases where the company is the defendant, and the
+    # creditors' notices on Fedresurs of their intention to file for its bankruptcy. The
+    # bankruptcy register (EFRSB) is silent until a court opens a case; these two are not.
+    COURTS = "courts"
+    FEDRESURS = "fedresurs"
+    # S8-01: open enforcement proceedings (the bailiffs, ФССП) — a debt already decided.
+    ENFORCEMENTS = "enforcements"
 
 
 class FactKind(StrEnum):
@@ -20,6 +27,24 @@ class FactKind(StrEnum):
     BANKRUPTCY_EVENT = "bankruptcy_event"
     # S3-06: a message about a case that is over; kept as evidence, raises nothing.
     BANKRUPTCY_CLOSED = "bankruptcy_closed"
+    # S8-01: one unfinished arbitration case where the company is the defendant (text).
+    COURT_CASE = "court_case"
+    # S8-01: how many such cases the source counts, and the sum of their claims.
+    COURT_CASES_ACTIVE = "court_cases_active"
+    COURT_CLAIMS_TOTAL = "court_claims_total"
+    # S8-01: a creditor's notice on Fedresurs of its intention to file for the company's
+    # bankruptcy («намерение кредитора обратиться в суд»); published before the filing.
+    BANKRUPTCY_INTENT = "bankruptcy_intent"
+    # S8-01 (live check of 15.10.2026): the filing itself. An open arbitration case of the
+    # bankruptcy kind (``Тип: "Б"``) with the company as the debtor, and the tax
+    # authority's notice on Fedresurs that it has sent such an application to court —
+    # the tax authority files without announcing an intention first.
+    BANKRUPTCY_CASE = "bankruptcy_case"
+    BANKRUPTCY_FILING = "bankruptcy_filing"
+    # S8-01: one open enforcement proceeding (text), how many, and what is left to collect.
+    ENFORCEMENT = "enforcement"
+    ENFORCEMENTS_OPEN = "enforcements_open"
+    ENFORCEMENT_DEBT_LEFT = "enforcement_debt_left"
 
 
 class CompanyStatus(StrEnum):

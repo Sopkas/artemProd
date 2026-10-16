@@ -8,6 +8,7 @@ card of an INN from the package shows that company and not one name for all four
 """
 
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -26,6 +27,11 @@ from claims_assistant.domain.external import (
     ProviderError,
     Section,
 )
+
+
+def _renamed(fact: Fact, fact_id: str) -> Fact:
+    """Two facts of one kind in a section need their own IDs."""
+    return replace(fact, id=fact_id)
 
 
 class DemoScenario(StrEnum):
@@ -94,7 +100,7 @@ class DemoCompanyDataProvider:
 
         def add(
             kind: FactKind,
-            value: str | Decimal | CompanyStatus,
+            value: str | int | Decimal | CompanyStatus,
             *,
             unit: str | None = None,
             year: int | None = None,
@@ -125,8 +131,32 @@ class DemoCompanyDataProvider:
             add(FactKind.NET_PROFIT, Decimal("0.00"), unit="RUB", year=previous)
             add(FactKind.REVENUE, Decimal("12000000.00"), unit="RUB")
             add(FactKind.NET_PROFIT, Decimal("0.00"), unit="RUB")
-        elif scenario == DemoScenario.ALARM:
+        elif section == Section.BANKRUPTCY and scenario == DemoScenario.ALARM:
             add(FactKind.BANKRUPTCY_EVENT, "ДЕМО — сообщение о введении наблюдения")
+        elif section == Section.COURTS:
+            # S8-01: the claim load. The alarm has two open cases as the defendant; the
+            # count and the sum are shown, they raise no priority by themselves.
+            if scenario == DemoScenario.ALARM:
+                add(FactKind.COURT_CASES_ACTIVE, 2)
+                add(FactKind.COURT_CLAIMS_TOTAL, Decimal("3400000.00"), unit="RUB")
+                add(FactKind.COURT_CASE, "ДЕМО А00-1/2025 · иск 2 400 000 ₽")
+                facts[-1] = _renamed(facts[-1], f"{inn}:{section}:{FactKind.COURT_CASE}:1")
+                add(FactKind.COURT_CASE, "ДЕМО А00-2/2025 · иск 1 000 000 ₽")
+                facts[-1] = _renamed(facts[-1], f"{inn}:{section}:{FactKind.COURT_CASE}:2")
+            else:
+                add(FactKind.COURT_CASES_ACTIVE, 0)
+        elif section == Section.ENFORCEMENTS:
+            # S8-01: the alarm has one open proceeding; a figure, it raises nothing alone.
+            if scenario == DemoScenario.ALARM:
+                add(FactKind.ENFORCEMENTS_OPEN, 1)
+                add(FactKind.ENFORCEMENT_DEBT_LEFT, Decimal("125000.00"), unit="RUB")
+                add(
+                    FactKind.ENFORCEMENT,
+                    "ДЕМО № 1/25/00001-ИП · налог, включая пени · остаток 125 000 ₽",
+                )
+            else:
+                add(FactKind.ENFORCEMENTS_OPEN, 0)
+                add(FactKind.ENFORCEMENT_DEBT_LEFT, Decimal("0.00"), unit="RUB")
         return ExternalSnapshot(
             **base,
             status=FetchStatus.OK,

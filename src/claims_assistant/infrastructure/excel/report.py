@@ -66,6 +66,9 @@ _PART_LABELS = {
     "company": "организация",
     "bankruptcy": "ЕФРСБ",
     "finances": "финансы",
+    "courts": "арбитражные дела",
+    "fedresurs": "Федресурс",
+    "enforcements": "ФССП",
 }
 _FACT_LABELS = {
     FactKind.COMPANY_NAME: "Название организации",
@@ -74,6 +77,15 @@ _FACT_LABELS = {
     FactKind.NET_PROFIT: "Чистая прибыль",
     FactKind.BANKRUPTCY_EVENT: "Сообщение ЕФРСБ",
     FactKind.BANKRUPTCY_CLOSED: "ЕФРСБ: дело прекращено",
+    FactKind.COURT_CASE: "Арбитражное дело (организация — ответчик)",
+    FactKind.COURT_CASES_ACTIVE: "Незавершённых арбитражных дел, где организация — ответчик",
+    FactKind.COURT_CLAIMS_TOTAL: "Сумма исков к организации по этим делам",
+    FactKind.BANKRUPTCY_INTENT: "Намерение кредитора подать заявление о банкротстве",
+    FactKind.BANKRUPTCY_CASE: "Дело о банкротстве организации (арбитражный суд)",
+    FactKind.BANKRUPTCY_FILING: "Заявление о банкротстве направлено в суд (Федресурс)",
+    FactKind.ENFORCEMENT: "Исполнительное производство (ФССП)",
+    FactKind.ENFORCEMENTS_OPEN: "Незавершённых исполнительных производств",
+    FactKind.ENFORCEMENT_DEBT_LEFT: "Остаток долга по исполнительным производствам",
 }
 _STATUS_LABELS = {
     CompanyStatus.ACTIVE: "действует",
