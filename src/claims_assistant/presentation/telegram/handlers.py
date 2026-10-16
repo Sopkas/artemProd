@@ -12,6 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, ErrorEvent, Message
 
 from claims_assistant.application.analysis_repository import AnalysisRepository, RepositoryError
+from claims_assistant.application.card_review import CardReviewer
 from claims_assistant.application.check_company import check_company
 from claims_assistant.application.check_package import (
     FileStorage,
@@ -59,7 +60,7 @@ from claims_assistant.infrastructure.storage.local import LocalFileStorage
 
 from . import progress, texts
 from .access import AccessMiddleware
-from .card import format_brief, format_card
+from .card import format_brief, format_card, format_review
 from .menu import (
     ADD_DEBT_REPORT,
     ADD_HISTORY,
@@ -170,6 +171,7 @@ def create_dispatcher(
     reader: SheetReader | None = None,
     mode: DataMode = DataMode.DEMO,
     business_utc_offset_hours: int = 3,
+    card_reviewer: CardReviewer | None = None,
 ) -> Dispatcher:
     if provider is None:
         provider = DemoCompanyDataProvider()
@@ -522,10 +524,24 @@ def create_dispatcher(
             # full card of this same answer, kept with the dialog: no new request to the
             # source (a failed section is not cached) and no other picture than the brief's.
             await state.update_data(card_text=format_card(check, internal))
+            assessment = card_assessment(check, internal)
             await message.answer(
-                format_brief(check, card_assessment(check, internal), internal),
-                reply_markup=card_menu(),
+                format_brief(check, assessment, internal), reply_markup=card_menu()
             )
+        if card_reviewer is not None:
+            await review_card(message, check, assessment, internal)
+
+    async def review_card(message: Message, check, assessment, internal) -> None:
+        """S8-05: the model's reading in a message of its own, after the card is out."""
+        review = None
+        async with progress.note(message, texts.REVIEWING):
+            try:
+                async with progress.typing(message.bot, message.chat.id):
+                    review = await card_reviewer.review(check, assessment, internal)
+            except Exception as exc:
+                # The card is already there; log the type only, the INN may be private.
+                logger.error("card_review_failed error_type=%s", type(exc).__name__)
+            await message.answer(format_review(review), reply_markup=card_menu())
 
     # Outside a dialog only: typed at a step of another dialog, the word is that step's.
     @router.message(StateFilter(None), F.text == DETAILS)

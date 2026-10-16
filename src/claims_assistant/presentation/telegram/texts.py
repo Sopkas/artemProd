@@ -45,6 +45,8 @@ INN_PROMPT = (
 INN_RETRY = "Введите ИНН ещё раз или нажмите «Отмена»."
 # S8-03: sent right after a valid INN, deleted when the card comes; the customer's words.
 COUNTING = "💰 Считаю миллионы…"
+# S8-05: under the card, while the model reads it (10–40 s, measured on #85).
+REVIEWING = "🤖 Разбираю данные…"
 INN_CANCELLED = "Проверка отменена."
 NOTHING_TO_CANCEL = "Сейчас нечего отменять. Выберите пункт меню."
 FALLBACK = "Выберите пункт меню или отправьте /help, чтобы увидеть доступные команды."

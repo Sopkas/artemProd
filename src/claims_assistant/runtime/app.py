@@ -9,6 +9,7 @@ from aiogram.types import BotCommandScopeAllPrivateChats
 
 from claims_assistant.application.analysis_pipeline import AnalysisPipeline, RunLimits
 from claims_assistant.application.analysis_repository import RepositoryError
+from claims_assistant.application.card_review import CardReviewer
 from claims_assistant.application.external_guard import GuardedCompanyDataProvider, GuardPolicy
 from claims_assistant.application.recommendation import AiLimits
 from claims_assistant.application.retention import RetentionSweeper
@@ -106,6 +107,14 @@ async def run(settings: Settings) -> None:
                 TtlSnapshotCache(settings.external.cache_ttl_seconds),
                 mode=mode,
             )
+            # S5-01/S5-02: the recommendation provider, if any; every answer is stored.
+            recommendation_provider = build_recommendation_provider(settings)
+            logger.info(
+                "ai_provider=%s send_comments=%s card_review=%s",
+                recommendation_provider.name if recommendation_provider else "off",
+                settings.ai_send_comments,
+                settings.ai_card_review and recommendation_provider is not None,
+            )
             dispatcher = create_dispatcher(
                 settings.allowed_ids,
                 provider,
@@ -114,15 +123,9 @@ async def run(settings: Settings) -> None:
                 reader=reader,
                 mode=mode,
                 business_utc_offset_hours=settings.business_utc_offset_hours,
+                card_reviewer=_card_reviewer(settings, recommendation_provider, repository),
             )
             # One worker in this process; runs left "running" by a crash go back to the queue.
-            # S5-01/S5-02: the recommendation provider, if any; every answer is stored.
-            recommendation_provider = build_recommendation_provider(settings)
-            logger.info(
-                "ai_provider=%s send_comments=%s",
-                recommendation_provider.name if recommendation_provider else "off",
-                settings.ai_send_comments,
-            )
             pipeline = AnalysisPipeline(
                 files,
                 reader,
@@ -173,6 +176,19 @@ async def run(settings: Settings) -> None:
     finally:
         await bot.session.close()
         logger.info("bot_stopped")
+
+
+def _card_reviewer(settings: Settings, explainer, repository: object) -> CardReviewer | None:
+    """S8-05: the reading under the /inn card — the same model, money and month as the
+    checks, so a card and a check draw on one agreed budget."""
+    if not settings.ai_card_review or explainer is None:
+        return None
+    return CardReviewer(
+        explainer,
+        limits=explainer.policy.limits,
+        spend=_spend_store(repository),
+        month_limit_rub=settings.ai.month_rub_limit,
+    )
 
 
 def _spend_store(repository: object) -> SqliteAiSpendStore | None:

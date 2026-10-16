@@ -9,6 +9,7 @@ date and coverage — is sent on «Подробнее».
 from datetime import date, datetime
 from decimal import Decimal
 
+from claims_assistant.application.card_review import CardReview
 from claims_assistant.application.check_company import CompanyCheck
 from claims_assistant.application.internal_context import InternalContext
 from claims_assistant.domain.external import (
@@ -450,3 +451,29 @@ def _date(value: date | datetime | None) -> str:
     if value is None:
         return "дата неизвестна"
     return value.strftime("%d.%m.%Y")
+
+
+# S8-05: the model's reading, a message of its own under the card. The card is the rules'
+# and stays whatever the model says; the reading is marked as the model's.
+REVIEW_TITLE = "🤖 Разбор ИИ по открытым данным"
+REVIEW_FOOTER = "Проверен по данным карточки; приоритет — по правилам."
+REVIEW_NONE = "🤖 Разбора ИИ нет: {why}. Карточка выше — по правилам."
+REVIEW_MONTH = "лимит расходов на ИИ за месяц исчерпан, модель не спрашивали"
+REVIEW_REJECTED = "ответ модели не прошёл проверку по данным карточки"
+REVIEW_FAILED = "модель недоступна"
+
+
+def format_review(review: CardReview | None) -> str:
+    """The reading under the card, or one line on why there is none."""
+    if review is not None and review.text is not None:
+        return f"{REVIEW_TITLE}\n\n{review.text}\n\n{REVIEW_FOOTER}"
+    if review is not None and review.month_exhausted:
+        why = REVIEW_MONTH
+    elif review is not None and review.outcome is not None and review.outcome.rejected:
+        why = REVIEW_REJECTED
+    elif review is not None and review.outcome is not None and review.outcome.error:
+        # The guard's messages are ours and safe to show: «Модель не ответила в срок.»
+        why = f"{REVIEW_FAILED} ({review.outcome.error.message.rstrip('.').lower()})"
+    else:
+        why = REVIEW_FAILED
+    return REVIEW_NONE.format(why=why)
