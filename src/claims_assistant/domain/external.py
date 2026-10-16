@@ -15,6 +15,8 @@ class Section(StrEnum):
     # bankruptcy register (EFRSB) is silent until a court opens a case; these two are not.
     COURTS = "courts"
     FEDRESURS = "fedresurs"
+    # S8-01: open enforcement proceedings (the bailiffs, ФССП) — a debt already decided.
+    ENFORCEMENTS = "enforcements"
 
 
 class FactKind(StrEnum):
@@ -39,6 +41,10 @@ class FactKind(StrEnum):
     # the tax authority files without announcing an intention first.
     BANKRUPTCY_CASE = "bankruptcy_case"
     BANKRUPTCY_FILING = "bankruptcy_filing"
+    # S8-01: one open enforcement proceeding (text), how many, and what is left to collect.
+    ENFORCEMENT = "enforcement"
+    ENFORCEMENTS_OPEN = "enforcements_open"
+    ENFORCEMENT_DEBT_LEFT = "enforcement_debt_left"
 
 
 class CompanyStatus(StrEnum):

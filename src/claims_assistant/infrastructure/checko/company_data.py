@@ -22,7 +22,13 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.domain.inn import InnKind, inn_kind
-from claims_assistant.infrastructure.checko import bankruptcy, courts, fedresurs, finances
+from claims_assistant.infrastructure.checko import (
+    bankruptcy,
+    courts,
+    enforcements,
+    fedresurs,
+    finances,
+)
 from claims_assistant.infrastructure.checko.errors import (
     ApiRejected,
     InvalidResponse,
@@ -202,6 +208,7 @@ class CheckoCompanyDataProvider:
         finances_transport: finances.FinancesTransport | None = None,
         courts_transport: courts.CourtsTransport | None = None,
         fedresurs_transport: fedresurs.FedresursTransport | None = None,
+        enforcements_transport: enforcements.EnforcementsTransport | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("Checko API key is required")
@@ -211,6 +218,9 @@ class CheckoCompanyDataProvider:
         self._finances_transport = finances_transport or finances.AiohttpFinancesTransport()
         self._courts_transport = courts_transport or courts.AiohttpCourtsTransport()
         self._fedresurs_transport = fedresurs_transport or fedresurs.AiohttpFedresursTransport()
+        self._enforcements_transport = (
+            enforcements_transport or enforcements.AiohttpEnforcementsTransport()
+        )
         self._clock = clock
 
     async def fetch(self, request: CompanyDataRequest) -> tuple[ExternalSnapshot, ...]:
@@ -223,6 +233,7 @@ class CheckoCompanyDataProvider:
             Section.FINANCES: self._finances,
             Section.COURTS: self._courts,
             Section.FEDRESURS: self._fedresurs,
+            Section.ENFORCEMENTS: self._enforcements,
         }
         return tuple([await handlers[section](request, fetched_at) for section in request.sections])
 
@@ -386,12 +397,27 @@ class CheckoCompanyDataProvider:
             request, fetched_at, Section.FEDRESURS, self._fedresurs_transport, project
         )
 
+    async def _enforcements(
+        self, request: CompanyDataRequest, fetched_at: datetime
+    ) -> ExternalSnapshot:
+        """S8-01: open enforcement proceedings (ФССП)."""
+
+        def project(payload: object) -> ExternalSnapshot:
+            records, pages = enforcements.read_enforcements(payload)
+            return enforcements.project_enforcements(request.inn, records, pages, fetched_at)
+
+        return await self._single(
+            request, fetched_at, Section.ENFORCEMENTS, self._enforcements_transport, project
+        )
+
     async def _single(
         self,
         request: CompanyDataRequest,
         fetched_at: datetime,
         section: Section,
-        transport: courts.CourtsTransport | fedresurs.FedresursTransport,
+        transport: courts.CourtsTransport
+        | fedresurs.FedresursTransport
+        | enforcements.EnforcementsTransport,
         project: Callable[[object], ExternalSnapshot],
     ) -> ExternalSnapshot:
         """One request, one page: the failure mapping every section shares."""

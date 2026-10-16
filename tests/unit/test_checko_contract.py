@@ -53,6 +53,7 @@ async def fetch(section: Section, transport: Answer):
         Section.FINANCES: {"finances_transport": transport},
         Section.COURTS: {"courts_transport": transport},
         Section.FEDRESURS: {"fedresurs_transport": transport},
+        Section.ENFORCEMENTS: {"enforcements_transport": transport},
     }[section]
     company = transports.pop("transport", Answer(fixture("company_ok")))
     provider = CheckoCompanyDataProvider(KEY, company, lambda: NOW, **transports)

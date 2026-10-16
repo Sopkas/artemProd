@@ -338,5 +338,5 @@ def test_every_section_is_named_in_russian_in_the_brief_card():
     gaps = next(line for line in brief.splitlines() if line.startswith("Проверено не полностью"))
     assert gaps == (
         "Проверено не полностью: организация, сообщения ЕФРСБ, финансы, "
-        "арбитражные дела, Федресурс."
+        "арбитражные дела, Федресурс, ФССП."
     )

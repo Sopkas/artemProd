@@ -68,6 +68,7 @@ _PART_LABELS = {
     "finances": "финансы",
     "courts": "арбитражные дела",
     "fedresurs": "Федресурс",
+    "enforcements": "ФССП",
 }
 _FACT_LABELS = {
     FactKind.COMPANY_NAME: "Название организации",
@@ -82,6 +83,9 @@ _FACT_LABELS = {
     FactKind.BANKRUPTCY_INTENT: "Намерение кредитора подать заявление о банкротстве",
     FactKind.BANKRUPTCY_CASE: "Дело о банкротстве организации (арбитражный суд)",
     FactKind.BANKRUPTCY_FILING: "Заявление о банкротстве направлено в суд (Федресурс)",
+    FactKind.ENFORCEMENT: "Исполнительное производство (ФССП)",
+    FactKind.ENFORCEMENTS_OPEN: "Незавершённых исполнительных производств",
+    FactKind.ENFORCEMENT_DEBT_LEFT: "Остаток долга по исполнительным производствам",
 }
 _STATUS_LABELS = {
     CompanyStatus.ACTIVE: "действует",
