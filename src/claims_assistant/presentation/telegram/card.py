@@ -6,8 +6,9 @@ mark in the first line, the reasons, the owner's key figures (customer's request
 date and coverage — is sent on «Подробнее».
 """
 
+from collections.abc import Mapping
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from claims_assistant.application.check_company import CompanyCheck
 from claims_assistant.application.internal_context import InternalContext
@@ -28,7 +29,14 @@ from claims_assistant.domain.indicators import (
     PaymentStatus,
 )
 from claims_assistant.domain.manual_checks import MANUAL_CHECKS
-from claims_assistant.domain.scoring import Assessment, Priority, combine
+from claims_assistant.domain.scoring import (
+    Assessment,
+    FinanceTrend,
+    Priority,
+    Trend,
+    combine,
+    finance_trends,
+)
 
 from .texts import PRIORITY_MARKS
 
@@ -117,6 +125,15 @@ ROLE_UNCONFIRMED_LINE = (
 # but there is no data of the owner's, so no priority of the list.
 EXTERNAL_CLEAN_MARK = "ℹ️"
 
+# S8-04: a mark beside each figure (customer, 15.10.2026: «выручка снизилась → красный
+# восклицательный знак»). A figure on which a rule fired gets the mark of that rule's
+# priority — ⚠️ while the finance rules are «Средний» — so the line never says more or less
+# than the first one; otherwise only the direction.
+TREND_MARKS = {Trend.UP: "🔺", Trend.DOWN: "🔻", Trend.FLAT: "➖"}
+_TREND_TITLES = {FactKind.REVENUE: "Выручка", FactKind.NET_PROFIT: "Чистая прибыль"}
+# A figure to read at a glance; the exact sums are in «Подробнее».
+_SCALES = ((Decimal(10**9), "млрд", 1), (Decimal(10**6), "млн", 1), (Decimal(10**3), "тыс.", 0))
+
 
 def _headline(assessment: Assessment, internal: InternalContext | None) -> str:
     priority = assessment.priority
@@ -146,6 +163,55 @@ def _company_name(check: CompanyCheck, internal: InternalContext | None) -> str 
             if fact.kind is FactKind.COMPANY_NAME and isinstance(fact.value, str):
                 return fact.value
     return internal.row.name if internal is not None else None
+
+
+def _brief_finances(check: CompanyCheck, assessment: Assessment) -> list[str]:
+    """Revenue and net profit of the last year against the one before, one line each."""
+    snapshot = next((s for s in check.snapshots if s.section is Section.FINANCES), None)
+    if snapshot is None or snapshot.status is not FetchStatus.OK:
+        return []
+    fired = {signal.code: signal.level for signal in assessment.signals}
+    return [_trend_line(trend, fired) for trend in finance_trends(snapshot)]
+
+
+def _trend_line(trend: FinanceTrend, fired: Mapping[str, Priority]) -> str:
+    if trend.alarm is not None:
+        mark = PRIORITY_MARKS[fired.get(trend.alarm, Priority.MEDIUM)]
+    else:
+        mark = TREND_MARKS[trend.trend]
+    before = trend.year - 1
+    if trend.trend is Trend.FLAT:
+        change = f"без изменений к {before}"
+    elif trend.percent is None:
+        # «−150 %» of a loss means nothing: the previous year is named instead.
+        change = f"в {before} — {_short_figure(trend.previous)}"
+    else:
+        change = f"{_percent(trend)} к {before}"
+    title = f"{_TREND_TITLES[trend.kind]} {trend.year}"
+    return f"{mark} {title}: {_short_figure(trend.value)}, {change}"
+
+
+def _percent(trend: FinanceTrend) -> str:
+    """The rule's own figure when it fired (its reason reads the same); otherwise cut toward
+    zero, so a fall just short of the threshold never reads as the threshold: −29,96 % is
+    «−29,9 %» under 🔻, not «−30 %»."""
+    value = trend.percent
+    if trend.alarm is None:
+        value = value.quantize(Decimal("0.1"), rounding=ROUND_DOWN)
+    figure = f"{abs(value):.1f}".replace(".", ",").removesuffix(",0")
+    return f"{'+' if value > 0 else '−'}{figure} %"
+
+
+def _short_figure(value: Decimal) -> str:
+    """«112 млн ₽», «1,5 млн ₽», «760 тыс. ₽», «убыток 300 тыс. ₽»."""
+    amount = abs(value)
+    text = f"{amount:,.0f}".replace(",", " ")
+    for scale, word, places in _SCALES:
+        if amount >= scale:
+            figure = f"{amount / scale:,.{places}f}".replace(",", " ").replace(".", ",")
+            text = f"{figure.removesuffix(',0')} {word}"
+            break
+    return f"{'убыток ' if value < 0 else ''}{text} ₽"
 
 
 def _brief_courts(check: CompanyCheck) -> str | None:
@@ -178,6 +244,26 @@ def _brief_enforcements(check: CompanyCheck) -> str | None:
     left = next((f.value for f in snapshot.facts if f.kind is FactKind.ENFORCEMENT_DEBT_LEFT), None)
     total = f", остаток долга {_money(left, 'RUB')}" if isinstance(left, Decimal) and left else ""
     return f"ФССП: незавершённых исполнительных производств — {count}{total}."
+
+
+NO_BURDEN = "Арбитраж и ФССП: незавершённых дел и производств нет."
+
+
+def _open_count(check: CompanyCheck, section: Section, kind: FactKind) -> int | None:
+    snapshot = next((s for s in check.snapshots if s.section is section), None)
+    if snapshot is None or snapshot.status is not FetchStatus.OK:
+        return None
+    count = next((f.value for f in snapshot.facts if f.kind is kind), None)
+    return count if isinstance(count, int) else None
+
+
+def _brief_burden(check: CompanyCheck) -> list[str]:
+    """The courts and the bailiffs; when both were read and found nothing — one line."""
+    cases = _open_count(check, Section.COURTS, FactKind.COURT_CASES_ACTIVE)
+    proceedings = _open_count(check, Section.ENFORCEMENTS, FactKind.ENFORCEMENTS_OPEN)
+    if cases == 0 and proceedings == 0:
+        return [NO_BURDEN]
+    return [line for line in (_brief_courts(check), _brief_enforcements(check)) if line]
 
 
 def _brief_internal(context: InternalContext) -> list[str]:
@@ -221,9 +307,11 @@ def format_brief(
         lines += [f"• {signal.reason}" for signal in assessment.signals[:_MAX_REASONS]]
         if len(assessment.signals) > _MAX_REASONS:
             lines.append(f"• ещё причин: {len(assessment.signals) - _MAX_REASONS}")
-    burden = [line for line in (_brief_courts(check), _brief_enforcements(check)) if line]
-    if burden:
-        lines += ["", *burden]
+    # The figures in one paragraph: revenue and profit (S8-04), then the claim load and
+    # the bailiffs (S8-01). The brief card stays short, as the customer asked.
+    figures = _brief_finances(check, assessment) + _brief_burden(check)
+    if figures:
+        lines += ["", *figures]
     if internal is not None:
         lines.append("")
         lines += _brief_internal(internal)
