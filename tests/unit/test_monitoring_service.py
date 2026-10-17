@@ -102,6 +102,7 @@ class Source:
         self.down: set[tuple[str, Section]] = set()
         self.broken: set[str] = set()
         self.spent: set[str] = set()  # companies the day's requests do not reach
+        self.cut: set[tuple[str, Section]] = set()  # sections the requests ran out on
         self.mode = DataMode.DEMO
         self.calls: list[str] = []
         self.budgets: list = []
@@ -122,7 +123,7 @@ class Source:
         for snapshot in await demo.fetch(request):
             if (snapshot.inn, snapshot.section) in self.down:
                 snapshot = down(snapshot)
-            if snapshot.inn in self.spent:
+            if snapshot.inn in self.spent or (snapshot.inn, snapshot.section) in self.cut:
                 snapshot = out_of_requests(snapshot)
             answers.append(replace(snapshot, mode=self.mode))
         return tuple(answers)
@@ -405,6 +406,23 @@ async def test_companies_the_requests_did_not_reach_go_first_next_day(world):
     world.source.calls.clear()
     await run(world, service, 17)
     assert world.source.calls == [B, A, C]
+
+
+async def test_a_company_the_requests_ran_out_on_midway_goes_first_next_day(world):
+    """Review B on #105: the limit ran out after three of its sections. It is recorded —
+    those three answered — and goes first next day, not after a whole round."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A), Candidate(B), Candidate(C)])  # store: C, B, A
+    world.source.cut = {(B, Section.COURTS), (B, Section.ENFORCEMENTS)}
+    outcome = await run(world, service, 16)
+    assert (outcome.checked, outcome.waiting, outcome.unchecked) == (3, 0, 1)
+    assert await world.store.limited(OWNER) == frozenset({B})
+    world.source.cut = set()
+    world.source.calls.clear()
+    await run(world, service, 17)
+    assert world.source.calls == [B, C, A]
+    # Checked in full now: an ordinary place again.
+    assert await world.store.limited(OWNER) == frozenset()
 
 
 async def test_a_day_nothing_could_be_asked_still_says_so(world):

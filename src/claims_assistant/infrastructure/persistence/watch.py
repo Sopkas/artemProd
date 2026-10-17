@@ -56,7 +56,7 @@ def _day(value: str | None) -> date | None:
     return None if value is None else date.fromisoformat(value)
 
 
-def comparison_to_json(comparison: Comparison) -> str:
+def comparison_to_json(comparison: Comparison, *, limited: bool = False) -> str:
     changes = [
         {
             "section": change.section.value,
@@ -75,6 +75,8 @@ def comparison_to_json(comparison: Comparison) -> str:
         "states": [[section.value, state.value] for section, state in comparison.states],
         "notes": [[section.value, note] for section, note in comparison.notes],
     }
+    if limited:
+        data["limited"] = True  # the check ran out of requests: first in the next run
     return json.dumps(data, ensure_ascii=False)
 
 
@@ -237,6 +239,24 @@ class SqliteWatchStore:
     async def results(self, owner_id: int, day: date) -> tuple[DayResult, ...]:
         return await self._run(self._results, owner_id, day)
 
+    async def limited(self, owner_id: int) -> frozenset[str]:
+        return await self._run(self._limited, owner_id)
+
+    def _limited(self, owner_id: int) -> frozenset[str]:
+        query = select(watchlist.c.inn, watchlist.c.last_result).where(
+            watchlist.c.owner_id == owner_id, watchlist.c.last_result.is_not(None)
+        )
+        with self._engine.connect() as connection:
+            rows = connection.execute(query).all()
+        found = set()
+        for row in rows:
+            try:
+                if json.loads(row.last_result).get("limited"):
+                    found.add(row.inn)
+            except (ValueError, AttributeError):
+                continue  # unreadable: an ordinary place in the queue
+        return frozenset(found)
+
     def _snapshots(self, owner_id: int, inn: str):
         query = select(watch_snapshots.c.section, watch_snapshots.c.payload).where(
             watch_snapshots.c.owner_id == owner_id, watch_snapshots.c.inn == inn
@@ -258,7 +278,7 @@ class SqliteWatchStore:
         key = (watchlist.c.owner_id == owner_id, watchlist.c.inn == record.inn)
         values: dict[str, Any] = {
             "last_checked_on": record.day.isoformat(),
-            "last_result": comparison_to_json(record.comparison),
+            "last_result": comparison_to_json(record.comparison, limited=record.limited),
             "name": record.name,
         }
         notices = record.comparison.to_notify

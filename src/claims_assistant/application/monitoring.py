@@ -83,6 +83,9 @@ class CheckRecord:
     snapshots: tuple[ExternalSnapshot, ...]
     comparison: Comparison
     message: str | None  # the change notice, None when there is nothing worth writing
+    # The day's requests ran out on some of its sections: it goes first next time, so the
+    # sections it missed do not wait a whole round (review B on #105).
+    limited: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +133,10 @@ class WatchStore(Protocol):
     async def record_check(self, owner_id: int, record: CheckRecord) -> bool: ...
 
     async def results(self, owner_id: int, day: date) -> tuple[DayResult, ...]: ...
+
+    async def limited(self, owner_id: int) -> frozenset[str]:
+        """INNs whose last check ran out of requests on some section."""
+        ...
 
     async def queue_summary(self, owner_id: int, day: date, text: str) -> bool: ...
 
@@ -186,9 +193,17 @@ def waits_for_limit(snapshots: Sequence[ExternalSnapshot]) -> bool:
     )
 
 
-def queue_order(entries: Sequence[WatchEntry]) -> list[WatchEntry]:
-    """The longest unchecked first; among equals, the store's order (newest first)."""
-    return sorted(entries, key=lambda entry: entry.last_checked_on or date.min)
+def queue_order(
+    entries: Sequence[WatchEntry], limited: frozenset[str] = frozenset()
+) -> list[WatchEntry]:
+    """Never checked and cut short by the limit last time first, then the longest
+    unchecked; among equals, the store's order (newest first)."""
+
+    def key(entry: WatchEntry) -> tuple[bool, date]:
+        settled = entry.last_checked_on is not None and entry.inn not in limited
+        return settled, entry.last_checked_on or date.min
+
+    return sorted(entries, key=key)
 
 
 def failed_comparison(inn: str) -> Comparison:
@@ -257,7 +272,8 @@ class MonitoringService:
         checked = changed = unchecked = failed = waiting = 0
         for owner_id in owners:
             waits = 0
-            for entry in queue_order(await self._store.entries(owner_id)):
+            entries = await self._store.entries(owner_id)
+            for entry in queue_order(entries, await self._store.limited(owner_id)):
                 if entry.last_checked_on == day:
                     continue  # done before a restart
                 done = await self._check(owner_id, entry, day, source)
@@ -299,6 +315,10 @@ class MonitoringService:
             current = await source.fetch(CompanyDataRequest(inn=entry.inn, sections=MONITORED))
             if waits_for_limit(current):
                 return _WAITS
+            limited = any(
+                snapshot.error is not None and snapshot.error.code in _LIMIT_CODES
+                for snapshot in current
+            )
             previous = [
                 snapshot
                 for snapshot in await self._store.snapshots(owner_id, entry.inn)
@@ -317,8 +337,8 @@ class MonitoringService:
             # recorded as checked, with the reason, and the next day tries it again.
             logger.error("monitoring_check_failed error_type=%s", type(exc).__name__)
             comparison, name, message, good = failed_comparison(entry.inn), entry.name, None, ()
-            broke = True
-        record = CheckRecord(entry.inn, day, name, good, comparison, message)
+            broke, limited = True, False
+        record = CheckRecord(entry.inn, day, name, good, comparison, message, limited)
         if not await self._store.record_check(owner_id, record):
             return None
         return comparison, broke
