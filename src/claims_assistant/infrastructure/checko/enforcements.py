@@ -22,7 +22,16 @@ answer — reconcile here when it is:
                           "СумДолг": 125000.0, "ОстЗадолж": 125000.0}]},
      "meta": {"status": "ok", ...}}
 
-The documentation names no count of all records and no end date of a proceeding. So the
+CHECKED LIVE on 16.10.2026 (developer A, review of #92): ``data`` carries totals the
+documentation does not name — ``ЗапВсего``, ``ОбщКолич``, ``ОбщСум``, ``ОстЗадолж`` — and on
+a debtor with six proceedings they matched the records to the kopeck. On a large company
+the first page held a hundred proceedings, 73 of them with something left, and more pages
+in the source: the method returns finished proceedings too. So what is left to collect is
+the source's own total, over every proceeding, as the claims are for the courts; how many
+are still open is known exactly only when every record came — otherwise only «at least»,
+and the section says so with the count of all proceedings in the source.
+
+The documentation names no end date of a proceeding. So the
 count is of the records received, a proceeding with nothing left to pay (``ОстЗадолж`` 0)
 is taken as finished and left out, and one whose remainder the source did not name is kept
 — counted, but outside the sum — rather than guessed paid.
@@ -85,11 +94,15 @@ class AiohttpEnforcementsTransport:
                 return await read_response(response)
 
 
-def read_enforcements(payload: object) -> tuple[list[dict], int]:
-    """Validate the envelope; return (records of the first page, pages in the source).
+def read_enforcements(
+    payload: object,
+) -> tuple[list[dict], int, int | None, Decimal | None]:
+    """Validate the envelope; return (records of the first page, pages in the source,
+    proceedings in the source, what is left to collect over all of them).
 
-    Like the other list methods, but without a count of all records: an empty answer is
-    taken in whichever form it comes — zero pages or one page with no records.
+    The two totals are None when the answer does not carry them — then the first page is
+    all there is to count. An empty answer is taken in whichever form it comes: zero pages
+    or one page with no records.
     """
     if not isinstance(payload, dict) or not isinstance(payload.get("meta"), dict):
         raise InvalidResponse()
@@ -109,13 +122,19 @@ def read_enforcements(payload: object) -> tuple[list[dict], int]:
         raise InvalidResponse()
     if records and pages < 1:
         raise InvalidResponse()
-    return records, pages
+    total = data.get("ЗапВсего")
+    if total is not None and (type(total) is not int or total < 0):
+        raise InvalidResponse()
+    left = _amount(data.get("ОстЗадолж"))
+    if left is not None and left < 0:
+        raise InvalidResponse()
+    return records, pages, total, left
 
 
-def _label(record: dict, number: str, started: str) -> str:
-    """The proceeding as a person reads it: number and date, what is collected, how much is
-    left, and the bailiffs' office."""
-    parts = [f"№ {number} от {started}" if number else f"от {started}"]
+def _label(record: dict, number: str) -> str:
+    """The proceeding as a person reads it: number, what is collected, how much is left,
+    and the bailiffs' office. The date is the fact's own and goes beside it, not twice."""
+    parts = [f"№ {number}"] if number else []
     subject = _text(record.get("ПредмИсп"), 200)
     if subject:
         parts.append(subject)
@@ -131,14 +150,24 @@ def _label(record: dict, number: str, started: str) -> str:
 
 
 def project_enforcements(
-    inn: str, records: list[dict], pages: int, fetched_at: datetime
+    inn: str,
+    records: list[dict],
+    pages: int,
+    fetched_at: datetime,
+    *,
+    total: int | None = None,
+    left: Decimal | None = None,
 ) -> ExternalSnapshot:
-    """Open proceedings: how many, how much is left to collect, and each of them."""
+    """Open proceedings: how many, how much is left to collect, and each of them.
+
+    ``total`` and ``left`` are the source's own totals; without them the first page is
+    counted, as before.
+    """
     as_of = fetched_at.date()
     summary = Evidence("enforcements", SOURCE, inn)
     evidence = [summary]
     facts: list[Fact] = []
-    left_total = Decimal(0)
+    page_left = Decimal(0)
     open_count = 0
     unreadable = 0
     no_remainder = 0
@@ -147,14 +176,14 @@ def project_enforcements(
         if started_on is None:
             unreadable += 1
             continue
-        left = _amount(record.get("ОстЗадолж"))
-        if left is not None and left <= 0:
+        rest = _amount(record.get("ОстЗадолж"))
+        if rest is not None and rest <= 0:
             continue  # nothing left to collect: the proceeding is over
         open_count += 1
-        if left is None:
+        if rest is None:
             no_remainder += 1
         else:
-            left_total += left
+            page_left += rest
         number = _text(record.get("ИспПрНомер"), 100) or ""
         item = Evidence(f"enforcement-{index}", SOURCE, number or f"{inn}:{index}")
         evidence.append(item)
@@ -163,12 +192,15 @@ def project_enforcements(
                 f"enforcement-{index}",
                 inn,
                 FactKind.ENFORCEMENT,
-                _label(record, number, f"{started_on:%d.%m.%Y}"),
+                _label(record, number),
                 (item.id,),
                 observed_on=started_on,
             )
         )
-    facts[:0] = [
+    # Cut: the source holds more proceedings than came. Then the open ones counted here
+    # are a floor, and the count of all proceedings in the source goes beside them.
+    cut = total > len(records) if total is not None else pages > 1
+    head = [
         Fact(
             "enforcements-open",
             inn,
@@ -181,20 +213,37 @@ def project_enforcements(
             "enforcements-left",
             inn,
             FactKind.ENFORCEMENT_DEBT_LEFT,
-            left_total,
+            left if left is not None else page_left,
             (summary.id,),
             observed_on=as_of,
             unit=UNIT,
         ),
     ]
-    missing = []
-    if pages > 1:
-        missing.append(
-            f"Показаны {len(records)} новейших исполнительных производств; в источнике их больше."
+    if cut:
+        head.append(
+            Fact(
+                "enforcements-total",
+                inn,
+                FactKind.ENFORCEMENTS_TOTAL,
+                total,
+                (summary.id,),
+                observed_on=as_of,
+                missing_reason=None if total is not None else "источник не назвал число",
+            )
         )
+    facts[:0] = head
+    missing = []
+    if cut:
+        of = f" из {total}" if total is not None else ""
+        missing.append(
+            f"Показаны {len(records)} новейших исполнительных производств{of} (вместе "
+            f"с оконченными); незавершённых среди них — {open_count}, всего может быть больше."
+        )
+        if left is None:
+            missing.append("Остаток долга — только по показанным производствам.")
     if unreadable:
         missing.append("Часть производств без распознанной даты не учтена.")
-    if no_remainder:
+    if no_remainder and left is None:
         missing.append(
             f"У {no_remainder} производств источник не назвал остаток; в сумму они не вошли."
         )

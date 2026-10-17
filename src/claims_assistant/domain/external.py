@@ -45,6 +45,10 @@ class FactKind(StrEnum):
     ENFORCEMENT = "enforcement"
     ENFORCEMENTS_OPEN = "enforcements_open"
     ENFORCEMENT_DEBT_LEFT = "enforcement_debt_left"
+    # Live check of 16.10.2026: the source returns finished proceedings too, a hundred at
+    # a time. When more are there than came, the open count is a floor and this is how
+    # many proceedings the source holds in all.
+    ENFORCEMENTS_TOTAL = "enforcements_total"
 
 
 class CompanyStatus(StrEnum):

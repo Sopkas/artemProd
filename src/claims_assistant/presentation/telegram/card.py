@@ -76,6 +76,7 @@ _FACT_LABELS = {
     FactKind.ENFORCEMENT: "Производство",
     FactKind.ENFORCEMENTS_OPEN: "Незавершённых производств",
     FactKind.ENFORCEMENT_DEBT_LEFT: "Остаток долга",
+    FactKind.ENFORCEMENTS_TOTAL: "Всего производств в источнике, вместе с оконченными",
 }
 # Totals that are true on a day, not over a period: «на 15.10.2026», not «за».
 _AS_OF = frozenset({FactKind.COURT_CLAIMS_TOTAL, FactKind.ENFORCEMENT_DEBT_LEFT})
@@ -246,7 +247,10 @@ def _brief_enforcements(check: CompanyCheck) -> str | None:
         return "ФССП: незавершённых исполнительных производств нет."
     left = next((f.value for f in snapshot.facts if f.kind is FactKind.ENFORCEMENT_DEBT_LEFT), None)
     total = f", остаток долга {_money(left, 'RUB')}" if isinstance(left, Decimal) and left else ""
-    return f"ФССП: незавершённых исполнительных производств — {count}{total}."
+    # A cut list: the source returned the newest hundred, finished ones among them.
+    floor = any(f.kind is FactKind.ENFORCEMENTS_TOTAL for f in snapshot.facts)
+    figure = f"не меньше {count}" if floor else str(count)
+    return f"ФССП: незавершённых исполнительных производств — {figure}{total}."
 
 
 NO_BURDEN = "Арбитраж и ФССП: незавершённых дел и производств нет."
