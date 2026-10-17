@@ -29,6 +29,13 @@ WATCH_CLEAR = "Очистить весь список"
 WATCH_CLEAR_CONFIRM = "Да, очистить список"
 BACK = "В главное меню"
 UNWATCH = "Больше не следить"
+# S8-12: a pause and how often to check, «чтобы не тратить деньги» (the customer, 17.10).
+WATCH_PAUSE = "⏸ Приостановить"
+WATCH_RESUME = "▶️ Возобновить"
+WATCH_FREQUENCY = "Как часто проверять"
+FREQUENCY_DAILY = "Каждый день"
+FREQUENCY_WEEKDAYS = "По будням"
+FREQUENCY_WEEKLY = "Раз в неделю"
 # Callback data of the button under a notice: «unwatch:<ИНН>».
 UNWATCH_PREFIX = "unwatch:"
 
@@ -54,8 +61,15 @@ def card_menu() -> ReplyKeyboardMarkup:
     return _keyboard([[DETAILS], *_MAIN_ROWS])
 
 
-def monitoring_menu() -> ReplyKeyboardMarkup:
-    return _keyboard([[WATCH_ADD, WATCH_REMOVE], [WATCH_FILE, WATCH_CLEAR], [BACK]])
+def monitoring_menu(paused: bool = False) -> ReplyKeyboardMarkup:
+    switch = WATCH_RESUME if paused else WATCH_PAUSE
+    return _keyboard(
+        [[WATCH_ADD, WATCH_REMOVE], [WATCH_FILE, WATCH_CLEAR], [switch, WATCH_FREQUENCY], [BACK]]
+    )
+
+
+def frequency_menu() -> ReplyKeyboardMarkup:
+    return _keyboard([[FREQUENCY_DAILY], [FREQUENCY_WEEKDAYS], [FREQUENCY_WEEKLY], [CANCEL]])
 
 
 def clear_menu() -> ReplyKeyboardMarkup:
