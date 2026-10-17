@@ -40,7 +40,9 @@ def build_watchlist(entries: Sequence[WatchEntry], as_of: date, limit: int = WAT
     for cell in sheet[2]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(wrap_text=True, vertical="top")
-    ordered = sorted(entries, key=lambda entry: (entry.added_on, entry.inn), reverse=True)
+    # By the day only: within a day the order is the store's, newest first, and a stable
+    # sort keeps it (review A on #101) — by INN it was not the order of adding.
+    ordered = sorted(entries, key=lambda entry: entry.added_on, reverse=True)
     for number, entry in enumerate(ordered, start=1):
         sheet.append(
             [

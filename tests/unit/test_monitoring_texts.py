@@ -5,6 +5,7 @@ rules' own tests; names and INNs are synthetic.
 """
 
 import io
+from dataclasses import replace
 from datetime import date
 
 from openpyxl import load_workbook
@@ -135,6 +136,46 @@ def test_the_day_names_who_changed_and_who_was_checked_first():
     assert "Изменений нет." not in text
 
 
+def rebased():
+    """Yesterday Fedresurs did not answer; today it did — compared everywhere else."""
+    return compare(
+        INN,
+        full_day(YESTERDAY, fedresurs=failed(Section.FEDRESURS, YESTERDAY)),
+        full_day(TODAY),
+    )
+
+
+def test_a_section_that_failed_yesterday_is_not_a_company_checked_first():
+    """Live run of #105 (review A on #101): the company was checked the day before."""
+    text = format_daily_summary(DAY, [Checked(INN, NAME, rebased())])
+    assert "Впервые проверено" not in text
+    assert "Точка отсчёта по разделам, которые в прошлый раз не ответили:\n  Федресурс: 1" in text
+    # Everything answered today: not «проверено не всё», and not «Изменений нет» either.
+    assert "Новых изменений не найдено." in text
+    assert "проверено не всё" not in text and "Изменений нет." not in text
+
+
+def test_checko_keeps_its_capital_in_a_reason():
+    snapshot = failed(Section.ENFORCEMENTS, TODAY)
+    reason = "Checko не ответил за отведённое время."
+    snapshot = replace(snapshot, missing=(reason,), error=replace(snapshot.error, message=reason))
+    comparison = compare(INN, full_day(YESTERDAY), full_day(TODAY, enforcements=snapshot))
+    text = format_daily_summary(DAY, [Checked(INN, NAME, comparison)])
+    assert "ФССП — Checko не ответил за отведённое время: 1" in text
+
+
+def test_a_date_already_in_the_label_is_not_repeated():
+    comparison = with_new_case()
+    change = comparison.to_notify[0]
+    dated = replace(change, text=f"{change.text} от 15.10.2026")
+    text = format_changes(INN, NAME, replace(comparison, changes=(dated,)), DAY)
+    assert text.count("15.10.2026") == 1
+
+
+def test_an_empty_day_says_the_list_is_empty():
+    assert format_daily_summary(DAY, []) == "📋 Мониторинг на 16.10.2026: в списке нет организаций."
+
+
 # --- the file ------------------------------------------------------------------------
 
 
@@ -159,6 +200,16 @@ def test_the_list_as_a_file_newest_first_with_text_inns_and_dates():
     assert oldest[3].value.date() == date(2026, 10, 1)
     assert oldest[3].number_format == "DD.MM.YYYY"
     assert sheet.freeze_panes == "C3"
+
+
+def test_one_day_keeps_the_order_of_adding_not_of_the_inn():
+    """The store gives the list newest first; within a day the file keeps that order."""
+    entries = [
+        WatchEntry("9999999999", DAY, "Добавлена последней"),
+        WatchEntry("0000000001", DAY, "Добавлена раньше"),
+    ]
+    sheet = load_workbook(io.BytesIO(build_watchlist(entries, DAY)))[SHEET_NAME]
+    assert [sheet[3][1].value, sheet[4][1].value] == ["9999999999", "0000000001"]
 
 
 def test_an_empty_list_is_a_file_with_its_header():

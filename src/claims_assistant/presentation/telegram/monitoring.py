@@ -61,9 +61,16 @@ def _cut(text: str) -> str:
     return text[: MESSAGE_LIMIT - 1].rsplit("\n", 1)[0] + "\n…"
 
 
+# Names that open a reason and keep their capital: «Checko не ответил…» (review A on #101,
+# the guard's own wording on a live run).
+_PROPER = ("Checko",)
+
+
 def _inside(sentence: str) -> str:
-    """A reason after a dash: «Источник не ответил» → «источник не ответил»; an acronym at
-    the start («ФНС …») keeps its capitals."""
+    """A reason after a dash: «Источник не ответил» → «источник не ответил»; an acronym
+    («ФНС …») or a name («Checko …») at the start keeps its capitals."""
+    if sentence.startswith(_PROPER):
+        return sentence
     if len(sentence) > 1 and sentence[0].isupper() and sentence[1].islower():
         return sentence[0].lower() + sentence[1:]
     return sentence
@@ -90,7 +97,11 @@ def format_changes(
         return None
     lines = [f"🔔 Мониторинг, {_day(checked_on)}: {_who(inn, name)}", ""]
     for change in changes[:MAX_CHANGES]:
-        when = f" ({_day(change.observed_on)})" if change.observed_on else ""
+        # Not twice: a label that already carries the date (an older proceeding's «от …»)
+        # gets no second one in brackets (review A on #101).
+        when = ""
+        if change.observed_on and _day(change.observed_on) not in change.text:
+            when = f" ({_day(change.observed_on)})"
         lines.append(f"• {change.text}{when}")
         if change.url:
             lines.append(f"  {change.url}")
@@ -103,23 +114,41 @@ def format_changes(
     return _cut("\n".join(lines))
 
 
+def _baseline(comparison: Comparison) -> list[Section]:
+    return [s for s, state in comparison.states if state is SectionState.BASELINE]
+
+
 def format_daily_summary(day: date, checked: Sequence[Checked]) -> str:
     """The day in one message: how many, which changed, what is not known and why."""
+    if not checked:
+        return f"📋 Мониторинг на {_day(day)}: в списке нет организаций."
     lines = [f"📋 Мониторинг на {_day(day)}. Организаций проверено: {len(checked)}."]
     changed = [item for item in checked if item.comparison.to_notify]
+    # First: every section a baseline — the company itself is new on the list. A section
+    # that is a baseline beside compared ones failed last time and answered today: the
+    # company was checked before (review A on #101, live run of #105).
     first = [
         item
         for item in checked
-        if any(state is SectionState.BASELINE for _s, state in item.comparison.states)
+        if all(state is SectionState.BASELINE for _s, state in item.comparison.states)
     ]
+    rebased = Counter(
+        SECTION_NAMES.get(section, section.value)
+        for item in checked
+        if item not in first
+        for section in _baseline(item.comparison)
+    )
     unread = [item for item in checked if item.comparison.unchecked]
     if changed:
         lines += ["", f"Изменения у {of_companies(len(changed))} — подробности выше:"]
         lines += [f"  {_who(item.inn, item.name)}" for item in changed[:MAX_NAMES]]
         if len(changed) > MAX_NAMES:
             lines.append(f"  …и ещё {len(changed) - MAX_NAMES}")
-    elif checked and all(item.comparison.nothing_new for item in checked):
+    elif all(item.comparison.nothing_new for item in checked):
         lines += ["", "Изменений нет."]
+    elif not unread:
+        # Everything answered; some of it is a first reading, said below.
+        lines += ["", "Новых изменений не найдено."]
     else:
         lines += ["", "Новых изменений не найдено, но проверено не всё — ниже."]
     if first:
@@ -128,6 +157,9 @@ def format_daily_summary(day: date, checked: Sequence[Checked]) -> str:
             f"Впервые проверено: {companies(len(first))}. Это точка отсчёта — "
             "изменения будут видны со следующей проверки.",
         ]
+    if rebased:
+        lines += ["", "Точка отсчёта по разделам, которые в прошлый раз не ответили:"]
+        lines += [f"  {name}: {count}" for name, count in rebased.most_common()]
     if unread:
         reasons = Counter(line for item in unread for line in _unchecked(item.comparison))
         lines += ["", f"Проверено не полностью: {companies(len(unread))}."]
