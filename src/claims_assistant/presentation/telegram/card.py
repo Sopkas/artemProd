@@ -94,6 +94,17 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 # dropped one by one (newest kept) until the whole text fits.
 _CARD_BUDGET = TELEGRAM_MESSAGE_LIMIT - 96
 _MAX_CONTRACTS = 5  # the rest are counted: the card is one Telegram message
+# Record lists of the source: the full card shows the newest few of each and counts the
+# rest. A large company (live, 17.10.2026) has a hundred cases and a hundred proceedings
+# in its answer — 23 708 characters, which Telegram refused, so «Подробнее» failed. Every
+# record stays in the report's «Основания» and with the source.
+_LISTED = {
+    FactKind.COURT_CASE: 5,
+    FactKind.ENFORCEMENT: 5,
+    FactKind.BANKRUPTCY_EVENT: 10,
+    FactKind.BANKRUPTCY_INTENT: 10,
+    FactKind.BANKRUPTCY_FILING: 10,
+}
 
 
 # The words of the first line, after the mark of the priority (``texts.PRIORITY_MARKS``).
@@ -488,8 +499,11 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
                 lines.append(f"  Ограничение: {reason}")
         lines.append(f"  Источник: {snapshot.source}, получено {_date(snapshot.fetched_at)}")
         return lines
-    for fact in snapshot.facts:
+    shown, hidden = _listed(snapshot.facts)
+    for fact in shown:
         lines.append(f"  {_fact(fact)}")
+    for kind, count in hidden.items():
+        lines.append(f"  …и ещё {count}; здесь — {_LISTED[kind]} новейших")
     if not snapshot.facts and snapshot.section == Section.FEDRESURS:
         lines.append("  Сообщений о заявлении о банкротстве организации нет.")
     if not snapshot.facts and snapshot.section == Section.BANKRUPTCY:
@@ -503,6 +517,44 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
         lines.append(f"  Ограничение: {reason}")
     lines.append(f"  Источник: {snapshot.source}, получено {_date(snapshot.fetched_at)}")
     return lines
+
+
+def _listed(facts: tuple[Fact, ...]) -> tuple[list[Fact], dict[FactKind, int]]:
+    """The facts to print, in their order, and how many records of each long list are not:
+    of a listed kind only the newest few stay."""
+    keep: set[int] = set()
+    hidden: dict[FactKind, int] = {}
+    for kind, limit in _LISTED.items():
+        group = [fact for fact in facts if fact.kind is kind]
+        newest = sorted(group, key=lambda fact: fact.observed_on or date.min, reverse=True)
+        keep.update(id(fact) for fact in newest[:limit])
+        if len(group) > limit:
+            hidden[kind] = len(group) - limit
+    return [f for f in facts if f.kind not in _LISTED or id(f) in keep], hidden
+
+
+def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """A text in parts Telegram takes (4096 characters each), cut at line ends; a line
+    longer than a message is cut where it must. The last guard of the full card: whatever
+    a source returns, «Подробнее» answers."""
+    parts: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            parts.append(current)
+            current = line
+        else:
+            current = candidate
+    if current or not parts:
+        parts.append(current)
+    return parts
 
 
 def _fact(fact: Fact) -> str:
