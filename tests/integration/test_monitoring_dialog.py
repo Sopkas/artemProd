@@ -28,6 +28,7 @@ from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repos
 from claims_assistant.infrastructure.persistence.watch import SqliteWatchStore
 from claims_assistant.presentation.telegram import texts
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
+from claims_assistant.presentation.telegram.monitoring_dialog import names_in
 from claims_assistant.presentation.telegram.monitoring_notifier import (
     TelegramMonitoringNotifier,
     TelegramMonitoringTexts,
@@ -197,7 +198,42 @@ async def test_inns_in_a_message_are_added_and_the_screen_shows_them(
     assert screen.text.startswith("🔔 Мониторинг: 2 из 100.")
     assert "Ждут первой проверки: 2." in screen.text
     recent = screen.text.split("Последние добавленные:\n")[1].splitlines()[:2]
-    assert recent == [f"  {B}", f"  {A}"]  # newest first
+    assert recent == [f"  {B}", f"  {A} — ООО «Альфа»"]  # newest first, the name kept
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        (f"1. {A} ПАО «Альфа»", {A: "ПАО «Альфа»"}),
+        (f"2) {A} — ООО «Бета», 16.10.2026", {A: "ООО «Бета»"}),
+        (f"ООО «Гамма» ИНН {A}", {A: "ООО «Гамма»"}),
+        (f"ИНН: {A}; ООО «Дельта»", {A: "ООО «Дельта»"}),
+        (f"{A}\t{B}", {}),  # two INNs on a line: whose name, unknown
+        (f"{A}, 15", {}),  # no letters: no name
+        (f"{A} Альфа\n{B}", {A: "Альфа"}),
+    ],
+)
+def test_a_name_is_read_from_the_line_of_its_inn(text, names):
+    assert names_in(text) == names
+
+
+async def test_a_name_beside_an_inn_is_kept_and_fills_a_gap(bot, update_factory, dispatcher):
+    """17.10.2026: the names typed beside INNs were dropped, «Название» stayed empty, and
+    sending them again changed nothing — the INNs were already on the list."""
+    await send(dispatcher, bot, update_factory, "Мониторинг", "Добавить на мониторинг", f"{A}\n{B}")
+    screen = await send(dispatcher, bot, update_factory, "Мониторинг")
+    assert texts.WATCH_NAME_LATER in screen.text
+    reply = await send(
+        dispatcher,
+        bot,
+        update_factory,
+        "Добавить на мониторинг",
+        f"1. {A} ПАО «Альфа»\n2) {B} — ООО «Бета», 16.10.2026",
+    )
+    assert "Уже были на мониторинге: 2." in reply.text
+    screen = await send(dispatcher, bot, update_factory, "Мониторинг")
+    assert f"  {B} — ООО «Бета»" in screen.text and f"  {A} — ПАО «Альфа»" in screen.text
+    assert texts.WATCH_NAME_LATER not in screen.text
 
 
 async def test_a_mistyped_inn_is_named_by_its_place_and_the_rest_is_added(

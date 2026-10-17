@@ -474,6 +474,10 @@ WATCH_CLEAR_KEPT = "Список не тронут."
 WATCH_FAILED = "Не удалось обновить список мониторинга. Попробуйте ещё раз позже."
 UNWATCH_ABSENT = "Этой организации уже нет на мониторинге."
 _RECENT = 5
+WATCH_NAME_LATER = (
+    "Названия, которых нет в списке, бот возьмёт из источника при первой проверке; можно "
+    "прислать ИНН вместе с названием в одной строке."
+)
 
 
 def watch_schedule(run_at: time, utc_offset_hours: int) -> str:
@@ -509,6 +513,8 @@ def watch_overview(entries: Sequence[WatchEntry], limit: int, schedule: str) -> 
     lines += [f"  {_watched(entry)}" for entry in entries[:_RECENT]]
     if len(entries) > _RECENT:
         lines.append(f"  …и ещё {len(entries) - _RECENT} — весь список: «Список файлом».")
+    if any(entry.name is None for entry in entries):
+        lines.append(WATCH_NAME_LATER)
     lines += ["", WATCH_RULES]
     return "\n".join(lines)
 

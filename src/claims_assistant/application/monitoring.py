@@ -305,7 +305,9 @@ class MonitoringService:
                 if snapshot.mode is self._mode
             ]
             comparison = compare(entry.inn, previous, current)
-            name = company_name(current) or entry.name
+            # The customer's own name (his message, file or 1C report) stays; the source's
+            # fills a gap (17.10.2026).
+            name = entry.name or company_name(current)
             message = self._texts.changes(entry.inn, name, comparison, day)
             good = tuple(s for s in current if s.status is FetchStatus.OK)
         except asyncio.CancelledError:

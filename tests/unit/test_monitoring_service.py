@@ -177,12 +177,12 @@ async def test_the_first_check_is_a_baseline_and_the_summary_says_so(world):
     assert summary.owner_id == OWNER and summary.inn is None
     assert summary.text.startswith("📋 Мониторинг на 16.10.2026. Организаций проверено: 2.")
     assert "Впервые проверено: 2 организации" in summary.text
-    # The day is done: no second run today, and every company has its date and the
-    # source's name.
+    # The day is done: no second run today, and every company has its date. The source's
+    # name fills a gap; the customer's own name stays (17.10.2026).
     assert await service.due() is None
     entries = await service.entries(OWNER)
     assert {entry.last_checked_on for entry in entries} == {date(2026, 10, 16)}
-    assert {entry.name for entry in entries} == {DEMO_NAME}
+    assert {entry.inn: entry.name for entry in entries} == {A: "ООО «Альфа»", B: DEMO_NAME}
     assert len(await world.store.snapshots(OWNER, A)) == len(MONITORED)
 
 

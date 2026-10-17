@@ -10,6 +10,8 @@ What the user reads after adding or taking off is part B's (``watchlist.format_a
 """
 
 import logging
+import re
+from dataclasses import replace
 from io import BytesIO
 
 from aiogram import Bot, F, Router
@@ -22,7 +24,7 @@ from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.imports import WorkbookError
 from claims_assistant.application.monitoring import MonitoringService
 from claims_assistant.application.watchlist_files import read_watch_file
-from claims_assistant.domain.watchlist import parse_inns
+from claims_assistant.domain.watchlist import Candidate, parse_inns
 from claims_assistant.infrastructure.excel.watchlist import build_watchlist
 
 from . import texts
@@ -52,6 +54,42 @@ logger = logging.getLogger(__name__)
 _SPREADSHEET = (".xlsx", ".xls")
 # The shell's buttons: they leave the monitoring dialog for the shell to answer.
 _SHELL = frozenset({CHECK_INN, NEW_CHECK, STATUS, REPORT, "О сервисе", "Помощь"})
+
+
+# A name written beside an INN on its own line («1. 7707083893 ПАО Сбербанк»): the INN,
+# the numbering, dates and separators are taken out, what has a letter is the name. The
+# customer typed names that way (17.10.2026) and saw an empty «Название» — the list kept
+# INNs only until the first check brought the source's name.
+_INN = re.compile(r"(?<!\d)(?:\d{10}|\d{12})(?!\d)")
+_NUMBERING = re.compile(r"^\s*\d{1,3}[.)]\s+")
+_DATE = re.compile(r"\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b")
+_LABEL = re.compile(r"(?i)\bинн\b\s*[:№]?")
+_EDGES = " \t,;:—–-|"
+
+
+def names_in(text: str) -> dict[str, str]:
+    """INN → the name on its line, for lines with exactly one INN and some letters."""
+    names: dict[str, str] = {}
+    for line in text.splitlines():
+        found = _INN.findall(line)
+        if len(found) != 1:
+            continue
+        rest = _INN.sub(" ", _NUMBERING.sub("", line))
+        rest = _LABEL.sub(" ", _DATE.sub(" ", rest))
+        name = " ".join(rest.split()).strip(_EDGES)
+        if any(char.isalpha() for char in name):
+            names.setdefault(found[0], name[:300])
+    return names
+
+
+def _with_names(candidates, text: str) -> list[Candidate]:
+    names = names_in(text)
+    return [
+        replace(candidate, name=names[candidate.inn])
+        if candidate.name is None and candidate.inn in names
+        else candidate
+        for candidate in candidates
+    ]
 
 
 class MonitorDialog(StatesGroup):
@@ -182,9 +220,8 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
         if not parsed.candidates and not parsed.invalid:
             await message.answer(texts.WATCH_NO_INN, reply_markup=cancel_menu())
             return
-        await added(
-            message, state, parsed.candidates, invalid=parsed.invalid, repeats=parsed.repeats
-        )
+        candidates = _with_names(parsed.candidates, message.text)
+        await added(message, state, candidates, invalid=parsed.invalid, repeats=parsed.repeats)
 
     @router.message(StateFilter(MonitorDialog.menu, MonitorDialog.adding), F.document)
     async def add_from_file(message: Message, state: FSMContext, bot: Bot) -> None:
