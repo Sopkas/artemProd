@@ -403,8 +403,10 @@ class CheckoCompanyDataProvider:
         """S8-01: open enforcement proceedings (ФССП)."""
 
         def project(payload: object) -> ExternalSnapshot:
-            records, pages = enforcements.read_enforcements(payload)
-            return enforcements.project_enforcements(request.inn, records, pages, fetched_at)
+            records, pages, total, left = enforcements.read_enforcements(payload)
+            return enforcements.project_enforcements(
+                request.inn, records, pages, fetched_at, total=total, left=left
+            )
 
         return await self._single(
             request, fetched_at, Section.ENFORCEMENTS, self._enforcements_transport, project

@@ -17,7 +17,7 @@ Wrong values are named by their row; the value itself is never repeated.
 from dataclasses import dataclass
 
 from claims_assistant.domain.debt_report import read_debt_report
-from claims_assistant.domain.inn import InnProblem, InvalidInn, validate_inn
+from claims_assistant.domain.inn import LOST_ZERO_LENGTHS, InnProblem, InvalidInn, validate_inn
 from claims_assistant.domain.sheet_rules import Cell, CellError, parse_inn
 from claims_assistant.domain.watchlist import Candidate, Invalid, unique
 
@@ -159,6 +159,8 @@ def _from_table(rows: tuple[tuple[Cell, ...], ...]) -> FileList:
 def _problem(cell: Cell) -> InnProblem:
     """What is wrong with a cell, in the validator's own terms."""
     whole = isinstance(cell, int | float) and not isinstance(cell, bool) and cell == int(cell)
+    if whole and len(str(abs(int(cell)))) in LOST_ZERO_LENGTHS:
+        return InnProblem.LOST_ZERO  # a number cell: Excel dropped the leading zero
     try:
         validate_inn(str(int(cell)) if whole else str(cell))
     except InvalidInn as error:

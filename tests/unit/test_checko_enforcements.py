@@ -67,7 +67,8 @@ async def test_open_proceedings_their_count_and_what_is_left_to_collect():
     assert values(snapshot, FactKind.ENFORCEMENT_DEBT_LEFT) == [Decimal("2525000.5")]
     lines = values(snapshot, FactKind.ENFORCEMENT)
     assert lines[0] == (
-        "№ 3/26/00001-ИП от 01.09.2026 · Налог (сбор), включая пени · остаток 125 000 ₽ · "
+        # No «от 01.09.2026» here: the date is the fact's own and goes beside it once.
+        "№ 3/26/00001-ИП · Налог (сбор), включая пени · остаток 125 000 ₽ · "
         "ОСП по Синтетическому району"
     )
     assert "остаток не указан" in lines[-1]
@@ -93,7 +94,81 @@ async def test_more_than_a_page_is_said():
     payload["data"]["СтрВсего"] = 3
     snapshot, _ = await fetch(payload)
     assert snapshot.coverage is Coverage.PARTIAL
-    assert "в источнике их больше" in snapshot.missing[0]
+    assert snapshot.missing[0].startswith("Показаны 2 новейших исполнительных производств")
+    assert "всего может быть больше" in snapshot.missing[0]
+    assert "Остаток долга — только по показанным производствам." in snapshot.missing
+    # Without the source's totals the count of all is unknown, and it says so.
+    (total,) = [f for f in snapshot.facts if f.kind is FactKind.ENFORCEMENTS_TOTAL]
+    assert total.value is None and total.missing_reason
+
+
+def live_totals(payload, total, left):
+    """The totals the live answer carries (review A on #92), beside the records."""
+    payload["data"].update({"ЗапВсего": total, "ОбщКолич": total, "ОстЗадолж": left})
+    return payload
+
+
+async def test_with_every_record_the_source_totals_give_the_debt_and_the_count_is_exact():
+    payload = live_totals(fixture("enforcements_doc_shape"), 4, 2525000.5)
+    snapshot, _ = await fetch(payload)
+    assert values(snapshot, FactKind.ENFORCEMENTS_OPEN) == [3]
+    assert values(snapshot, FactKind.ENFORCEMENT_DEBT_LEFT) == [Decimal("2525000.5")]
+    assert values(snapshot, FactKind.ENFORCEMENTS_TOTAL) == []  # nothing was cut
+    # The source counted the remainder the record did not name: nothing to say about it.
+    assert snapshot.coverage is Coverage.COMPLETE
+
+
+async def test_a_cut_list_counts_the_debt_over_all_and_the_open_ones_as_a_floor():
+    """A large company, live 16.10.2026: a hundred newest, 73 with a remainder, more in the
+    source. The debt is the source's own total; the count is «at least»."""
+    payload = live_totals(fixture("enforcements_doc_shape"), 250, 30_000_000.0)
+    payload["data"]["СтрВсего"] = 3
+    snapshot, _ = await fetch(payload)
+    assert values(snapshot, FactKind.ENFORCEMENTS_OPEN) == [3]
+    assert values(snapshot, FactKind.ENFORCEMENT_DEBT_LEFT) == [Decimal("30000000.0")]
+    assert values(snapshot, FactKind.ENFORCEMENTS_TOTAL) == [250]
+    assert snapshot.coverage is Coverage.PARTIAL
+    assert snapshot.missing == (
+        "Показаны 4 новейших исполнительных производств из 250 (вместе с оконченными); "
+        "незавершённых среди них — 3, всего может быть больше.",
+    )
+    check = CompanyCheck(INN, (snapshot,))
+    brief = format_brief(check, card_assessment(check, None))
+    assert (
+        "ФССП: незавершённых исполнительных производств — не меньше 3, "
+        "остаток долга 30 000 000,00 ₽." in brief
+    )
+
+
+async def test_none_open_on_a_cut_page_is_not_none_at_all():
+    """Review A on #107: the newest hundred all finished, older ones may be open — and the
+    debt left over all says so. «нет» would contradict it, and so would the one line for
+    the courts and the bailiffs together."""
+    payload = live_totals(fixture("enforcements_doc_shape"), 250, 30_000_000.0)
+    for record in payload["data"]["Записи"]:
+        record["ОстЗадолж"] = 0.0  # paid off: finished
+    payload["data"]["СтрВсего"] = 3
+    snapshot, _ = await fetch(payload)
+    assert values(snapshot, FactKind.ENFORCEMENTS_OPEN) == [0]
+    empty = courts.project_courts(INN, [], 0, None, snapshot.fetched_at)
+    lines = format_brief(
+        CompanyCheck(INN, (empty, snapshot)), assess(INN, (empty, snapshot))
+    ).splitlines()
+    assert NO_BURDEN not in lines
+    assert (
+        "ФССП: среди новейших производств незавершённых нет, список неполный (всего 250), "
+        "остаток долга по всем — 30 000 000,00 ₽." in lines
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [("ЗапВсего", "сто"), ("ЗапВсего", -1), ("ОстЗадолж", -5)]
+)
+async def test_broken_totals_are_an_invalid_answer_not_a_guess(field, value):
+    payload = fixture("enforcements_doc_shape")
+    payload["data"][field] = value
+    snapshot, _ = await fetch(payload)
+    assert snapshot.status is FetchStatus.INVALID_RESPONSE
 
 
 @pytest.mark.parametrize(
