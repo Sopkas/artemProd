@@ -519,6 +519,11 @@ def watch_overview(entries: Sequence[WatchEntry], limit: int, schedule: str) -> 
     return "\n".join(lines)
 
 
+def watch_renamed(count: int) -> str:
+    """A name sent again for a company already on the list replaces the earlier one."""
+    return f"Названия обновлены: {count}."
+
+
 def watch_added_footer(schedule: str) -> str:
     return f"{schedule} Первая проверка — точка отсчёта: об изменениях пишу со следующей."
 
