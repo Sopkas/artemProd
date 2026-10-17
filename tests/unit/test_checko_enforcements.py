@@ -140,6 +140,27 @@ async def test_a_cut_list_counts_the_debt_over_all_and_the_open_ones_as_a_floor(
     )
 
 
+async def test_none_open_on_a_cut_page_is_not_none_at_all():
+    """Review A on #107: the newest hundred all finished, older ones may be open — and the
+    debt left over all says so. «нет» would contradict it, and so would the one line for
+    the courts and the bailiffs together."""
+    payload = live_totals(fixture("enforcements_doc_shape"), 250, 30_000_000.0)
+    for record in payload["data"]["Записи"]:
+        record["ОстЗадолж"] = 0.0  # paid off: finished
+    payload["data"]["СтрВсего"] = 3
+    snapshot, _ = await fetch(payload)
+    assert values(snapshot, FactKind.ENFORCEMENTS_OPEN) == [0]
+    empty = courts.project_courts(INN, [], 0, None, snapshot.fetched_at)
+    lines = format_brief(
+        CompanyCheck(INN, (empty, snapshot)), assess(INN, (empty, snapshot))
+    ).splitlines()
+    assert NO_BURDEN not in lines
+    assert (
+        "ФССП: среди новейших производств незавершённых нет, список неполный (всего 250), "
+        "остаток долга по всем — 30 000 000,00 ₽." in lines
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"), [("ЗапВсего", "сто"), ("ЗапВсего", -1), ("ОстЗадолж", -5)]
 )
