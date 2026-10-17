@@ -9,12 +9,15 @@ the finances adapter from line codes (2110 revenue, 2400 net profit).
 
 import re
 from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
 
 from claims_assistant.application.check_company import CompanyCheck, check_company
 from claims_assistant.application.internal_context import card_assessment
 from claims_assistant.infrastructure.checko import finances
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
-from claims_assistant.presentation.telegram.card import format_brief
+from claims_assistant.presentation.telegram.card import _short_figure, format_brief
 from claims_assistant.presentation.telegram.texts import PRIORITY_MARKS
 
 INN = "1234567894"
@@ -78,6 +81,33 @@ def test_after_a_loss_the_previous_year_is_named_instead_of_a_percent():
 def test_billions_are_short_too():
     lines = finance_lines(brief({2024: {"2110": 1_000_000_000}, 2025: {"2110": 1_260_000_000}}))
     assert lines == ["🔺 Выручка 2025: 1,3 млрд ₽, +26 % к 2024"]
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        # Rounded at its own scale the figure would read «1 000 тыс.» / «1 000 млн» (B on #97).
+        (Decimal("999950"), "1 млн ₽"),
+        (Decimal("999500"), "1 млн ₽"),
+        (Decimal("999960000"), "1 млрд ₽"),
+        (Decimal("999.6"), "1 тыс. ₽"),
+        (Decimal("-999950"), "убыток 1 млн ₽"),
+        # Below the edge a figure keeps its own scale.
+        (Decimal("999499"), "999 тыс. ₽"),
+        (Decimal("950000"), "950 тыс. ₽"),
+        (Decimal("999940000"), "999,9 млн ₽"),
+        (Decimal("500"), "500 ₽"),
+        (Decimal("0"), "0 ₽"),
+        (Decimal("1234567000000"), "1 234,6 млрд ₽"),
+    ],
+)
+def test_the_scale_is_chosen_after_rounding(value, text):
+    assert _short_figure(value) == text
+
+
+def test_a_figure_at_the_edge_of_a_scale_reads_as_the_next_one_in_the_card():
+    lines = finance_lines(brief({2024: {"2110": 999_950}, 2025: {"2110": 999_950}}))
+    assert lines == ["➖ Выручка 2025: 1 млн ₽, без изменений к 2024"]
 
 
 def test_one_year_gives_no_line():
