@@ -8,7 +8,15 @@ from typing import Any
 import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import DeleteMessage, GetFile, SendChatAction, SendDocument, SendMessage
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    DeleteMessage,
+    EditMessageReplyMarkup,
+    GetFile,
+    SendChatAction,
+    SendDocument,
+    SendMessage,
+)
 from aiogram.types import File, Message, Update
 
 # The repository root, so `evals/` (the model bench set, S5-07) imports like a package.
@@ -99,8 +107,11 @@ class RecordingSession(BaseSession):
                 chat={"id": method.chat_id, "type": "private"},
                 document={"file_id": "sent", "file_unique_id": "sent"},
             )
-        # S8-03: «печатает» and the deleted «Считаю миллионы…» note.
-        if isinstance(method, SendChatAction | DeleteMessage):
+        # S8-03: «печатает» and the deleted «Считаю миллионы…» note; S8-09: a button tap
+        # answered and the button taken off its notice.
+        if isinstance(method, SendChatAction | DeleteMessage | AnswerCallbackQuery):
+            return True
+        if isinstance(method, EditMessageReplyMarkup):
             return True
         if isinstance(method, GetFile) and method.file_id in self.files:
             return File(file_id=method.file_id, file_unique_id="u", file_path=method.file_id)

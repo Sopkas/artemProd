@@ -1,4 +1,10 @@
-from aiogram.types import BotCommand, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 CHECK_INN = "Проверить ИНН"
 NEW_CHECK = "Новая проверка"
@@ -14,6 +20,17 @@ ADD_DEBT_REPORT = "Добавить отчёт по договорам"
 PAYMENTS_TEMPLATE = "По нашему шаблону"
 PAYMENTS_EXPORT = "Выгрузка из 1С"
 DETAILS = "Подробнее"
+# S8-09: the monitoring list and its daily notices.
+MONITORING = "Мониторинг"
+WATCH_ADD = "Добавить на мониторинг"
+WATCH_REMOVE = "Убрать из мониторинга"
+WATCH_FILE = "Список файлом"
+WATCH_CLEAR = "Очистить весь список"
+WATCH_CLEAR_CONFIRM = "Да, очистить список"
+BACK = "В главное меню"
+UNWATCH = "Больше не следить"
+# Callback data of the button under a notice: «unwatch:<ИНН>».
+UNWATCH_PREFIX = "unwatch:"
 
 
 def _keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
@@ -24,13 +41,31 @@ def _keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
     )
 
 
+# The customer's main use since 15.10.2026 is monitoring: it stands next to the card.
+_MAIN_ROWS = [[CHECK_INN, MONITORING], [NEW_CHECK, STATUS, REPORT], ["О сервисе", "Помощь"]]
+
+
 def main_menu() -> ReplyKeyboardMarkup:
-    return _keyboard([[CHECK_INN, NEW_CHECK, STATUS], [REPORT, "О сервисе", "Помощь"]])
+    return _keyboard(_MAIN_ROWS)
 
 
 def card_menu() -> ReplyKeyboardMarkup:
     """After the brief card: the full one is a button away, the main menu stays."""
-    return _keyboard([[DETAILS], [CHECK_INN, NEW_CHECK, STATUS], [REPORT, "О сервисе", "Помощь"]])
+    return _keyboard([[DETAILS], *_MAIN_ROWS])
+
+
+def monitoring_menu() -> ReplyKeyboardMarkup:
+    return _keyboard([[WATCH_ADD, WATCH_REMOVE], [WATCH_FILE, WATCH_CLEAR], [BACK]])
+
+
+def clear_menu() -> ReplyKeyboardMarkup:
+    return _keyboard([[WATCH_CLEAR_CONFIRM], [CANCEL]])
+
+
+def unwatch_button(inn: str) -> InlineKeyboardMarkup:
+    """Under a change notice: stop watching this company in one tap."""
+    button = InlineKeyboardButton(text=UNWATCH, callback_data=f"{UNWATCH_PREFIX}{inn}")
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
 def cancel_menu() -> ReplyKeyboardMarkup:
@@ -59,6 +94,7 @@ def bot_commands() -> list[BotCommand]:
         BotCommand(command="help", description="Помощь"),
         BotCommand(command="about", description="О сервисе"),
         BotCommand(command="inn", description="Проверить ИНН"),
+        BotCommand(command="monitor", description="Мониторинг организаций"),
         BotCommand(command="check", description="Новая проверка по файлу"),
         BotCommand(command="status", description="Состояние последней проверки"),
         BotCommand(command="report", description="Отчёт по последней проверке"),
