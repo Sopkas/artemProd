@@ -24,6 +24,7 @@ from claims_assistant.domain.external import (
 )
 from claims_assistant.domain.monitoring import (
     COURT_CLAIM_THRESHOLD,
+    GAP_NOTE,
     MONITORED,
     SectionState,
     claim_of,
@@ -383,3 +384,74 @@ async def test_demo_alarm_against_ordinary_names_its_cases_and_proceeding():
     assert kinds == sorted(
         [FactKind.BANKRUPTCY_EVENT, FactKind.COURT_CASE, FactKind.COURT_CASE, FactKind.ENFORCEMENT]
     )
+
+
+# --- a gap after a long break (S8-12) ------------------------------------------------
+
+WEEK_AGO = datetime(2026, 10, 9, 9, tzinfo=UTC)
+
+
+def test_a_cut_list_that_does_not_reach_back_to_the_last_check_is_compared_in_part():
+    """A pause or the weekly mode: a week of a large defendant's cases may be more than the
+    hundred the source returns. What is in the list is sent; the rest is said unknown."""
+    old = [case("А00-1/2026", "2026-10-01")]
+    new = [case("А00-3/2026", "2026-10-15"), case("А00-2/2026", "2026-10-12")]
+    result = compare(
+        INN,
+        full_day(WEEK_AGO, courts=court_snapshot(old, WEEK_AGO, total=150)),
+        full_day(TODAY, courts=court_snapshot(new, TODAY, total=400)),
+    )
+    assert [c.record_id for c in result.to_notify] == ["uuid-А00-3/2026", "uuid-А00-2/2026"]
+    assert dict(result.states)[Section.COURTS] is SectionState.PARTLY
+    assert result.partly == (Section.COURTS,) and result.unchecked == ()
+    (gap,) = [note for section, note in result.notes if note.startswith(GAP_NOTE)]
+    assert "(09.10.2026)" in gap and "до 12.10.2026" in gap
+    assert not result.nothing_new
+
+
+def test_a_cut_list_reaching_back_to_the_last_check_is_compared_in_full():
+    old = [case("А00-1/2026", "2026-10-01")]
+    new = [case("А00-2/2026", "2026-10-12"), case("А00-1/2026", "2026-10-01")]
+    result = compare(
+        INN,
+        full_day(WEEK_AGO, courts=court_snapshot(old, WEEK_AGO, total=150)),
+        full_day(TODAY, courts=court_snapshot(new, TODAY, total=151)),
+    )
+    assert dict(result.states)[Section.COURTS] is SectionState.COMPARED
+
+
+def test_a_full_list_of_only_new_records_has_no_gap():
+    """Not cut: every record is there, however new they all are."""
+    new = [case("А00-2/2026", "2026-10-12")]
+    result = compare(
+        INN,
+        full_day(WEEK_AGO),
+        full_day(TODAY, courts=court_snapshot(new, TODAY)),
+    )
+    assert dict(result.states)[Section.COURTS] is SectionState.COMPARED
+    assert [c.record_id for c in result.to_notify] == ["uuid-А00-2/2026"]
+
+
+def test_a_cut_bailiffs_list_is_known_by_its_total():
+    """ФССП says a cut by the source's total (#107), not only by a note."""
+    records = [proceeding("2/26/1-ИП", "2026-10-14"), proceeding("1/26/1-ИП", "2026-10-13")]
+    today = enforcements.project_enforcements(INN, records, 1, TODAY, total=250, left=None)
+    result = compare(INN, full_day(WEEK_AGO), full_day(TODAY, enforcements=today))
+    assert dict(result.states)[Section.ENFORCEMENTS] is SectionState.PARTLY
+    assert len(result.to_notify) == 2
+
+
+def test_a_cut_fedresurs_list_is_known_by_its_note():
+    today = fedresurs.project_intents(INN, [notice("g-2", "2026-10-14")], 300, OGRN, TODAY)
+    result = compare(INN, full_day(WEEK_AGO), full_day(TODAY, fedresurs=today))
+    assert dict(result.states)[Section.FEDRESURS] is SectionState.PARTLY
+
+
+def test_a_list_partial_for_another_reason_has_no_gap():
+    """Every proceeding came, one without a remainder named: partial, but not cut — the
+    list does reach back, however new its records are."""
+    nameless = {"ИспПрНомер": "2/26/1-ИП", "ИспПрДата": "2026-10-14", "ПредмИсп": "Налог"}
+    today = enforcement_snapshot([nameless, proceeding("1/26/1-ИП", "2026-10-13")], TODAY)
+    assert today.coverage is Coverage.PARTIAL
+    result = compare(INN, full_day(WEEK_AGO), full_day(TODAY, enforcements=today))
+    assert dict(result.states)[Section.ENFORCEMENTS] is SectionState.COMPARED

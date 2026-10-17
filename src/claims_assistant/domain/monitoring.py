@@ -22,6 +22,10 @@ Rules:
   failed too, the section is a baseline again: nothing to compare with.
 - **A cut list** (the newest hundred) may let an older record in when a newer one leaves.
   If the previous list was partial, a record older than its oldest one is not taken as new.
+- **A gap after a long break** (S8-12: a pause, the weekly mode, a large company): if
+  today's list is cut and even its oldest record is newer than the previous check, records
+  that appeared in between may have left the hundred unseen. What is in the list is still
+  reported; the section is ``PARTLY`` compared, with a note — never «изменений нет».
 """
 
 import re
@@ -43,6 +47,7 @@ from claims_assistant.domain.external import (
 
 __all__ = [
     "RULES_VERSION",
+    "GAP_NOTE",
     "COURT_CLAIM_THRESHOLD",
     "MONITORED",
     "Change",
@@ -52,7 +57,7 @@ __all__ = [
     "compare",
 ]
 
-RULES_VERSION = "0.1"
+RULES_VERSION = "0.2"
 # Agreed with the customer on 16.10.2026: a case as the defendant from this claim on.
 COURT_CLAIM_THRESHOLD = Decimal("100000")
 # Finances come once a year and are not a daily change.
@@ -88,6 +93,9 @@ class SectionState(StrEnum):
     BASELINE = "baseline"
     # Today's answer failed or the section was not asked: changes are unknown.
     UNCHECKED = "unchecked"
+    # Compared, but today's cut list does not reach back to the previous check: what it
+    # holds is reported, what appeared and left the list in between is unknown (S8-12).
+    PARTLY = "partly"
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +127,10 @@ class Comparison:
     @property
     def unchecked(self) -> tuple[Section, ...]:
         return tuple(s for s, state in self.states if state is SectionState.UNCHECKED)
+
+    @property
+    def partly(self) -> tuple[Section, ...]:
+        return tuple(s for s, state in self.states if state is SectionState.PARTLY)
 
     @property
     def nothing_new(self) -> bool:
@@ -198,6 +210,34 @@ def _new_records(before: ExternalSnapshot, now: ExternalSnapshot) -> list[Change
     return changes
 
 
+# The adapters say a list was cut in the same words (courts.py, fedresurs.py,
+# enforcements.py): «Показаны последние 100 дел из 926…», «Показаны 100 новейших…».
+_CUT_NOTE = "Показаны "
+# The start of the note a gap leaves: the texts pick it out of the section's notes.
+GAP_NOTE = "Источник отдаёт только новейшие записи"
+
+
+def _cut(snapshot: ExternalSnapshot) -> bool:
+    return any(f.kind is FactKind.ENFORCEMENTS_TOTAL for f in snapshot.facts) or any(
+        note.startswith(_CUT_NOTE) for note in snapshot.missing
+    )
+
+
+def _gap(before: ExternalSnapshot, now: ExternalSnapshot) -> str | None:
+    """A note when today's cut list may have lost records since the previous check."""
+    if now.coverage is not Coverage.PARTIAL or not _cut(now):
+        return None
+    dates = [f.observed_on for f in now.facts if f.kind in _NEW and f.observed_on]
+    since = before.fetched_at.date()
+    if not dates or min(dates) <= since:
+        return None
+    return (
+        f"{GAP_NOTE}, а с прошлой проверки ({since:%d.%m.%Y}) "
+        f"их прибавилось больше: появившиеся до {min(dates):%d.%m.%Y} могли не попасть "
+        "в список."
+    )
+
+
 def _status_change(before: ExternalSnapshot, now: ExternalSnapshot) -> list[Change]:
     old, new = _status(before), _status(now)
     if old is None or new is None or old is new:
@@ -249,7 +289,10 @@ def compare(
         if last is None or last.status is not FetchStatus.OK:
             states.append((section, SectionState.BASELINE))
             continue
-        states.append((section, SectionState.COMPARED))
+        gap = _gap(last, today)
+        if gap is not None:
+            notes.append((section, gap))
+        states.append((section, SectionState.PARTLY if gap else SectionState.COMPARED))
         changes += _status_change(last, today) if section is Section.COMPANY else []
         changes += _new_records(last, today)
     return Comparison(inn, tuple(changes), tuple(states), tuple(notes))
