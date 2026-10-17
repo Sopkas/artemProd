@@ -18,12 +18,14 @@ An error never repeats the value (``domain/inn``): it says the position in the l
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import date
 
 from claims_assistant.domain.inn import InnProblem, InvalidInn, validate_inn
 
 __all__ = [
     "WATCH_LIMIT",
     "Candidate",
+    "WatchEntry",
     "Invalid",
     "ParsedList",
     "AddResult",
@@ -48,6 +50,19 @@ class Candidate:
 
     inn: str
     name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WatchEntry:
+    """One company on the list as the «Мониторинг» file shows it (S8-09): what the service
+    stores about it, whatever the storage."""
+
+    inn: str
+    added_on: date
+    name: str | None = None
+    last_checked_on: date | None = None
+    last_change: str | None = None
+    last_change_on: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
