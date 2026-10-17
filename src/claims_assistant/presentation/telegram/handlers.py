@@ -61,7 +61,7 @@ from claims_assistant.infrastructure.storage.local import LocalFileStorage
 
 from . import progress, texts
 from .access import AccessMiddleware
-from .card import format_brief, format_card, format_review
+from .card import format_brief, format_card, format_review, split_message
 from .menu import (
     ADD_DEBT_REPORT,
     ADD_HISTORY,
@@ -560,7 +560,10 @@ def create_dispatcher(
         if not card:
             await message.answer(texts.CARD_NO_DETAILS, reply_markup=main_menu())
             return
-        await message.answer(card, reply_markup=main_menu())
+        *first, last = split_message(card)
+        for part in first:
+            await message.answer(part)
+        await message.answer(last, reply_markup=main_menu())
 
     # --- new check: date → file → launch ---
 

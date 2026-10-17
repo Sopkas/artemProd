@@ -110,7 +110,8 @@ def parse_inns(text: str) -> ParsedList:
         digits = match.group()
         if len(digits) in _TYPO_LENGTHS:
             position += 1
-            invalid.append(Invalid(position, InnProblem.WRONG_LENGTH))
+            problem = InnProblem.NINE_DIGITS if len(digits) == 9 else InnProblem.WRONG_LENGTH
+            invalid.append(Invalid(position, problem))
             continue
         if len(digits) not in _INN_LENGTHS:
             continue  # numbering, an amount, an ОГРН: not an INN and not a typo of one

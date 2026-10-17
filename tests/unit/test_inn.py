@@ -32,7 +32,7 @@ def test_zero_inn_passes_checksum_for_demo_fixtures():
         ("12345six94", InnProblem.NOT_DIGITS),
         ("1234-567894", InnProblem.NOT_DIGITS),
         ("123 456 7894", InnProblem.NOT_DIGITS),
-        ("123456789", InnProblem.WRONG_LENGTH),
+        ("123456789", InnProblem.NINE_DIGITS),
         ("12345678941", InnProblem.WRONG_LENGTH),
         ("1234567895", InnProblem.CHECKSUM),
         ("1234567890", InnProblem.CHECKSUM),
