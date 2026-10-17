@@ -10,6 +10,7 @@ file or an external API stays text and is never evaluated as a formula.
 
 import io
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -117,9 +118,23 @@ def _money(value: Decimal, unit: str | None = "RUB") -> str:
     return f"{text} ₽" if unit in (None, "RUB") else f"{text} {unit}"
 
 
+@dataclass(frozen=True)
+class _AtLeast:
+    """A count known only from below. The cell keeps the number — sorting and filters work
+    on it (review A on #102) — and the format shows «не меньше N»."""
+
+    number: int
+
+
+_AT_LEAST_FORMAT = '"не меньше "0'
+
+
 def _put(sheet: Worksheet, row: int, column: int, value: object) -> None:
     cell = sheet.cell(row=row, column=column)
-    if isinstance(value, str):
+    if isinstance(value, _AtLeast):
+        cell.value = value.number
+        cell.number_format = _AT_LEAST_FORMAT
+    elif isinstance(value, str):
         cell.value = _text(value)
         cell.data_type = "s"  # never a formula, whatever the first character is
     elif isinstance(value, Decimal):
@@ -475,9 +490,9 @@ def _burden_cells(row: ReportRow) -> tuple[object, ...]:
         if isinstance(number, int) and FactKind.ENFORCEMENTS_TOTAL in facts:
             # The bailiffs' list was cut (the source returns the newest hundred, finished
             # ones among them): the count is a floor and must not read as the whole.
-            number = f"не меньше {number}"
+            number = _AtLeast(number)
         return (
-            number if isinstance(number, int | str) else None,
+            number if isinstance(number, int | _AtLeast) else None,
             amount if isinstance(amount, Decimal) else None,
         )
 

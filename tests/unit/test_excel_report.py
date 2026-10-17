@@ -413,5 +413,9 @@ def test_a_cut_bailiffs_list_is_a_floor_with_the_debt_over_all():
     """Review A on #102: a large company, the newest hundred of more — the count is «at
     least», the debt is the source's own total over every proceeding."""
     rows = [burden_row(INN_B, cases=924, proceedings=73, in_source=250, left=Decimal(30_000_000))]
-    (row,) = data_rows(open_report(live_report(rows))["Приоритеты"])
-    assert row[14:16] == ("не меньше 73", 30_000_000)
+    sheet = open_report(live_report(rows))["Приоритеты"]
+    (row,) = data_rows(sheet)
+    # A number, so the column sorts by it; the format says it is a floor.
+    assert row[14:16] == (73, 30_000_000)
+    assert sheet.cell(row=3, column=15).number_format == '"не меньше "0'
+    assert sheet.cell(row=3, column=13).number_format == "General"  # the courts: exact
