@@ -482,6 +482,16 @@ async def test_without_a_reviewer_the_card_is_the_last_word(bot, update_factory)
     assert texts.REVIEWING not in [c.text for c in bot.session.calls if isinstance(c, SendMessage)]
 
 
+async def test_a_kpp_instead_of_an_inn_gets_a_hint(bot, update_factory):
+    """S8-03: the customer typed the КПП first (15.10.2026) — nine digits."""
+    dispatcher = create_dispatcher(frozenset({42}))
+    reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", "123401001")
+    assert reply.text.startswith("9 цифр — похоже на КПП")
+    assert "123401001" not in reply.text
+    assert reply.text.endswith(texts.INN_RETRY)
+    assert buttons(reply) == ["Отмена"]
+
+
 async def test_details_longer_than_a_message_come_in_parts(bot, update_factory, monkeypatch):
     """Live 17.10.2026: Telegram refused a 23 708-character card and «Подробнее» failed.
     Whatever its length, the card comes — in parts, the menu under the last one."""
