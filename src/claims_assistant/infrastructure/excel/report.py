@@ -86,6 +86,7 @@ _FACT_LABELS = {
     FactKind.ENFORCEMENT: "Исполнительное производство (ФССП)",
     FactKind.ENFORCEMENTS_OPEN: "Незавершённых исполнительных производств",
     FactKind.ENFORCEMENT_DEBT_LEFT: "Остаток долга по исполнительным производствам",
+    FactKind.ENFORCEMENTS_TOTAL: "Всего исполнительных производств в источнике, с оконченными",
 }
 _STATUS_LABELS = {
     CompanyStatus.ACTIVE: "действует",

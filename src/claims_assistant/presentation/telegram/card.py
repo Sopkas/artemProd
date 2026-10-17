@@ -76,6 +76,7 @@ _FACT_LABELS = {
     FactKind.ENFORCEMENT: "Производство",
     FactKind.ENFORCEMENTS_OPEN: "Незавершённых производств",
     FactKind.ENFORCEMENT_DEBT_LEFT: "Остаток долга",
+    FactKind.ENFORCEMENTS_TOTAL: "Всего производств в источнике, вместе с оконченными",
 }
 # Totals that are true on a day, not over a period: «на 15.10.2026», not «за».
 _AS_OF = frozenset({FactKind.COURT_CLAIMS_TOTAL, FactKind.ENFORCEMENT_DEBT_LEFT})
@@ -260,11 +261,24 @@ def _brief_enforcements(check: CompanyCheck) -> str | None:
     count = next((f.value for f in snapshot.facts if f.kind is FactKind.ENFORCEMENTS_OPEN), None)
     if not isinstance(count, int):
         return None
-    if count == 0:
-        return "ФССП: незавершённых исполнительных производств нет."
+    # A cut list: the source returned the newest hundred, finished ones among them.
+    cut = next((f for f in snapshot.facts if f.kind is FactKind.ENFORCEMENTS_TOTAL), None)
     left = next((f.value for f in snapshot.facts if f.kind is FactKind.ENFORCEMENT_DEBT_LEFT), None)
+    if count == 0 and cut is None:
+        return "ФССП: незавершённых исполнительных производств нет."
+    if count == 0:
+        # Review A on #107: «нет» beside a debt left over all would contradict itself —
+        # the open ones may be older than the page.
+        of = f" (всего {cut.value})" if isinstance(cut.value, int) else ""
+        rest = (
+            f", остаток долга по всем — {_money(left, 'RUB')}"
+            if isinstance(left, Decimal) and left
+            else ""
+        )
+        return f"ФССП: среди новейших производств незавершённых нет, список неполный{of}{rest}."
     total = f", остаток долга {_money(left, 'RUB')}" if isinstance(left, Decimal) and left else ""
-    return f"ФССП: незавершённых исполнительных производств — {count}{total}."
+    figure = f"не меньше {count}" if cut is not None else str(count)
+    return f"ФССП: незавершённых исполнительных производств — {figure}{total}."
 
 
 NO_BURDEN = "Арбитраж и ФССП: незавершённых дел и производств нет."
@@ -278,11 +292,18 @@ def _open_count(check: CompanyCheck, section: Section, kind: FactKind) -> int | 
     return count if isinstance(count, int) else None
 
 
+def _open_count_is_a_floor(check: CompanyCheck) -> bool:
+    snapshot = next((s for s in check.snapshots if s.section is Section.ENFORCEMENTS), None)
+    return snapshot is not None and any(
+        f.kind is FactKind.ENFORCEMENTS_TOTAL for f in snapshot.facts
+    )
+
+
 def _brief_burden(check: CompanyCheck) -> list[str]:
     """The courts and the bailiffs; when both were read and found nothing — one line."""
     cases = _open_count(check, Section.COURTS, FactKind.COURT_CASES_ACTIVE)
     proceedings = _open_count(check, Section.ENFORCEMENTS, FactKind.ENFORCEMENTS_OPEN)
-    if cases == 0 and proceedings == 0:
+    if cases == 0 and proceedings == 0 and not _open_count_is_a_floor(check):
         return [NO_BURDEN]
     return [line for line in (_brief_courts(check), _brief_enforcements(check)) if line]
 
