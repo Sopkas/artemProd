@@ -97,9 +97,10 @@ LINKS_VERSION = "links-v1"
 # is its own company's, so the date conflicts in the step changed.
 IMPORT_VERSION = "package-v6"
 FETCH_STEP = "external_fetch"
-# v2 (S8-01): arbitration cases and Fedresurs; v3: enforcement proceedings. A step saved
+# v2 (S8-01): arbitration cases and Fedresurs; v3: enforcement proceedings; v4: their
+# debt from the source's own total, the count a floor when the list is cut. A step saved
 # before has none of what came after it.
-FETCH_VERSION = "sections-v3"
+FETCH_VERSION = "sections-v4"
 REPORT_STEP = "report"
 REPORT_VERSION = f"xlsx-v1-rules-{RULES_VERSION}"
 
