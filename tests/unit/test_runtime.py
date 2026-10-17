@@ -91,6 +91,7 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
             "help",
             "about",
             "inn",
+            "monitor",
             "check",
             "status",
             "report",
@@ -98,7 +99,7 @@ async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
         ]
         assert bot.set_my_commands.call_args.kwargs["scope"].type == "all_private_chats"
         dispatcher.start_polling.assert_awaited_once_with(
-            bot, allowed_updates=["message"], close_bot_session=False
+            bot, allowed_updates=["message", "callback_query"], close_bot_session=False
         )
     bot.session.close.assert_awaited_once()
     if failure in (None, "polling"):

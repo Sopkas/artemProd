@@ -8,6 +8,7 @@ truth for the deployed schema; this metadata mirrors them for queries and autoge
 from sqlalchemy import (
     Column,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     MetaData,
@@ -91,4 +92,60 @@ ai_spend = Table(
     Column("month", String(7), primary_key=True),
     Column("spent_rub", String(32), nullable=False, server_default="0"),
     Column("updated_at", String(32), nullable=False),
+)
+
+# S8-09: the monitoring list of each owner and the last good snapshot of every section.
+watchlist = Table(
+    "watchlist",
+    metadata,
+    Column("owner_id", Integer, nullable=False),
+    Column("inn", String(12), nullable=False),
+    Column("name", String(300), nullable=True),
+    Column("added_on", String(10), nullable=False),
+    Column("sequence", Integer, nullable=False),
+    Column("last_checked_on", String(10), nullable=True),
+    Column("last_result", Text, nullable=True),
+    Column("last_change", String(500), nullable=True),
+    Column("last_change_on", String(10), nullable=True),
+    PrimaryKeyConstraint("owner_id", "inn", name="pk_watchlist"),
+)
+
+watch_snapshots = Table(
+    "watch_snapshots",
+    metadata,
+    Column("owner_id", Integer, nullable=False),
+    Column("inn", String(12), nullable=False),
+    Column("section", String(16), nullable=False),
+    Column("payload", Text, nullable=False),
+    Column("fetched_at", String(32), nullable=False),
+    PrimaryKeyConstraint("owner_id", "inn", "section", name="pk_watch_snapshots"),
+    ForeignKeyConstraint(
+        ["owner_id", "inn"],
+        ["watchlist.owner_id", "watchlist.inn"],
+        name="fk_watch_snapshots_entry",
+        ondelete="CASCADE",
+    ),
+)
+
+monitoring_days = Table(
+    "monitoring_days",
+    metadata,
+    Column("day", String(10), primary_key=True),
+    Column("started_at", String(32), nullable=False),
+    Column("finished_at", String(32), nullable=True),
+)
+
+monitoring_outbox = Table(
+    "monitoring_outbox",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("owner_id", Integer, nullable=False),
+    Column("day", String(10), nullable=False),
+    Column("kind", String(8), nullable=False),
+    Column("inn", String(12), nullable=True),
+    Column("text", Text, nullable=False),
+    Column("created_at", String(32), nullable=False),
+    Column("sent_at", String(32), nullable=True),
+    Column("failed", String(200), nullable=True),
+    Index("ix_monitoring_outbox_owner_day", "owner_id", "day"),
 )

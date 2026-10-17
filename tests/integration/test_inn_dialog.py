@@ -22,7 +22,15 @@ from claims_assistant.presentation.telegram.handlers import create_dispatcher
 VALID_INN = "1234567894"
 
 
-MAIN_MENU = ["Проверить ИНН", "Новая проверка", "Статус", "Отчёт", "О сервисе", "Помощь"]
+MAIN_MENU = [
+    "Проверить ИНН",
+    "Мониторинг",
+    "Новая проверка",
+    "Статус",
+    "Отчёт",
+    "О сервисе",
+    "Помощь",
+]
 
 
 def buttons(reply: SendMessage) -> list[str]:
@@ -46,6 +54,7 @@ async def test_main_menu_has_check_inn_button(bot, update_factory):
     reply = await feed(create_dispatcher(frozenset({42})), bot, update_factory, "/start")
     assert buttons(reply) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",
@@ -97,6 +106,7 @@ async def test_cancel_returns_to_menu(bot, update_factory, cancel):
     assert reply.text == texts.INN_CANCELLED
     assert buttons(reply) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",
@@ -129,6 +139,7 @@ async def test_cancel_outside_dialog_is_harmless(bot, update_factory):
     assert reply.text == texts.NOTHING_TO_CANCEL
     assert buttons(reply) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",
@@ -164,6 +175,7 @@ async def test_non_text_returns_menu_and_clears_dialog(bot, update_factory, payl
     await dispatcher.feed_update(bot, update_factory(None, **payload))
     assert buttons(bot.session.calls[-1]) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",
@@ -204,6 +216,7 @@ async def test_provider_bug_gives_a_safe_reply_and_leaves_the_dialog(bot, update
     assert reply.text == texts.CHECK_FAILED
     assert buttons(reply) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",

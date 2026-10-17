@@ -4,7 +4,7 @@ from typing import Any
 
 from aiogram import BaseMiddleware
 from aiogram.enums import ChatType
-from aiogram.types import Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from .texts import access_denied
 
@@ -21,6 +21,8 @@ def _kind(message: Message) -> str:
 
 
 class AccessMiddleware(BaseMiddleware):
+    """Messages and button taps (S8-09: «Больше не следить») from allowed users only."""
+
     def __init__(self, allowed_ids: frozenset[int]) -> None:
         self.allowed_ids = allowed_ids
 
@@ -30,6 +32,8 @@ class AccessMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        if isinstance(event, CallbackQuery):
+            return await self._tap(handler, event, data)
         if not isinstance(event, Message) or event.chat.type != ChatType.PRIVATE:
             return None
         if event.from_user is None:
@@ -38,5 +42,15 @@ class AccessMiddleware(BaseMiddleware):
             # Who tried to get in, for the operator; the ID is what the reply shows them too.
             logger.warning("access_denied user_id=%s kind=%s", event.from_user.id, _kind(event))
             await event.answer(access_denied(event.from_user.id))
+            return None
+        return await handler(event, data)
+
+    async def _tap(self, handler, event: CallbackQuery, data: dict[str, Any]) -> Any:
+        message = event.message
+        if message is None or message.chat.type != ChatType.PRIVATE:
+            return None
+        if event.from_user.id not in self.allowed_ids:
+            logger.warning("access_denied user_id=%s kind=button", event.from_user.id)
+            await event.answer(access_denied(event.from_user.id), show_alert=True)
             return None
         return await handler(event, data)

@@ -27,6 +27,7 @@ async def test_commands_and_menu(bot, update_factory, input_text, expected):
     assert reply.text == expected
     assert [button.text for row in reply.reply_markup.keyboard for button in row] == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",

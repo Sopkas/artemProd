@@ -1,3 +1,4 @@
+from datetime import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,10 @@ def clean_environment(monkeypatch):
         "RUN_TIME_LIMIT_SECONDS",
         "RUN_REQUEST_LIMIT",
         "BUSINESS_UTC_OFFSET_HOURS",
+        "MONITORING_ENABLED",
+        "MONITORING_TIME",
+        "MONITORING_QUIET_SUMMARY",
+        "MONITORING_REQUEST_LIMIT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -426,3 +431,28 @@ def test_the_card_reader_needs_both_the_switch_and_a_provider(
     settings = Settings.load(tmp_path / "missing.env")
     reviewer = _card_reviewer(settings, build_recommendation_provider(settings), object())
     assert (reviewer is not None) is expected
+
+
+def test_monitoring_runs_daily_at_nine_by_default_and_takes_another_hour(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monitoring = Settings.load(tmp_path / "missing.env").monitoring
+    assert monitoring.enabled and monitoring.quiet_summary
+    assert monitoring.run_at == time(9, 0) and monitoring.request_limit == 1000
+    monkeypatch.setenv("MONITORING_TIME", " 7:05 ")
+    monkeypatch.setenv("MONITORING_QUIET_SUMMARY", "no")
+    monkeypatch.setenv("MONITORING_ENABLED", "false")
+    monkeypatch.setenv("MONITORING_REQUEST_LIMIT", "600")
+    monitoring = Settings.load(tmp_path / "missing.env").monitoring
+    assert monitoring.run_at == time(7, 5)
+    assert not monitoring.quiet_summary and not monitoring.enabled
+    assert monitoring.request_limit == 600
+
+
+@pytest.mark.parametrize("raw", ["9", "24:00", "09:60", "nine", "09:00:00"])
+def test_monitoring_time_must_be_a_clock_time(raw, tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("MONITORING_TIME", raw)
+    with pytest.raises(ConfigurationError, match="MONITORING_TIME"):
+        Settings.load(tmp_path / "missing.env")
