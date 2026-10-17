@@ -532,5 +532,20 @@ def watch_file_caption(count: int, limit: int) -> str:
     return f"Список на мониторинге: {count} из {limit}."
 
 
+def watch_waiting(count: int) -> str:
+    """Under the day's summary: the companies the day's requests did not reach."""
+    return (
+        f"Не дошла очередь: {companies(count)} — кончился лимит запросов к источнику. "
+        "В следующий раз — в первую очередь."
+    )
+
+
+def watch_nothing_reached(day: date, count: int) -> str:
+    return (
+        f"📋 Мониторинг на {_date(day)}. Проверить не удалось: кончился лимит запросов к "
+        f"источнику. Ждут проверки: {companies(count)}, в следующий раз — в первую очередь."
+    )
+
+
 def unwatched(inn: str, total: int, limit: int) -> str:
     return f"ИНН {inn} убран с мониторинга. Сейчас на мониторинге: {total} из {limit}."

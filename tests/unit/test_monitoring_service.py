@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from claims_assistant.application.external_guard import BUDGET_EXHAUSTED, BUDGET_MESSAGE
 from claims_assistant.application.monitoring import (
     INTERNAL_FAILURE,
     MonitoringPolicy,
@@ -78,6 +79,21 @@ def down(snapshot: ExternalSnapshot) -> ExternalSnapshot:
     )
 
 
+def out_of_requests(snapshot: ExternalSnapshot) -> ExternalSnapshot:
+    """The guard's placeholder when the day's requests are spent: the source not asked."""
+    return ExternalSnapshot(
+        inn=snapshot.inn,
+        section=snapshot.section,
+        source="guard",
+        mode=snapshot.mode,
+        fetched_at=snapshot.fetched_at,
+        status=FetchStatus.UNAVAILABLE,
+        coverage=Coverage.UNAVAILABLE,
+        missing=(BUDGET_MESSAGE,),
+        error=ProviderError(BUDGET_EXHAUSTED, BUDGET_MESSAGE),
+    )
+
+
 class Source:
     """The guarded provider as the service sees it: ``scoped(budget)`` and ``fetch``."""
 
@@ -85,6 +101,7 @@ class Source:
         self.scenarios: dict[str, DemoScenario] = {}
         self.down: set[tuple[str, Section]] = set()
         self.broken: set[str] = set()
+        self.spent: set[str] = set()  # companies the day's requests do not reach
         self.mode = DataMode.DEMO
         self.calls: list[str] = []
         self.budgets: list = []
@@ -105,6 +122,8 @@ class Source:
         for snapshot in await demo.fetch(request):
             if (snapshot.inn, snapshot.section) in self.down:
                 snapshot = down(snapshot)
+            if snapshot.inn in self.spent:
+                snapshot = out_of_requests(snapshot)
             answers.append(replace(snapshot, mode=self.mode))
         return tuple(answers)
 
@@ -362,6 +381,43 @@ async def test_an_empty_day_sends_nothing(world):
     outcome = await run(world, service, 16)
     assert (outcome.owners, outcome.checked) == (0, 0)
     assert await messages(world) == ()
+
+
+async def test_companies_the_requests_did_not_reach_go_first_next_day(world):
+    """17.10.2026, before the first live run: the same newest companies would get the day's
+    requests every day and the rest never. Not reached — not recorded, named, first next."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A), Candidate(B), Candidate(C)])  # store: C, B, A
+    world.source.spent = {B, A}
+    outcome = await run(world, service, 16)
+    assert (outcome.checked, outcome.waiting) == (1, 2)
+    [summary] = await messages(world)
+    assert "Организаций проверено: 1" in summary.text
+    assert summary.text.endswith(
+        "Не дошла очередь: 2 организации — кончился лимит запросов к источнику. "
+        "В следующий раз — в первую очередь."
+    )
+    waiting = {e.inn: e.last_checked_on for e in await service.entries(OWNER)}
+    assert waiting == {A: None, B: None, C: date(2026, 10, 16)}
+    assert await world.store.snapshots(OWNER, A) == ()
+    # The next day starts with them, in the store's order, and the checked one comes last.
+    world.source.spent = set()
+    world.source.calls.clear()
+    await run(world, service, 17)
+    assert world.source.calls == [B, A, C]
+
+
+async def test_a_day_nothing_could_be_asked_still_says_so(world):
+    service = world.service(quiet_summary=False)  # silence on a quiet day — not on this one
+    await service.add(OWNER, [Candidate(A)])
+    world.source.spent = {A}
+    outcome = await run(world, service, 16)
+    assert (outcome.checked, outcome.waiting) == (0, 1)
+    [summary] = await messages(world)
+    assert summary.text == (
+        "📋 Мониторинг на 16.10.2026. Проверить не удалось: кончился лимит запросов к "
+        "источнику. Ждут проверки: 1 организация, в следующий раз — в первую очередь."
+    )
 
 
 # --- the outbox ---

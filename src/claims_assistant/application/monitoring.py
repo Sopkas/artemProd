@@ -36,12 +36,18 @@ from claims_assistant.domain.watchlist import (
 )
 
 from .company_data import CompanyDataProvider, CompanyDataRequest
-from .external_guard import RunBudget
+from .external_guard import BUDGET_EXHAUSTED, DAILY_LIMIT, SOURCE_LIMIT, RunBudget
 
 logger = logging.getLogger(__name__)
 
 # The day's own note when the bot itself failed on a company: never «изменений нет».
 INTERNAL_FAILURE = "Не удалось проверить: внутренняя ошибка бота."
+# A section the source was never asked about (the day's budget, the source closed for the
+# day) or refused for the day. A company with nothing but these waits for the next run
+# instead of being recorded as checked, and the next run starts with it (17.10.2026: on
+# the free tariff the same newest companies were checked every day and the rest never).
+_LIMIT_CODES = frozenset({BUDGET_EXHAUSTED, SOURCE_LIMIT, DAILY_LIMIT})
+_WAITS = object()
 
 
 def _now() -> datetime:
@@ -103,6 +109,7 @@ class DayOutcome:
     changed: int = 0
     unchecked: int = 0
     failed: int = 0
+    waiting: int = 0  # not reached: the requests ran out, they go first next time
 
 
 class WatchStore(Protocol):
@@ -150,7 +157,9 @@ class MonitoringTexts(Protocol):
         self, inn: str, name: str | None, comparison: Comparison, day: date
     ) -> str | None: ...
 
-    def summary(self, day: date, results: Sequence[DayResult]) -> str: ...
+    def summary(self, day: date, results: Sequence[DayResult], waiting: int = 0) -> str:
+        """``waiting``: companies the day's requests did not reach."""
+        ...
 
 
 class ScopedProvider(Protocol):
@@ -165,6 +174,21 @@ def company_name(snapshots: Sequence[ExternalSnapshot]) -> str | None:
             if fact.kind is FactKind.COMPANY_NAME and isinstance(fact.value, str):
                 return fact.value.strip()[:300] or None
     return None
+
+
+def waits_for_limit(snapshots: Sequence[ExternalSnapshot]) -> bool:
+    """Every section is the limit's placeholder: nothing about the company was learned."""
+    return bool(snapshots) and all(
+        snapshot.status is not FetchStatus.OK
+        and snapshot.error is not None
+        and snapshot.error.code in _LIMIT_CODES
+        for snapshot in snapshots
+    )
+
+
+def queue_order(entries: Sequence[WatchEntry]) -> list[WatchEntry]:
+    """The longest unchecked first; among equals, the store's order (newest first)."""
+    return sorted(entries, key=lambda entry: entry.last_checked_on or date.min)
 
 
 def failed_comparison(inn: str) -> Comparison:
@@ -230,43 +254,51 @@ class MonitoringService:
         budget = RunBudget.for_run(self.policy.max_requests, self.policy.max_seconds, self._clock())
         source = self._provider.scoped(budget)
         owners = await self._store.owners()
-        checked = changed = unchecked = failed = 0
+        checked = changed = unchecked = failed = waiting = 0
         for owner_id in owners:
-            for entry in await self._store.entries(owner_id):
+            waits = 0
+            for entry in queue_order(await self._store.entries(owner_id)):
                 if entry.last_checked_on == day:
                     continue  # done before a restart
                 done = await self._check(owner_id, entry, day, source)
                 if done is None:
                     continue  # taken off the list while it was being checked
+                if done is _WAITS:
+                    waits += 1
+                    continue
                 comparison, broke = done
                 checked += 1
                 changed += bool(comparison.to_notify)
                 unchecked += bool(comparison.unchecked)
                 failed += broke
-            await self._summary(owner_id, day)
+            waiting += waits
+            await self._summary(owner_id, day, waits)
         await self._store.finish_day(day)
         keep = timedelta(days=self.policy.keep_messages_days)
         await self._store.purge_messages(self._clock() - keep)
-        outcome = DayOutcome(day, len(owners), checked, changed, unchecked, failed)
+        outcome = DayOutcome(day, len(owners), checked, changed, unchecked, failed, waiting)
         logger.info(
             "monitoring_day day=%s owners=%s checked=%s changed=%s unchecked=%s failed=%s "
-            "requests=%s",
+            "waiting=%s requests=%s",
             day.isoformat(),
             outcome.owners,
             outcome.checked,
             outcome.changed,
             outcome.unchecked,
             outcome.failed,
+            outcome.waiting,
             budget.used,
         )
         return outcome
 
     async def _check(
         self, owner_id: int, entry: WatchEntry, day: date, source: CompanyDataProvider
-    ) -> tuple[Comparison, bool] | None:
+    ) -> tuple[Comparison, bool] | object | None:
         broke = False
         try:
             current = await source.fetch(CompanyDataRequest(inn=entry.inn, sections=MONITORED))
+            if waits_for_limit(current):
+                return _WAITS
             previous = [
                 snapshot
                 for snapshot in await self._store.snapshots(owner_id, entry.inn)
@@ -289,16 +321,17 @@ class MonitoringService:
             return None
         return comparison, broke
 
-    async def _summary(self, owner_id: int, day: date) -> None:
+    async def _summary(self, owner_id: int, day: date, waiting: int = 0) -> None:
         if await self._store.has_summary(owner_id, day):
             return
         results = await self._store.results(owner_id, day)
-        if not results:
+        if not results and not waiting:
             return
-        quiet = all(result.comparison.nothing_new for result in results)
+        quiet = not waiting and all(result.comparison.nothing_new for result in results)
         if quiet and not self.policy.quiet_summary:
             return
-        await self._store.queue_summary(owner_id, day, self._texts.summary(day, results))
+        text = self._texts.summary(day, results, waiting)
+        await self._store.queue_summary(owner_id, day, text)
 
 
 class MonitoringScheduler:

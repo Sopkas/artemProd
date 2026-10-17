@@ -18,6 +18,7 @@ from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.monitoring import DayResult, WatchStore
 from claims_assistant.domain.monitoring import Comparison
 
+from . import texts
 from .menu import unwatch_button
 from .monitoring import Checked, format_changes, format_daily_summary
 
@@ -30,9 +31,12 @@ class TelegramMonitoringTexts:
     def changes(self, inn: str, name: str | None, comparison: Comparison, day: date) -> str | None:
         return format_changes(inn, name, comparison, day)
 
-    def summary(self, day: date, results: Sequence[DayResult]) -> str:
+    def summary(self, day: date, results: Sequence[DayResult], waiting: int = 0) -> str:
+        if not results:
+            return texts.watch_nothing_reached(day, waiting)
         checked = [Checked(result.inn, result.name, result.comparison) for result in results]
-        return format_daily_summary(day, checked)
+        summary = format_daily_summary(day, checked)
+        return f"{summary}\n\n{texts.watch_waiting(waiting)}" if waiting else summary
 
 
 class TelegramMonitoringNotifier:
