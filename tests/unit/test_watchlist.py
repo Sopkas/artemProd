@@ -17,6 +17,7 @@ from claims_assistant.application.watchlist_files import (
     read_watch_file,
 )
 from claims_assistant.domain.inn import InnProblem
+from claims_assistant.domain.sheet_rules import CellError, parse_inn
 from claims_assistant.domain.watchlist import (
     WATCH_LIMIT,
     Candidate,
@@ -232,3 +233,31 @@ def test_a_long_list_of_problems_is_cut():
     invalid = tuple(Invalid(n, InnProblem.CHECKSUM) for n in range(1, 9))
     text = format_added(add([], []), invalid)
     assert "…и ещё 3" in text and "№ 6" not in text
+
+
+def test_a_number_cell_that_lost_its_leading_zero_is_named_so_not_a_kpp():
+    """Review A on #100: nine digits in a number cell are rather an INN of the regions
+    01–09 whose zero Excel dropped (eleven for an entrepreneur's), not a КПП."""
+    data = workbook(
+        [
+            ["Наименование", "ИНН"],
+            ["ООО «Без нуля»", 123456789],
+            ["ИП Без нуля", 12345678901],
+            ["ООО «Текстом»", "123456789"],
+        ]
+    )
+    result = read(data)
+    assert result.invalid == (
+        Invalid(2, InnProblem.LOST_ZERO),
+        Invalid(3, InnProblem.LOST_ZERO),
+        Invalid(4, InnProblem.NINE_DIGITS),  # typed as text: the КПП hint stays
+    )
+    text = format_added(add([], result.candidates), result.invalid, from_file=True)
+    assert "строка 2: Похоже, Excel убрал ноль в начале ИНН" in text
+    assert "123456789" not in text
+
+
+@pytest.mark.parametrize("cell", [123456789, 12345678901, 123456789.0])
+def test_the_package_reader_says_the_same_for_a_number_cell(cell):
+    with pytest.raises(CellError, match="Excel убрал ноль"):
+        parse_inn(cell)
