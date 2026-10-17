@@ -23,6 +23,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, timezone
+from enum import StrEnum
 from typing import Protocol
 
 from claims_assistant.domain.external import DataMode, ExternalSnapshot, FactKind, FetchStatus
@@ -50,8 +51,63 @@ _LIMIT_CODES = frozenset({BUDGET_EXHAUSTED, SOURCE_LIMIT, DAILY_LIMIT})
 _WAITS = object()
 
 
+WEEK = 7
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+class Frequency(StrEnum):
+    """How often an owner's list is checked (S8-12, the customer 17.10.2026: «чтобы не
+    тратить деньги»)."""
+
+    DAILY = "daily"
+    WEEKDAYS = "weekdays"
+    # Each company once a week, a seventh of the list every day: about the same requests
+    # every day, within the free hundred for a list of a hundred.
+    WEEKLY = "weekly"
+
+
+@dataclass(frozen=True, slots=True)
+class WatchSettings:
+    frequency: Frequency = Frequency.DAILY
+    # The pause began this business day; no requests until it is lifted. The list and its
+    # last snapshots stay, so the comparison goes on from where it stopped.
+    paused_since: date | None = None
+
+    @property
+    def paused(self) -> bool:
+        return self.paused_since is not None
+
+
+def weekly_slot(inn: str) -> int:
+    """The weekday (0 = Monday) a company is checked on in the weekly mode. From the INN, so
+    it does not move when other companies leave the list."""
+    return int(inn) % WEEK
+
+
+def is_due(
+    inn: str, last_checked_on: date | None, day: date, frequency: Frequency, limited: bool
+) -> bool:
+    """Whether a company is checked on ``day`` in its owner's mode.
+
+    Weekly: on its own weekday; earlier when the requests ran out on it last time; and in
+    any case once a week has passed — a weekday missed with the computer off is made up.
+    A company not checked yet waits for its weekday, so a long list sent at once is spread
+    over the week instead of spending a week's requests in one day.
+    """
+    if frequency is Frequency.DAILY:
+        return True
+    if frequency is Frequency.WEEKDAYS:
+        return day.weekday() < 5
+    if limited:
+        return True
+    on_its_day = weekly_slot(inn) == day.weekday()
+    if last_checked_on is None:
+        return on_its_day
+    gap = (day - last_checked_on).days
+    return gap >= WEEK or (on_its_day and gap > 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +175,10 @@ class WatchStore(Protocol):
     async def entries(self, owner_id: int) -> tuple[WatchEntry, ...]: ...
 
     async def owners(self) -> tuple[int, ...]: ...
+
+    async def settings(self, owner_id: int) -> WatchSettings: ...
+
+    async def save_settings(self, owner_id: int, settings: WatchSettings) -> None: ...
 
     async def add(
         self, owner_id: int, candidates: Sequence[Candidate], added_on: date, limit: int
@@ -241,6 +301,10 @@ class MonitoringService:
     def today(self) -> date:
         return self._clock().astimezone(self._zone).date()
 
+    def local_now(self) -> datetime:
+        """The business clock: the hour of the run is set by it."""
+        return self._clock().astimezone(self._zone)
+
     async def entries(self, owner_id: int) -> tuple[WatchEntry, ...]:
         return await self._store.entries(owner_id)
 
@@ -252,6 +316,45 @@ class MonitoringService:
 
     async def clear(self, owner_id: int) -> int:
         return await self._store.clear(owner_id)
+
+    # --- pause and frequency (S8-12) ---
+
+    async def settings(self, owner_id: int) -> WatchSettings:
+        return await self._store.settings(owner_id)
+
+    async def pause(self, owner_id: int) -> WatchSettings:
+        current = await self._store.settings(owner_id)
+        if current.paused:
+            return current
+        paused = WatchSettings(current.frequency, self.today())
+        await self._store.save_settings(owner_id, paused)
+        return paused
+
+    async def resume(self, owner_id: int) -> WatchSettings:
+        current = await self._store.settings(owner_id)
+        resumed = WatchSettings(current.frequency, None)
+        await self._store.save_settings(owner_id, resumed)
+        return resumed
+
+    async def set_frequency(self, owner_id: int, frequency: Frequency) -> WatchSettings:
+        current = await self._store.settings(owner_id)
+        changed = WatchSettings(frequency, current.paused_since)
+        await self._store.save_settings(owner_id, changed)
+        return changed
+
+    async def next_run(self, owner_id: int) -> date | None:
+        """The business day the owner's list is next looked at; None on a pause. In the
+        weekly mode a part of the list is checked every day, so it is tomorrow or today."""
+        settings = await self._store.settings(owner_id)
+        if settings.paused:
+            return None
+        moment = self._clock().astimezone(self._zone)
+        day = moment.date()
+        if await self._store.day_finished(day):
+            day += timedelta(days=1)
+        while settings.frequency is Frequency.WEEKDAYS and day.weekday() >= 5:
+            day += timedelta(days=1)
+        return day
 
     # --- the daily run ---
 
@@ -272,10 +375,23 @@ class MonitoringService:
         checked = changed = unchecked = failed = waiting = 0
         for owner_id in owners:
             waits = 0
+            settings = await self._store.settings(owner_id)
+            if settings.paused:
+                continue  # not a request on a pause, and no summary to say so
             entries = await self._store.entries(owner_id)
-            for entry in queue_order(entries, await self._store.limited(owner_id)):
+            limited = await self._store.limited(owner_id)
+            for entry in queue_order(entries, limited):
                 if entry.last_checked_on == day:
                     continue  # done before a restart
+                due = is_due(
+                    entry.inn,
+                    entry.last_checked_on,
+                    day,
+                    settings.frequency,
+                    entry.inn in limited,
+                )
+                if not due:
+                    continue
                 done = await self._check(owner_id, entry, day, source)
                 if done is None:
                     continue  # taken off the list while it was being checked

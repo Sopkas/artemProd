@@ -127,6 +127,15 @@ watch_snapshots = Table(
     ),
 )
 
+watch_settings = Table(
+    "watch_settings",
+    metadata,
+    Column("owner_id", Integer, primary_key=True),
+    Column("frequency", String(16), nullable=False, server_default="daily"),
+    Column("paused_since", String(10), nullable=True),
+    Column("updated_at", String(32), nullable=False),
+)
+
 monitoring_days = Table(
     "monitoring_days",
     metadata,

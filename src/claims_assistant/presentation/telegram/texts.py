@@ -1,7 +1,8 @@
 from collections.abc import Sequence
-from datetime import date, time
+from datetime import date, datetime, time
 
 from claims_assistant.application.analysis_pipeline import RunSummary
+from claims_assistant.application.monitoring import Frequency, WatchSettings
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
 from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
@@ -480,29 +481,101 @@ WATCH_NAME_LATER = (
 )
 
 
-def watch_schedule(run_at: time, utc_offset_hours: int) -> str:
+_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+WATCH_FREQUENCY_PROMPT = (
+    "Как часто проверять список?\n"
+    "• «Каждый день» — о новом станет известно назавтра.\n"
+    "• «По будням» — без субботы и воскресенья: появившееся за выходные придёт в понедельник.\n"
+    "• «Раз в неделю» — каждая организация раз в неделю, а каждый день проверяется седьмая "
+    "часть списка. Запросов к источнику в семь раз меньше, но о новом деле можно узнать до "
+    "недели позже.\n"
+    "Проверка одной организации — около 5 запросов к источнику."
+)
+
+
+def watch_schedule(
+    run_at: time, utc_offset_hours: int, frequency: Frequency = Frequency.DAILY
+) -> str:
     zone = "по Москве" if utc_offset_hours == 3 else f"(UTC{utc_offset_hours:+d})"
+    if frequency is Frequency.WEEKDAYS:
+        return f"Проверка — по будням в {run_at:%H:%M} {zone}."
+    if frequency is Frequency.WEEKLY:
+        return (
+            f"Проверка — раз в неделю: каждый день в {run_at:%H:%M} {zone} проверяется "
+            "седьмая часть списка."
+        )
     return f"Проверка — каждый день в {run_at:%H:%M} {zone}."
+
+
+def _weekday(value: date) -> str:
+    return f"{_WEEKDAYS[value.weekday()]} {_date(value)}"
+
+
+def watch_when(next_run: date, run_at: time, now: datetime) -> str:
+    """When the next run is, in words: the hour may have passed today with no run yet —
+    then it starts within minutes, not «сегодня в 09:00»."""
+    today = now.date()
+    if next_run == today:
+        return (
+            "сегодня, в ближайшие минуты" if now.time() >= run_at else f"сегодня в {run_at:%H:%M}"
+        )
+    if (next_run - today).days == 1:
+        return f"завтра в {run_at:%H:%M}"
+    return f"{_weekday(next_run)} в {run_at:%H:%M}"
+
+
+def watch_status(
+    settings: WatchSettings, next_run: date | None, run_at: time, now: datetime
+) -> str:
+    """The line under the schedule: the pause, or when the list is looked at next."""
+    if settings.paused_since is not None:
+        return f"⏸ На паузе с {_date(settings.paused_since)}: запросов к источнику нет."
+    if next_run is None:
+        return ""
+    return f"Следующая проверка: {watch_when(next_run, run_at, now)}."
+
+
+def watch_paused(since: date) -> str:
+    return (
+        f"⏸ Мониторинг на паузе с {_date(since)}. Проверок и запросов к источнику нет; список "
+        "и прошлые проверки сохранены. «Проверить ИНН» работает как обычно. Продолжить — "
+        "«▶️ Возобновить»."
+    )
+
+
+def watch_resumed(next_run: date | None, run_at: time, now: datetime) -> str:
+    when = f" Следующая проверка — {watch_when(next_run, run_at, now)}." if next_run else ""
+    return (
+        f"▶️ Мониторинг возобновлён.{when} Сравнение — с последней проверкой до паузы: всё, "
+        "что появилось за паузу, придёт в уведомлениях."
+    )
+
+
+def watch_frequency_set(schedule: str) -> str:
+    return f"Готово. {schedule}"
 
 
 def _watched(entry: WatchEntry) -> str:
     return f"{entry.inn} — {entry.name}" if entry.name else entry.inn
 
 
-def watch_overview(entries: Sequence[WatchEntry], limit: int, schedule: str) -> str:
+def watch_overview(
+    entries: Sequence[WatchEntry], limit: int, schedule: str, status: str = ""
+) -> str:
     """The «Мониторинг» screen: how many, when, the newest few; the rest is the file."""
+    head = [schedule, status] if status else [schedule]
     if not entries:
         return "\n".join(
             [
                 "🔔 Мониторинг: в списке пока никого нет.",
-                schedule,
+                *head,
                 "",
                 WATCH_RULES,
                 "",
                 "Нажмите «Добавить на мониторинг» и пришлите ИНН сообщением или файлом.",
             ]
         )
-    lines = [f"🔔 Мониторинг: {len(entries)} из {limit}.", schedule]
+    lines = [f"🔔 Мониторинг: {len(entries)} из {limit}.", *head]
     checked = [entry.last_checked_on for entry in entries if entry.last_checked_on]
     if checked:
         lines.append(f"Последняя проверка: {_date(max(checked))}.")
