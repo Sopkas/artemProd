@@ -27,6 +27,7 @@ from claims_assistant.presentation.telegram.card import (
     format_brief,
     format_card,
     split_message,
+    telegram_length,
 )
 
 INN = "1234567894"
@@ -389,9 +390,10 @@ def test_a_large_company_fits_one_message_with_its_newest_records():
     """Live 17.10.2026: a hundred cases and proceedings made 23 708 characters and Telegram
     refused «Подробнее». Long lists show their newest five; the totals stay whole."""
     text = format_card(_large_company())
-    assert len(text) <= TELEGRAM_MESSAGE_LIMIT
+    assert telegram_length(text) <= TELEGRAM_MESSAGE_LIMIT
     assert text.count("  Дело: ") == 5 and text.count("  Производство: ") == 5
-    assert text.count("  …и ещё 95; здесь — 5 новейших") == 2
+    # «Of the received»: the source itself returned a hundred of 924 (review B on #108).
+    assert text.count("  …и ещё 95 из полученных; здесь — 5 новейших") == 2
     assert "Незавершённых дел: 924" in text  # the source's own total, not the five shown
 
 
@@ -415,3 +417,21 @@ def test_a_long_text_is_split_at_line_ends_into_messages_telegram_takes():
     assert split_message("") == [""]
     huge = "y" * (2 * TELEGRAM_MESSAGE_LIMIT + 10)
     assert [len(part) for part in split_message(huge)] == [4096, 4096, 10]
+
+
+def test_telegram_counts_an_emoji_as_two():
+    """Review B on #108: Telegram counts UTF-16 units — 🔺 takes two, so 4096 Python
+    characters of marks would be refused."""
+    assert telegram_length("🔺 Выручка") == 10
+    marks = "\n".join("🔺" * 90 for _ in range(40))  # 3639 characters, 7239 units
+    parts = split_message(marks)
+    assert len(parts) == 2 and all(telegram_length(p) <= TELEGRAM_MESSAGE_LIMIT for p in parts)
+    assert [telegram_length(p) for p in split_message("🔺" * 3000)] == [4096, 1904]
+
+
+def test_an_empty_line_at_the_joint_is_kept():
+    """Review B on #108: a blank separator between sections fell out at a part's start."""
+    text = "x" * TELEGRAM_MESSAGE_LIMIT + "\n\nРаздел"  # the blank line opens part two
+    parts = split_message(text)
+    assert "\n".join(parts) == text
+    assert parts[-1] == "\nРаздел"

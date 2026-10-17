@@ -531,7 +531,7 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
     for fact in shown:
         lines.append(f"  {_fact(fact)}")
     for kind, count in hidden.items():
-        lines.append(f"  …и ещё {count}; здесь — {_LISTED[kind]} новейших")
+        lines.append(f"  …и ещё {count} из полученных; здесь — {_LISTED[kind]} новейших")
     if not snapshot.facts and snapshot.section == Section.FEDRESURS:
         lines.append("  Сообщений о заявлении о банкротстве организации нет.")
     if not snapshot.facts and snapshot.section == Section.BANKRUPTCY:
@@ -561,27 +561,44 @@ def _listed(facts: tuple[Fact, ...]) -> tuple[list[Fact], dict[FactKind, int]]:
     return [f for f in facts if f.kind not in _LISTED or id(f) in keep], hidden
 
 
+def telegram_length(text: str) -> int:
+    """Telegram counts a message in UTF-16 code units: 🔺, 🔻 or 🤖 take two (review B on
+    #108), so a part filled to 4096 Python characters may still be refused."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _cut_line(line: str, limit: int) -> list[str]:
+    """A line longer than a message, in pieces of at most ``limit`` units."""
+    pieces, piece, size = [], [], 0
+    for char in line:
+        units = telegram_length(char)
+        if size + units > limit:
+            pieces.append("".join(piece))
+            piece, size = [], 0
+        piece.append(char)
+        size += units
+    pieces.append("".join(piece))
+    return pieces
+
+
 def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
-    """A text in parts Telegram takes (4096 characters each), cut at line ends; a line
-    longer than a message is cut where it must. The last guard of the full card: whatever
-    a source returns, «Подробнее» answers."""
-    parts: list[str] = []
-    current = ""
+    """A text in parts Telegram takes, cut at line ends, empty lines kept: the parts joined
+    by line breaks are the text again. A line longer than a message is cut where it must.
+    The last guard of the full card: whatever a source returns, «Подробнее» answers."""
+    lines: list[str] = []
     for line in text.split("\n"):
-        while len(line) > limit:
-            if current:
-                parts.append(current)
-                current = ""
-            parts.append(line[:limit])
-            line = line[limit:]
-        candidate = f"{current}\n{line}" if current else line
-        if len(candidate) > limit:
-            parts.append(current)
-            current = line
-        else:
-            current = candidate
-    if current or not parts:
-        parts.append(current)
+        lines.extend(_cut_line(line, limit) if telegram_length(line) > limit else [line])
+    parts: list[str] = []
+    chunk: list[str] = []
+    size = 0
+    for line in lines:
+        units = telegram_length(line)
+        if chunk and size + 1 + units > limit:
+            parts.append("\n".join(chunk))
+            chunk, size = [], 0
+        size += units + (1 if chunk else 0)
+        chunk.append(line)
+    parts.append("\n".join(chunk))
     return parts
 
 
