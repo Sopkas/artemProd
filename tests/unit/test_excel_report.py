@@ -361,7 +361,7 @@ def test_about_sheet_says_when_no_source_was_queried():
 # --- S8-10: the claim load and the bailiffs in the priorities sheet -------------------
 
 
-def burden_row(inn, cases=None, proceedings=None):
+def burden_row(inn, cases=None, proceedings=None, in_source=None, left=None):
     """A live row whose courts and bailiffs answered (None: the section did not answer)."""
 
     def failed(section):
@@ -389,7 +389,9 @@ def burden_row(inn, cases=None, proceedings=None):
             {"ИспПрНомер": f"{n}/26/1-ИП", "ИспПрДата": "2026-09-01", "ОстЗадолж": 50_000.0}
             for n in range(proceedings)
         ]
-        bailiffs = enforcements.project_enforcements(inn, records, 1, CHECKED)
+        bailiffs = enforcements.project_enforcements(
+            inn, records, 1, CHECKED, total=in_source, left=left
+        )
     return replace(row, snapshots=(*row.snapshots, court, bailiffs))
 
 
@@ -405,3 +407,11 @@ def test_none_found_is_zero_and_not_read_is_empty():
     by_inn = {row[0]: row for row in data_rows(open_report(live_report(rows))["Приоритеты"])}
     assert by_inn[INN_A][12:16] == (0, 0, 0, 0)
     assert by_inn[INN_B][12:16] == (None, None, None, None)  # «не знаем», not «дел нет»
+
+
+def test_a_cut_bailiffs_list_is_a_floor_with_the_debt_over_all():
+    """Review A on #102: a large company, the newest hundred of more — the count is «at
+    least», the debt is the source's own total over every proceeding."""
+    rows = [burden_row(INN_B, cases=924, proceedings=73, in_source=250, left=Decimal(30_000_000))]
+    (row,) = data_rows(open_report(live_report(rows))["Приоритеты"])
+    assert row[14:16] == ("не меньше 73", 30_000_000)

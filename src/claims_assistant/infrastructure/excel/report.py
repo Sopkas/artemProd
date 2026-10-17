@@ -472,8 +472,12 @@ def _burden_cells(row: ReportRow) -> tuple[object, ...]:
         facts = {fact.kind: fact.value for fact in snapshot.facts}
         number = facts.get(count)
         amount = facts.get(total)
+        if isinstance(number, int) and FactKind.ENFORCEMENTS_TOTAL in facts:
+            # The bailiffs' list was cut (the source returns the newest hundred, finished
+            # ones among them): the count is a floor and must not read as the whole.
+            number = f"не меньше {number}"
         return (
-            number if isinstance(number, int) else None,
+            number if isinstance(number, int | str) else None,
             amount if isinstance(amount, Decimal) else None,
         )
 
