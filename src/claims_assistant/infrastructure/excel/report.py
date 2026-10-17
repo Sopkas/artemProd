@@ -10,6 +10,7 @@ file or an external API stays text and is never evaluated as a formula.
 
 import io
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -26,6 +27,8 @@ from claims_assistant.domain.external import (
     ExternalSnapshot,
     Fact,
     FactKind,
+    FetchStatus,
+    Section,
 )
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.manual_checks import MANUAL_CHECKS
@@ -115,9 +118,23 @@ def _money(value: Decimal, unit: str | None = "RUB") -> str:
     return f"{text} ₽" if unit in (None, "RUB") else f"{text} {unit}"
 
 
+@dataclass(frozen=True)
+class _AtLeast:
+    """A count known only from below. The cell keeps the number — sorting and filters work
+    on it (review A on #102) — and the format shows «не меньше N»."""
+
+    number: int
+
+
+_AT_LEAST_FORMAT = '"не меньше "0'
+
+
 def _put(sheet: Worksheet, row: int, column: int, value: object) -> None:
     cell = sheet.cell(row=row, column=column)
-    if isinstance(value, str):
+    if isinstance(value, _AtLeast):
+        cell.value = value.number
+        cell.number_format = _AT_LEAST_FORMAT
+    elif isinstance(value, str):
         cell.value = _text(value)
         cell.data_type = "s"  # never a formula, whatever the first character is
     elif isinstance(value, Decimal):
@@ -221,6 +238,7 @@ def _priorities(report: AnalysisReport) -> list[tuple[object, ...]]:
             "Рекомендация в демо не формируется." if demo else row.assessment.next_step,
             *_explanation_cells(row, demo),
             *_contract_cells(report, row),
+            *_burden_cells(row),
         )
         for row in _ordered(report)
     ]
@@ -455,6 +473,35 @@ def _about(report: AnalysisReport) -> list[tuple[object, ...]]:
     return rows
 
 
+def _burden_cells(row: ReportRow) -> tuple[object, ...]:
+    """S8-10: the claim load and the bailiffs, to sort the list by (S8-01).
+
+    Only what a section read says: a section that did not answer leaves its cells empty —
+    «не знаем», not «дел нет» — and its gap is in «Полнота» and «Качество данных».
+    """
+
+    def read(section: Section, count: FactKind, total: FactKind) -> tuple[object, object]:
+        snapshot = next((s for s in row.snapshots if s.section is section), None)
+        if snapshot is None or snapshot.status is not FetchStatus.OK:
+            return (None, None)
+        facts = {fact.kind: fact.value for fact in snapshot.facts}
+        number = facts.get(count)
+        amount = facts.get(total)
+        if isinstance(number, int) and FactKind.ENFORCEMENTS_TOTAL in facts:
+            # The bailiffs' list was cut (the source returns the newest hundred, finished
+            # ones among them): the count is a floor and must not read as the whole.
+            number = _AtLeast(number)
+        return (
+            number if isinstance(number, int | _AtLeast) else None,
+            amount if isinstance(amount, Decimal) else None,
+        )
+
+    return (
+        *read(Section.COURTS, FactKind.COURT_CASES_ACTIVE, FactKind.COURT_CLAIMS_TOTAL),
+        *read(Section.ENFORCEMENTS, FactKind.ENFORCEMENTS_OPEN, FactKind.ENFORCEMENT_DEBT_LEFT),
+    )
+
+
 def build_report(report: AnalysisReport) -> bytes:
     """Return the .xlsx bytes of the five-sheet report."""
     workbook = Workbook()
@@ -476,9 +523,13 @@ def build_report(report: AnalysisReport) -> bytes:
             "Обещания оплаты",
             "Договоров",
             "Худшая просрочка по договору, дн.",
+            "Арбитраж: незавершённых дел (ответчик)",
+            "Арбитраж: сумма исков, ₽",
+            "ФССП: незавершённых производств",
+            "ФССП: остаток долга, ₽",
         ),
         _priorities(report),
-        (14, 34, 16, 12, 20, 36, 60, 44, 80, 30, 12, 20),
+        (14, 34, 16, 12, 20, 36, 60, 44, 80, 30, 12, 20, 16, 18, 16, 18),
     )
     _table(
         workbook.create_sheet(SHEETS[1]),
