@@ -234,6 +234,14 @@ async def test_a_name_beside_an_inn_is_kept_and_fills_a_gap(bot, update_factory,
     screen = await send(dispatcher, bot, update_factory, "Мониторинг")
     assert f"  {B} — ООО «Бета»" in screen.text and f"  {A} — ПАО «Альфа»" in screen.text
     assert texts.WATCH_NAME_LATER not in screen.text
+    # A name typed beside the wrong INN is corrected by sending it again (17.10.2026).
+    reply = await send(
+        dispatcher, bot, update_factory, "Добавить на мониторинг", f"{A} АО «Альфа-2»\n{B}"
+    )
+    assert "Уже были на мониторинге: 2." in reply.text
+    assert "Названия обновлены: 1." in reply.text  # B came without a name: kept as it was
+    screen = await send(dispatcher, bot, update_factory, "Мониторинг")
+    assert f"  {A} — АО «Альфа-2»" in screen.text and f"  {B} — ООО «Бета»" in screen.text
 
 
 async def test_a_mistyped_inn_is_named_by_its_place_and_the_rest_is_added(

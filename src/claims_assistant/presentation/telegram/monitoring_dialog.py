@@ -129,13 +129,18 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
         await message.answer(text, reply_markup=monitoring_menu())
 
     async def added(message: Message, state: FSMContext, candidates, **summary) -> None:
+        user_id = message.from_user.id
         try:
-            result = await service.add(message.from_user.id, candidates)
+            names = {entry.inn: entry.name for entry in await service.entries(user_id)}
+            result = await service.add(user_id, candidates)
         except RepositoryError as exc:
             logger.error("watch_add_failed error_type=%s", type(exc).__name__)
             await back(message, state, texts.WATCH_FAILED)
             return
         reply = format_added(result, **summary)
+        renamed = sum(1 for c in result.already if c.name and names.get(c.inn) != c.name)
+        if renamed:
+            reply += "\n" + texts.watch_renamed(renamed)
         if result.added:
             reply += "\n\n" + texts.watch_added_footer(schedule())
         await back(message, state, reply)
