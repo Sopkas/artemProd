@@ -30,6 +30,7 @@ from claims_assistant.application.check_package import (
 from claims_assistant.application.company_data import CompanyDataProvider
 from claims_assistant.application.imports import SheetReader
 from claims_assistant.application.internal_context import card_assessment, internal_context
+from claims_assistant.application.monitoring import MonitoringService
 from claims_assistant.application.package_checks import (
     PACKAGE_SHEET,
     PackageIntegrityError,
@@ -60,7 +61,7 @@ from claims_assistant.infrastructure.storage.local import LocalFileStorage
 
 from . import progress, texts
 from .access import AccessMiddleware
-from .card import format_brief, format_card, format_review
+from .card import format_brief, format_card, format_review, split_message
 from .menu import (
     ADD_DEBT_REPORT,
     ADD_HISTORY,
@@ -83,6 +84,7 @@ from .menu import (
     main_menu,
     payments_source_menu,
 )
+from .monitoring_dialog import monitoring_router
 
 logger = logging.getLogger(__name__)
 _RU_DATE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
@@ -172,6 +174,7 @@ def create_dispatcher(
     mode: DataMode = DataMode.DEMO,
     business_utc_offset_hours: int = 3,
     card_reviewer: CardReviewer | None = None,
+    monitoring: MonitoringService | None = None,
 ) -> Dispatcher:
     if provider is None:
         provider = DemoCompanyDataProvider()
@@ -183,8 +186,11 @@ def create_dispatcher(
         reader = OpenpyxlSheetReader()
     # Dialog state lives in memory: it is short and may be lost on restart (S0-03, remark 2).
     dispatcher = Dispatcher()
+    # On the dispatcher, so the monitoring router and its buttons (S8-09) are guarded too.
+    access = AccessMiddleware(allowed_ids)
+    dispatcher.message.outer_middleware(access)
+    dispatcher.callback_query.outer_middleware(access)
     router = Router(name="shell")
-    router.message.outer_middleware(AccessMiddleware(allowed_ids))
     in_check = StateFilter(CheckDialog.waiting_for_file, CheckDialog.confirming)
 
     # --- documents inside the check dialog come first, before the generic refusal ---
@@ -554,7 +560,10 @@ def create_dispatcher(
         if not card:
             await message.answer(texts.CARD_NO_DETAILS, reply_markup=main_menu())
             return
-        await message.answer(card, reply_markup=main_menu())
+        *first, last = split_message(card)
+        for part in first:
+            await message.answer(part)
+        await message.answer(last, reply_markup=main_menu())
 
     # --- new check: date → file → launch ---
 
@@ -776,5 +785,7 @@ def create_dispatcher(
                 logger.error("error_reply_failed error_type=%s", type(exc).__name__)
         return True
 
+    # S8-09 first: a file in the monitoring dialog is a list, not a refused attachment.
+    dispatcher.include_router(monitoring_router(monitoring, reader))
     dispatcher.include_router(router)
     return dispatcher

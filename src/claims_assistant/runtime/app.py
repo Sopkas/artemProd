@@ -11,6 +11,11 @@ from claims_assistant.application.analysis_pipeline import AnalysisPipeline, Run
 from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.card_review import CardReviewer
 from claims_assistant.application.external_guard import GuardedCompanyDataProvider, GuardPolicy
+from claims_assistant.application.monitoring import (
+    MonitoringPolicy,
+    MonitoringScheduler,
+    MonitoringService,
+)
 from claims_assistant.application.recommendation import AiLimits
 from claims_assistant.application.retention import RetentionSweeper
 from claims_assistant.application.worker import RunWorker
@@ -23,9 +28,14 @@ from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.excel.report import build_report
 from claims_assistant.infrastructure.persistence.ai_spend import SqliteAiSpendStore
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
+from claims_assistant.infrastructure.persistence.watch import SqliteWatchStore
 from claims_assistant.infrastructure.storage.local import LocalFileStorage
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 from claims_assistant.presentation.telegram.menu import bot_commands
+from claims_assistant.presentation.telegram.monitoring_notifier import (
+    TelegramMonitoringNotifier,
+    TelegramMonitoringTexts,
+)
 from claims_assistant.presentation.telegram.notifier import TelegramRunNotifier
 
 from .ai import build_recommendation_provider, run_limits
@@ -115,6 +125,10 @@ async def run(settings: Settings) -> None:
                 settings.ai_send_comments,
                 settings.ai_card_review and recommendation_provider is not None,
             )
+            # S8-09: the list, its snapshots and messages live next to the checks.
+            engine = getattr(repository, "engine", None)
+            watch_store = SqliteWatchStore(engine) if engine is not None else None
+            monitoring = _monitoring(settings, watch_store, provider, mode)
             dispatcher = create_dispatcher(
                 settings.allowed_ids,
                 provider,
@@ -124,6 +138,7 @@ async def run(settings: Settings) -> None:
                 mode=mode,
                 business_utc_offset_hours=settings.business_utc_offset_hours,
                 card_reviewer=_card_reviewer(settings, recommendation_provider, repository),
+                monitoring=monitoring,
             )
             # One worker in this process; runs left "running" by a crash go back to the queue.
             pipeline = AnalysisPipeline(
@@ -160,22 +175,52 @@ async def run(settings: Settings) -> None:
                 interval=settings.retention_sweep_seconds,
             )
             sweeper_task = asyncio.create_task(sweeper.run_forever(), name="retention-sweeper")
-            logger.info("bot_started")
+            tasks = [worker_task, sweeper_task]
+            scheduler = None
+            if monitoring is not None:
+                # S8-09: a day missed while the computer was off runs at start.
+                watch_notifier = TelegramMonitoringNotifier(bot, watch_store)
+                scheduler = MonitoringScheduler(monitoring, watch_notifier.deliver)
+                tasks.append(asyncio.create_task(scheduler.run_forever(), name="monitoring"))
+            logger.info(
+                "bot_started monitoring=%s",
+                f"{settings.monitoring.run_at:%H:%M}" if monitoring is not None else "off",
+            )
             try:
                 await dispatcher.start_polling(
-                    bot, allowed_updates=["message"], close_bot_session=False
+                    bot, allowed_updates=["message", "callback_query"], close_bot_session=False
                 )
             finally:
                 worker.stop()
                 sweeper.stop()
-                worker_task.cancel()
-                sweeper_task.cancel()
-                await asyncio.gather(worker_task, sweeper_task, return_exceptions=True)
+                if scheduler is not None:
+                    scheduler.stop()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             repository.close()
     finally:
         await bot.session.close()
         logger.info("bot_stopped")
+
+
+def _monitoring(
+    settings: Settings, store: SqliteWatchStore | None, provider, mode: DataMode
+) -> MonitoringService | None:
+    """S8-09: the daily run over the same guarded source as the cards and checks, so its
+    retries, timeouts and the daily-limit stop are the same ones. A repository without a
+    database (tests) has nowhere to keep the list: monitoring is off then, and says so."""
+    if not settings.monitoring.enabled or store is None:
+        return None
+    policy = MonitoringPolicy(
+        run_at=settings.monitoring.run_at,
+        utc_offset_hours=settings.business_utc_offset_hours,
+        quiet_summary=settings.monitoring.quiet_summary,
+        max_requests=settings.monitoring.request_limit,
+        keep_messages_days=settings.retention_days,
+    )
+    return MonitoringService(store, provider, TelegramMonitoringTexts(), mode=mode, policy=policy)
 
 
 def _card_reviewer(settings: Settings, explainer, repository: object) -> CardReviewer | None:

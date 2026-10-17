@@ -22,7 +22,15 @@ from claims_assistant.presentation.telegram.handlers import create_dispatcher
 VALID_INN = "1234567894"
 
 
-MAIN_MENU = ["Проверить ИНН", "Новая проверка", "Статус", "Отчёт", "О сервисе", "Помощь"]
+MAIN_MENU = [
+    "Проверить ИНН",
+    "Мониторинг",
+    "Новая проверка",
+    "Статус",
+    "Отчёт",
+    "О сервисе",
+    "Помощь",
+]
 
 
 def buttons(reply: SendMessage) -> list[str]:
@@ -46,6 +54,7 @@ async def test_main_menu_has_check_inn_button(bot, update_factory):
     reply = await feed(create_dispatcher(frozenset({42})), bot, update_factory, "/start")
     assert buttons(reply) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",
@@ -97,6 +106,7 @@ async def test_cancel_returns_to_menu(bot, update_factory, cancel):
     assert reply.text == texts.INN_CANCELLED
     assert buttons(reply) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",
@@ -129,6 +139,7 @@ async def test_cancel_outside_dialog_is_harmless(bot, update_factory):
     assert reply.text == texts.NOTHING_TO_CANCEL
     assert buttons(reply) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",
@@ -164,6 +175,7 @@ async def test_non_text_returns_menu_and_clears_dialog(bot, update_factory, payl
     await dispatcher.feed_update(bot, update_factory(None, **payload))
     assert buttons(bot.session.calls[-1]) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",
@@ -204,6 +216,7 @@ async def test_provider_bug_gives_a_safe_reply_and_leaves_the_dialog(bot, update
     assert reply.text == texts.CHECK_FAILED
     assert buttons(reply) == [
         "Проверить ИНН",
+        "Мониторинг",
         "Новая проверка",
         "Статус",
         "Отчёт",
@@ -480,3 +493,31 @@ async def test_without_a_reviewer_the_card_is_the_last_word(bot, update_factory)
     reply = await feed(dispatcher, bot, update_factory, "/inn", VALID_INN)
     assert f"ИНН {VALID_INN}" in reply.text
     assert texts.REVIEWING not in [c.text for c in bot.session.calls if isinstance(c, SendMessage)]
+
+
+async def test_a_kpp_instead_of_an_inn_gets_a_hint(bot, update_factory):
+    """S8-03: the customer typed the КПП first (15.10.2026) — nine digits."""
+    dispatcher = create_dispatcher(frozenset({42}))
+    reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", "123401001")
+    assert reply.text.startswith("9 цифр — похоже на КПП")
+    assert "123401001" not in reply.text
+    assert reply.text.endswith(texts.INN_RETRY)
+    assert buttons(reply) == ["Отмена"]
+
+
+async def test_details_longer_than_a_message_come_in_parts(bot, update_factory, monkeypatch):
+    """Live 17.10.2026: Telegram refused a 23 708-character card and «Подробнее» failed.
+    Whatever its length, the card comes — in parts, the menu under the last one."""
+    from claims_assistant.presentation.telegram import handlers
+
+    long_card = "\n".join(f"строка {n:04d} " + "x" * 90 for n in range(100))
+    monkeypatch.setattr(handlers, "format_card", lambda check, internal=None: long_card)
+    dispatcher = create_dispatcher(frozenset({42}))
+    await feed(dispatcher, bot, update_factory, "Проверить ИНН", VALID_INN)
+    before = len(bot.session.calls)
+    await feed(dispatcher, bot, update_factory, "Подробнее")
+    sent = [c for c in bot.session.calls[before:] if isinstance(c, SendMessage)]
+    assert len(sent) == 3 and all(len(call.text) <= 4096 for call in sent)
+    assert "\n".join(call.text for call in sent) == long_card
+    assert [call.reply_markup is None for call in sent] == [True, True, False]
+    assert buttons(sent[-1]) == MAIN_MENU

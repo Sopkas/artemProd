@@ -76,6 +76,7 @@ _FACT_LABELS = {
     FactKind.ENFORCEMENT: "Производство",
     FactKind.ENFORCEMENTS_OPEN: "Незавершённых производств",
     FactKind.ENFORCEMENT_DEBT_LEFT: "Остаток долга",
+    FactKind.ENFORCEMENTS_TOTAL: "Всего производств в источнике, вместе с оконченными",
 }
 # Totals that are true on a day, not over a period: «на 15.10.2026», not «за».
 _AS_OF = frozenset({FactKind.COURT_CLAIMS_TOTAL, FactKind.ENFORCEMENT_DEBT_LEFT})
@@ -94,6 +95,17 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 # dropped one by one (newest kept) until the whole text fits.
 _CARD_BUDGET = TELEGRAM_MESSAGE_LIMIT - 96
 _MAX_CONTRACTS = 5  # the rest are counted: the card is one Telegram message
+# Record lists of the source: the full card shows the newest few of each and counts the
+# rest. A large company (live, 17.10.2026) has a hundred cases and a hundred proceedings
+# in its answer — 23 708 characters, which Telegram refused, so «Подробнее» failed. Every
+# record stays in the report's «Основания» and with the source.
+_LISTED = {
+    FactKind.COURT_CASE: 5,
+    FactKind.ENFORCEMENT: 5,
+    FactKind.BANKRUPTCY_EVENT: 10,
+    FactKind.BANKRUPTCY_INTENT: 10,
+    FactKind.BANKRUPTCY_FILING: 10,
+}
 
 
 # The words of the first line, after the mark of the priority (``texts.PRIORITY_MARKS``).
@@ -134,8 +146,14 @@ EXTERNAL_CLEAN_MARK = "ℹ️"
 # than the first one; otherwise only the direction.
 TREND_MARKS = {Trend.UP: "🔺", Trend.DOWN: "🔻", Trend.FLAT: "➖"}
 _TREND_TITLES = {FactKind.REVENUE: "Выручка", FactKind.NET_PROFIT: "Чистая прибыль"}
-# A figure to read at a glance; the exact sums are in «Подробнее».
-_SCALES = ((Decimal(10**9), "млрд", 1), (Decimal(10**6), "млн", 1), (Decimal(10**3), "тыс.", 0))
+# A figure to read at a glance; the exact sums are in «Подробнее». Smallest first: a figure
+# is printed at the first scale where, rounded, it stays under a thousand.
+_SCALES = (
+    (Decimal(1), "", 0),
+    (Decimal(10**3), "тыс.", 0),
+    (Decimal(10**6), "млн", 1),
+    (Decimal(10**9), "млрд", 1),
+)
 
 
 def _headline(assessment: Assessment, internal: InternalContext | None) -> str:
@@ -206,15 +224,16 @@ def _percent(trend: FinanceTrend) -> str:
 
 
 def _short_figure(value: Decimal) -> str:
-    """«112 млн ₽», «1,5 млн ₽», «760 тыс. ₽», «убыток 300 тыс. ₽»."""
+    """«112 млн ₽», «1,5 млн ₽», «760 тыс. ₽», «убыток 300 тыс. ₽». The scale is chosen after
+    rounding: 999 950 ₽ is «1 млн ₽», not «1 000 тыс. ₽» (review B on #97)."""
     amount = abs(value)
-    text = f"{amount:,.0f}".replace(",", " ")
     for scale, word, places in _SCALES:
-        if amount >= scale:
-            figure = f"{amount / scale:,.{places}f}".replace(",", " ").replace(".", ",")
-            text = f"{figure.removesuffix(',0')} {word}"
+        figure = (amount / scale).quantize(Decimal(1).scaleb(-places))
+        if figure < 1000:
             break
-    return f"{'убыток ' if value < 0 else ''}{text} ₽"
+    text = f"{figure:,f}".replace(",", " ").replace(".", ",").removesuffix(",0")
+    unit = f" {word}" if word else ""
+    return f"{'убыток ' if value < 0 else ''}{text}{unit} ₽"
 
 
 def _brief_courts(check: CompanyCheck) -> str | None:
@@ -242,11 +261,24 @@ def _brief_enforcements(check: CompanyCheck) -> str | None:
     count = next((f.value for f in snapshot.facts if f.kind is FactKind.ENFORCEMENTS_OPEN), None)
     if not isinstance(count, int):
         return None
-    if count == 0:
-        return "ФССП: незавершённых исполнительных производств нет."
+    # A cut list: the source returned the newest hundred, finished ones among them.
+    cut = next((f for f in snapshot.facts if f.kind is FactKind.ENFORCEMENTS_TOTAL), None)
     left = next((f.value for f in snapshot.facts if f.kind is FactKind.ENFORCEMENT_DEBT_LEFT), None)
+    if count == 0 and cut is None:
+        return "ФССП: незавершённых исполнительных производств нет."
+    if count == 0:
+        # Review A on #107: «нет» beside a debt left over all would contradict itself —
+        # the open ones may be older than the page.
+        of = f" (всего {cut.value})" if isinstance(cut.value, int) else ""
+        rest = (
+            f", остаток долга по всем — {_money(left, 'RUB')}"
+            if isinstance(left, Decimal) and left
+            else ""
+        )
+        return f"ФССП: среди новейших производств незавершённых нет, список неполный{of}{rest}."
     total = f", остаток долга {_money(left, 'RUB')}" if isinstance(left, Decimal) and left else ""
-    return f"ФССП: незавершённых исполнительных производств — {count}{total}."
+    figure = f"не меньше {count}" if cut is not None else str(count)
+    return f"ФССП: незавершённых исполнительных производств — {figure}{total}."
 
 
 NO_BURDEN = "Арбитраж и ФССП: незавершённых дел и производств нет."
@@ -260,11 +292,18 @@ def _open_count(check: CompanyCheck, section: Section, kind: FactKind) -> int | 
     return count if isinstance(count, int) else None
 
 
+def _open_count_is_a_floor(check: CompanyCheck) -> bool:
+    snapshot = next((s for s in check.snapshots if s.section is Section.ENFORCEMENTS), None)
+    return snapshot is not None and any(
+        f.kind is FactKind.ENFORCEMENTS_TOTAL for f in snapshot.facts
+    )
+
+
 def _brief_burden(check: CompanyCheck) -> list[str]:
     """The courts and the bailiffs; when both were read and found nothing — one line."""
     cases = _open_count(check, Section.COURTS, FactKind.COURT_CASES_ACTIVE)
     proceedings = _open_count(check, Section.ENFORCEMENTS, FactKind.ENFORCEMENTS_OPEN)
-    if cases == 0 and proceedings == 0:
+    if cases == 0 and proceedings == 0 and not _open_count_is_a_floor(check):
         return [NO_BURDEN]
     return [line for line in (_brief_courts(check), _brief_enforcements(check)) if line]
 
@@ -488,8 +527,11 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
                 lines.append(f"  Ограничение: {reason}")
         lines.append(f"  Источник: {snapshot.source}, получено {_date(snapshot.fetched_at)}")
         return lines
-    for fact in snapshot.facts:
+    shown, hidden = _listed(snapshot.facts)
+    for fact in shown:
         lines.append(f"  {_fact(fact)}")
+    for kind, count in hidden.items():
+        lines.append(f"  …и ещё {count} из полученных; здесь — {_LISTED[kind]} новейших")
     if not snapshot.facts and snapshot.section == Section.FEDRESURS:
         lines.append("  Сообщений о заявлении о банкротстве организации нет.")
     if not snapshot.facts and snapshot.section == Section.BANKRUPTCY:
@@ -503,6 +545,61 @@ def _section(snapshot: ExternalSnapshot) -> list[str]:
         lines.append(f"  Ограничение: {reason}")
     lines.append(f"  Источник: {snapshot.source}, получено {_date(snapshot.fetched_at)}")
     return lines
+
+
+def _listed(facts: tuple[Fact, ...]) -> tuple[list[Fact], dict[FactKind, int]]:
+    """The facts to print, in their order, and how many records of each long list are not:
+    of a listed kind only the newest few stay."""
+    keep: set[int] = set()
+    hidden: dict[FactKind, int] = {}
+    for kind, limit in _LISTED.items():
+        group = [fact for fact in facts if fact.kind is kind]
+        newest = sorted(group, key=lambda fact: fact.observed_on or date.min, reverse=True)
+        keep.update(id(fact) for fact in newest[:limit])
+        if len(group) > limit:
+            hidden[kind] = len(group) - limit
+    return [f for f in facts if f.kind not in _LISTED or id(f) in keep], hidden
+
+
+def telegram_length(text: str) -> int:
+    """Telegram counts a message in UTF-16 code units: 🔺, 🔻 or 🤖 take two (review B on
+    #108), so a part filled to 4096 Python characters may still be refused."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _cut_line(line: str, limit: int) -> list[str]:
+    """A line longer than a message, in pieces of at most ``limit`` units."""
+    pieces, piece, size = [], [], 0
+    for char in line:
+        units = telegram_length(char)
+        if size + units > limit:
+            pieces.append("".join(piece))
+            piece, size = [], 0
+        piece.append(char)
+        size += units
+    pieces.append("".join(piece))
+    return pieces
+
+
+def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """A text in parts Telegram takes, cut at line ends, empty lines kept: the parts joined
+    by line breaks are the text again. A line longer than a message is cut where it must.
+    The last guard of the full card: whatever a source returns, «Подробнее» answers."""
+    lines: list[str] = []
+    for line in text.split("\n"):
+        lines.extend(_cut_line(line, limit) if telegram_length(line) > limit else [line])
+    parts: list[str] = []
+    chunk: list[str] = []
+    size = 0
+    for line in lines:
+        units = telegram_length(line)
+        if chunk and size + 1 + units > limit:
+            parts.append("\n".join(chunk))
+            chunk, size = [], 0
+        size += units + (1 if chunk else 0)
+        chunk.append(line)
+    parts.append("\n".join(chunk))
+    return parts
 
 
 def _fact(fact: Fact) -> str:

@@ -23,8 +23,11 @@ from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataPro
 from claims_assistant.presentation.telegram.card import (
     _PART_TITLES,
     DETAILS_HINT,
+    TELEGRAM_MESSAGE_LIMIT,
     format_brief,
     format_card,
+    split_message,
+    telegram_length,
 )
 
 INN = "1234567894"
@@ -340,3 +343,95 @@ def test_every_section_is_named_in_russian_in_the_brief_card():
         "Проверено не полностью: организация, сообщения ЕФРСБ, финансы, "
         "арбитражные дела, Федресурс, ФССП."
     )
+
+
+# --- the full card is one Telegram message (live, 17.10.2026) ---
+
+
+def _large_company() -> CompanyCheck:
+    """A large defendant as Checko answers: the newest hundred cases and proceedings."""
+    from claims_assistant.infrastructure.checko import courts, enforcements
+
+    at = datetime(2026, 10, 16, tzinfo=UTC)
+    cases = [
+        {
+            "Номер": f"А40-{n}/2026",
+            "UUID": f"uuid-{n}",
+            "СтрКАД": f"https://kad.arbitr.ru/Card/uuid-{n}",
+            "Дата": f"2026-{1 + n % 9:02d}-{1 + n % 28:02d}",
+            "Суд": "Арбитражный суд Синтетической области",
+            "Ист": [{"ИНН": "0000001011", "Наим": "ООО «Синтетический кредитор с длинным именем»"}],
+            "Ответ": [{"ИНН": INN, "Наим": "ООО «ТЕСТ»"}],
+            "Тип": "Г",
+            "СуммИск": 500_000 + n,
+        }
+        for n in range(100)
+    ]
+    proceedings = [
+        {
+            "ИспПрНомер": f"{n}/26/77006-ИП",
+            "ИспПрДата": f"2026-{1 + n % 9:02d}-{1 + n % 28:02d}",
+            "ПредмИсп": "Иные взыскания имущественного характера в пользу юридических лиц",
+            "ОстЗадолж": 10_000.0 + n,
+            "СудПристНаим": "Синтетический отдел судебных приставов",
+        }
+        for n in range(100)
+    ]
+    return CompanyCheck(
+        INN,
+        (
+            courts.project_courts(INN, cases, 924, Decimal("8910159157.83"), at),
+            enforcements.project_enforcements(INN, proceedings, 3, at),
+        ),
+    )
+
+
+def test_a_large_company_fits_one_message_with_its_newest_records():
+    """Live 17.10.2026: a hundred cases and proceedings made 23 708 characters and Telegram
+    refused «Подробнее». Long lists show their newest five; the totals stay whole."""
+    text = format_card(_large_company())
+    assert telegram_length(text) <= TELEGRAM_MESSAGE_LIMIT
+    assert text.count("  Дело: ") == 5 and text.count("  Производство: ") == 5
+    # «Of the received»: the source itself returned a hundred of 924 (review B on #108).
+    assert text.count("  …и ещё 95 из полученных; здесь — 5 новейших") == 2
+    assert "Незавершённых дел: 924" in text  # the source's own total, not the five shown
+
+
+def test_the_newest_records_are_the_ones_shown():
+    check = _large_company()
+    courts_snapshot = check.snapshots[0]
+    cases = [fact for fact in courts_snapshot.facts if fact.kind is FactKind.COURT_CASE]
+    newest = sorted(cases, key=lambda fact: fact.observed_on, reverse=True)[:5]
+    text = format_card(check)
+    assert all(str(fact.value) in text for fact in newest)
+    oldest = min(cases, key=lambda fact: fact.observed_on)
+    assert str(oldest.value) not in text
+
+
+def test_a_long_text_is_split_at_line_ends_into_messages_telegram_takes():
+    text = "\n".join(f"строка {n:04d} " + "x" * 90 for n in range(200))
+    parts = split_message(text)
+    assert len(parts) > 1 and all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    assert "\n".join(parts) == text  # nothing lost, nothing added
+    assert split_message("коротко") == ["коротко"]
+    assert split_message("") == [""]
+    huge = "y" * (2 * TELEGRAM_MESSAGE_LIMIT + 10)
+    assert [len(part) for part in split_message(huge)] == [4096, 4096, 10]
+
+
+def test_telegram_counts_an_emoji_as_two():
+    """Review B on #108: Telegram counts UTF-16 units — 🔺 takes two, so 4096 Python
+    characters of marks would be refused."""
+    assert telegram_length("🔺 Выручка") == 10
+    marks = "\n".join("🔺" * 90 for _ in range(40))  # 3639 characters, 7239 units
+    parts = split_message(marks)
+    assert len(parts) == 2 and all(telegram_length(p) <= TELEGRAM_MESSAGE_LIMIT for p in parts)
+    assert [telegram_length(p) for p in split_message("🔺" * 3000)] == [4096, 1904]
+
+
+def test_an_empty_line_at_the_joint_is_kept():
+    """Review B on #108: a blank separator between sections fell out at a part's start."""
+    text = "x" * TELEGRAM_MESSAGE_LIMIT + "\n\nРаздел"  # the blank line opens part two
+    parts = split_message(text)
+    assert "\n".join(parts) == text
+    assert parts[-1] == "\nРаздел"

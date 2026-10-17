@@ -14,7 +14,15 @@ from claims_assistant.presentation.telegram import texts
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 
 OWNER = 42
-MAIN_MENU = ["Проверить ИНН", "Новая проверка", "Статус", "Отчёт", "О сервисе", "Помощь"]
+MAIN_MENU = [
+    "Проверить ИНН",
+    "Мониторинг",
+    "Новая проверка",
+    "Статус",
+    "Отчёт",
+    "О сервисе",
+    "Помощь",
+]
 
 
 LAUNCH_MENU = [

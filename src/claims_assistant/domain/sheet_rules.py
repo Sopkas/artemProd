@@ -11,7 +11,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
-from claims_assistant.domain.inn import InvalidInn, validate_inn
+from claims_assistant.domain.inn import LOST_ZERO_LENGTHS, InnProblem, InvalidInn, validate_inn
 
 
 class FormulaCell:
@@ -103,6 +103,8 @@ def parse_inn(cell: Cell) -> str:
         text = cell.strip()
     elif isinstance(cell, (int, float, Decimal)):
         text = _digits_from_number(cell)
+        if len(text) in LOST_ZERO_LENGTHS:
+            raise CellError("inn_invalid", str(InvalidInn(InnProblem.LOST_ZERO)))
     else:
         raise CellError("inn_invalid", "ИНН должен быть числом или строкой из цифр.")
     try:
