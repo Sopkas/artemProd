@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from claims_assistant.domain.external import Section
-from claims_assistant.domain.monitoring import Comparison, SectionState
+from claims_assistant.domain.monitoring import GAP_NOTE, Comparison, SectionState
 from claims_assistant.domain.plural import companies, of_companies
 
 # Telegram refuses longer messages; long lists are cut well before it.
@@ -88,6 +88,16 @@ def _unchecked(comparison: Comparison) -> list[str]:
     ]  # fmt: skip
 
 
+def _partly(comparison: Comparison) -> list[str]:
+    """«ФССП — источник отдаёт только новейшие…» for every section compared in part."""
+    gaps = {s: note for s, note in comparison.notes if note.startswith(GAP_NOTE)}
+    return [
+        f"{SECTION_NAMES.get(s, s.value)} — {_inside(gaps[s].rstrip('.'))}" if s in gaps
+        else SECTION_NAMES.get(s, s.value)
+        for s in comparison.partly
+    ]  # fmt: skip
+
+
 def format_changes(
     inn: str, name: str | None, comparison: Comparison, checked_on: date
 ) -> str | None:
@@ -111,6 +121,10 @@ def format_changes(
     if unchecked:
         lines += ["", "Не проверено сегодня, изменения там неизвестны:"]
         lines += [f"  {line}" for line in unchecked]
+    partly = _partly(comparison)
+    if partly:
+        lines += ["", "Сравнено не полностью:"]
+        lines += [f"  {line}" for line in partly]
     return _cut("\n".join(lines))
 
 
@@ -139,6 +153,7 @@ def format_daily_summary(day: date, checked: Sequence[Checked]) -> str:
         for section in _baseline(item.comparison)
     )
     unread = [item for item in checked if item.comparison.unchecked]
+    partly = [item for item in checked if item.comparison.partly]
     if changed:
         lines += ["", f"Изменения у {of_companies(len(changed))} — подробности выше:"]
         lines += [f"  {_who(item.inn, item.name)}" for item in changed[:MAX_NAMES]]
@@ -146,7 +161,7 @@ def format_daily_summary(day: date, checked: Sequence[Checked]) -> str:
             lines.append(f"  …и ещё {len(changed) - MAX_NAMES}")
     elif all(item.comparison.nothing_new for item in checked):
         lines += ["", "Изменений нет."]
-    elif not unread:
+    elif not unread and not partly:
         # Everything answered; some of it is a first reading, said below.
         lines += ["", "Новых изменений не найдено."]
     else:
@@ -164,4 +179,19 @@ def format_daily_summary(day: date, checked: Sequence[Checked]) -> str:
         reasons = Counter(line for item in unread for line in _unchecked(item.comparison))
         lines += ["", f"Проверено не полностью: {companies(len(unread))}."]
         lines += [f"  {reason}: {count}" for reason, count in reasons.most_common(5)]
+    if partly:
+        # S8-12: after a pause or a week, a cut list may not reach back to the last check.
+        lines += [
+            "",
+            f"Сравнено не полностью: {companies(len(partly))}. Источник отдаёт только "
+            "новейшие записи, а с прошлой проверки их прибавилось больше — появившееся "
+            "в промежутке могло не попасть в список:",
+        ]
+        lines += [
+            f"  {_who(item.inn, item.name)}: "
+            + ", ".join(SECTION_NAMES.get(s, s.value) for s in item.comparison.partly)
+            for item in partly[:MAX_NAMES]
+        ]
+        if len(partly) > MAX_NAMES:
+            lines.append(f"  …и ещё {len(partly) - MAX_NAMES}")
     return _cut("\n".join(lines))
