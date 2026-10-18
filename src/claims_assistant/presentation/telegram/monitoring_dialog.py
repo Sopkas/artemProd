@@ -138,7 +138,11 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
             await back(message, state, texts.WATCH_FAILED)
             return
         reply = format_added(result, **summary)
-        renamed = sum(1 for c in result.already if c.name and names.get(c.inn) != c.name)
+        renamed = [
+            (c.inn, names.get(c.inn), c.name)
+            for c in result.already
+            if c.name and names.get(c.inn) != c.name
+        ]
         if renamed:
             reply += "\n" + texts.watch_renamed(renamed)
         if result.added:

@@ -519,9 +519,19 @@ def watch_overview(entries: Sequence[WatchEntry], limit: int, schedule: str) -> 
     return "\n".join(lines)
 
 
-def watch_renamed(count: int) -> str:
-    """A name sent again for a company already on the list replaces the earlier one."""
-    return f"Названия обновлены: {count}."
+_RENAMED_SHOWN = 3
+
+
+def watch_renamed(renames: Sequence[tuple[str, str | None, str]]) -> str:
+    """A name sent again for a company already on the list replaces the earlier one. Each
+    change is shown, «было → стало», so a stray word taken for a name is seen at once:
+    «7707083893 тоже проверь» makes «тоже проверь» the name (Andrey's review of #114)."""
+    lines = [f"Названия обновлены: {len(renames)}."]
+    for inn, old, new in renames[:_RENAMED_SHOWN]:
+        lines.append(f"• {inn}: {old or 'без названия'} → {new}")
+    if len(renames) > _RENAMED_SHOWN:
+        lines.append(f"…и ещё {len(renames) - _RENAMED_SHOWN} — в «Список файлом».")
+    return "\n".join(lines)
 
 
 def watch_added_footer(schedule: str) -> str:
