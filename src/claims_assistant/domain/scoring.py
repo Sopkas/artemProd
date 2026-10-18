@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 
 RULES_VERSION = "0.1"
 REVENUE_DROP_PERCENT = Decimal("30")
+# A net profit that fell 1.5 times or more and stayed a profit: as alarming as revenue down
+# 30 % (the customer, 17.10.2026 — question 7 of S8-07). Reaching it fires, like revenue.
+PROFIT_DROP_TIMES = Decimal("1.5")
 # Thresholds are exclusive lower bounds: 60 days is still medium, 61 is high.
 OVERDUE_HIGH_AFTER_DAYS = 60
 OVERDUE_MEDIUM_AFTER_DAYS = 30
@@ -130,7 +133,7 @@ class Assessment:
             return "Проверить статус организации и документы по указанному источнику."
         if codes & {"overdue_60", "overdue_30", "no_payments_60", "debt_doubled"}:
             return "Уточнить причины задержки и договорённости об оплате."
-        if codes & {"revenue_drop_30", "net_loss"}:
+        if codes & {"revenue_drop_30", "net_loss", "net_profit_drop"}:
             return "Уточнить финансовое положение контрагента и условия оплаты."
         if self.priority is Priority.UNKNOWN:
             return "Дополнить данные: сведений для оценки недостаточно."
@@ -313,6 +316,9 @@ def _finance_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
             )
         )
     profit = _by_year(_facts(snapshot, FactKind.NET_PROFIT))
+    drop = _profit_drop(profit)
+    if drop is not None:
+        signals.append(drop)
     if profit:
         year = max(profit)
         fact = profit[year]
@@ -327,6 +333,40 @@ def _finance_signals(snapshot: ExternalSnapshot | None) -> list[Signal]:
                 )
             )
     return signals
+
+
+def _profit_drop(profit: dict[int, Fact]) -> Signal | None:
+    """The two latest consecutive full years, as for revenue: a profit both years, the new
+    one at most the old one divided by 1.5. A loss is ``net_loss``, never both."""
+    year = next((y for y in sorted(profit, reverse=True) if y - 1 in profit), None)
+    if year is None:
+        return None
+    new, prev = profit[year], profit[year - 1]
+    if not (
+        isinstance(new.value, Decimal)
+        and isinstance(prev.value, Decimal)
+        and new.unit == prev.unit
+        and prev.value > 0
+        and new.value >= 0
+        and new.value * PROFIT_DROP_TIMES <= prev.value
+    ):
+        return None
+    percent = (new.value - prev.value) / prev.value * 100
+    # «В 5,0 раза»: the threshold is in times, so the reason says it the same way. With a
+    # fractional figure the word is always «раза».
+    how = (
+        "до нуля"
+        if new.value == 0
+        else f"в {f'{prev.value / new.value:.1f}'.replace('.', ',')} раза "
+        f"(на {f'{abs(percent):.1f}'.replace('.', ',')}%)"
+    )
+    return Signal(
+        "net_profit_drop",
+        Priority.MEDIUM,
+        f"Чистая прибыль снизилась {how} за {year - 1}–{year} годы.",
+        (prev.id, new.id),
+        value=f"{percent:.1f}%",
+    )
 
 
 class Trend(StrEnum):
@@ -345,7 +385,8 @@ class FinanceTrend:
 
     ``alarm`` is the code of the rule of this module that fires on it, and only then: a
     mark never says more than the priority does. A profit falling by 80 % without a loss
-    has a downward trend and no alarm — there is no such rule (docs/scoring.md).
+    had a downward trend and no alarm until the customer named the threshold: since
+    17.10.2026 a fall of 1.5 times or more is ``net_profit_drop`` (docs/scoring.md).
     """
 
     kind: FactKind
@@ -397,11 +438,16 @@ def finance_trends(snapshot: ExternalSnapshot | None) -> tuple[FinanceTrend, ...
         for fact_id in signal.fact_ids
     }
     trends = []
-    for kind, code in ((FactKind.REVENUE, "revenue_drop_30"), (FactKind.NET_PROFIT, "net_loss")):
+    rules = (
+        (FactKind.REVENUE, ("revenue_drop_30",)),
+        (FactKind.NET_PROFIT, ("net_loss", "net_profit_drop")),
+    )
+    for kind, codes in rules:
         trend = _trend(kind, _by_year(_facts(snapshot, kind)))
         if trend is None:
             continue
-        if (code, trend.fact_ids[1]) in fired:
+        code = next((c for c in codes if (c, trend.fact_ids[1]) in fired), None)
+        if code is not None:
             trend = replace(trend, alarm=code)
         trends.append(trend)
     return tuple(trends)
