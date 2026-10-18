@@ -9,7 +9,7 @@ recorded and not retried.
 
 import logging
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -31,12 +31,24 @@ class TelegramMonitoringTexts:
     def changes(self, inn: str, name: str | None, comparison: Comparison, day: date) -> str | None:
         return format_changes(inn, name, comparison, day)
 
-    def summary(self, day: date, results: Sequence[DayResult], waiting: int = 0) -> str:
+    def summary(
+        self,
+        day: date,
+        results: Sequence[DayResult],
+        waiting: int = 0,
+        next_run: datetime | None = None,
+    ) -> str:
         if not results:
-            return texts.watch_nothing_reached(day, waiting)
-        checked = [Checked(result.inn, result.name, result.comparison) for result in results]
-        summary = format_daily_summary(day, checked)
-        return f"{summary}\n\n{texts.watch_waiting(waiting)}" if waiting else summary
+            summary = texts.watch_nothing_reached(day, waiting)
+        else:
+            checked = [Checked(result.inn, result.name, result.comparison) for result in results]
+            summary = format_daily_summary(day, checked)
+            if waiting:
+                summary += f"\n\n{texts.watch_waiting(waiting)}"
+        # Tomorrow goes without saying; a weekend skipped by «По будням» does not (S8-12).
+        if next_run is not None and (next_run.date() - day).days > 1:
+            summary += f"\n\n{texts.watch_next_run(next_run)}"
+        return summary
 
 
 class TelegramMonitoringNotifier:

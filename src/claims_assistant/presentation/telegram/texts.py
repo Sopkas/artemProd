@@ -667,6 +667,12 @@ def watch_waiting(count: int) -> str:
     )
 
 
+def watch_next_run(when: datetime) -> str:
+    """At the end of the day's summary when the next run is not tomorrow. With the date: the
+    summary may be read a day later, and «в понедельник» would be wrong by then."""
+    return f"Следующая проверка: {_weekday(when.date())} в {when:%H:%M}."
+
+
 def watch_nothing_reached(day: date, count: int) -> str:
     return (
         f"📋 Мониторинг на {_date(day)}. Проверить не удалось: кончился лимит запросов к "

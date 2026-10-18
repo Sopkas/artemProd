@@ -119,6 +119,14 @@ def is_due(entry: WatchEntry, day: date, settings: WatchSettings, limited: bool)
     return entry.last_checked_on < own_day
 
 
+def first_run_from(day: date, frequency: Frequency) -> date:
+    """``day``, or the first day after it the frequency looks at the list: by weekdays the
+    weekend is skipped. Weekly, a part of the list is checked every day."""
+    while frequency is Frequency.WEEKDAYS and day.weekday() >= 5:
+        day += timedelta(days=1)
+    return day
+
+
 @dataclass(frozen=True, slots=True)
 class MonitoringPolicy:
     # 09:00 by the business clock until the customer names another hour (S8-07).
@@ -233,8 +241,15 @@ class MonitoringTexts(Protocol):
         self, inn: str, name: str | None, comparison: Comparison, day: date
     ) -> str | None: ...
 
-    def summary(self, day: date, results: Sequence[DayResult], waiting: int = 0) -> str:
-        """``waiting``: companies the day's requests did not reach."""
+    def summary(
+        self,
+        day: date,
+        results: Sequence[DayResult],
+        waiting: int = 0,
+        next_run: datetime | None = None,
+    ) -> str:
+        """``waiting``: companies the day's requests did not reach; ``next_run``: when the
+        list is looked at again, by the business clock."""
         ...
 
 
@@ -365,9 +380,7 @@ class MonitoringService:
         day = moment.date()
         if await self._store.day_finished(day):
             day += timedelta(days=1)
-        while settings.frequency is Frequency.WEEKDAYS and day.weekday() >= 5:
-            day += timedelta(days=1)
-        return day
+        return first_run_from(day, settings.frequency)
 
     # --- the daily run ---
 
@@ -410,7 +423,7 @@ class MonitoringService:
                 unchecked += bool(comparison.unchecked)
                 failed += broke
             waiting += waits
-            await self._summary(owner_id, day, waits)
+            await self._summary(owner_id, day, settings, waits)
         await self._store.finish_day(day)
         keep = timedelta(days=self.policy.keep_messages_days)
         await self._store.purge_messages(self._clock() - keep)
@@ -465,7 +478,9 @@ class MonitoringService:
             return None
         return comparison, broke
 
-    async def _summary(self, owner_id: int, day: date, waiting: int = 0) -> None:
+    async def _summary(
+        self, owner_id: int, day: date, settings: WatchSettings, waiting: int = 0
+    ) -> None:
         if await self._store.has_summary(owner_id, day):
             return
         results = await self._store.results(owner_id, day)
@@ -474,7 +489,9 @@ class MonitoringService:
         quiet = not waiting and all(result.comparison.nothing_new for result in results)
         if quiet and not self.policy.quiet_summary:
             return
-        text = self._texts.summary(day, results, waiting)
+        following = first_run_from(day + timedelta(days=1), settings.frequency)
+        next_run = datetime.combine(following, self.policy.run_at)
+        text = self._texts.summary(day, results, waiting, next_run)
         await self._store.queue_summary(owner_id, day, text)
 
 

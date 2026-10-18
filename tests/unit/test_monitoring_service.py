@@ -478,6 +478,11 @@ async def test_weekdays_leave_the_weekend_out(world):
     assert await messages(world, 17) == () and await messages(world, 18) == ()
     world.clock.now = at(17, 10)  # Saturday after the run: the next one is Monday
     assert await service.next_run(OWNER) == date(2026, 10, 19)
+    # Friday's summary says the weekend is skipped; Monday's next run is tomorrow — unsaid.
+    [friday] = await messages(world, 16)
+    assert friday.text.endswith("\n\nСледующая проверка: пн 19.10.2026 в 09:00.")
+    [monday] = await messages(world, 19)
+    assert "Следующая проверка" not in monday.text
 
 
 async def test_weekly_checks_each_company_on_its_weekday(world):
