@@ -4,8 +4,9 @@ Headings, paragraphs, bullet and numbered lists (one level of nesting), pipe tab
 inline **bold**, `code` and [text](url). Arial throughout: it carries Cyrillic.
 
 Arial has no emoji, and reportlab cannot draw a colour emoji font, so the card's marks
-(❗️ ⚠️ ✅ ℹ️ 🔺 🔻 ➖ 💰) are drawn once from the system's emoji font into small images and
-set inline — the guide explains the card by them, a box in their place explains nothing.
+(❗️ ⚠️ ✅ ℹ️ 🔺 🔻 ➖ 💰) and the monitoring buttons' (⏸ ▶️) are drawn once from the system's
+emoji font into small images and set inline — the guide explains the card by them, a box in
+their place explains nothing.
 """
 
 import re
@@ -25,7 +26,11 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 EMOJI_FONT = "/System/Library/Fonts/Apple Color Emoji.ttc"
 EMOJI_DIR = Path(tempfile.gettempdir()) / "handover-emoji"
-_EMOJI = re.compile("([\U0001f300-\U0001faff\u2600-\u27bf\u2139\u2b00-\u2bff])\ufe0f?")
+# The monitoring buttons add «⏸» and «▶️» (U+23F8, U+25B6) — outside the blocks above;
+# named one by one: the rest of U+25A0–25FF are plain shapes Arial draws itself.
+_EMOJI = re.compile(
+    "([\U0001f300-\U0001faff\u2600-\u27bf\u2139\u2b00-\u2bff\u23e9-\u23fa\u25b6\u25c0])\ufe0f?"
+)
 
 
 def _emoji_image(char: str) -> Path:
