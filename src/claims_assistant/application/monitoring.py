@@ -119,6 +119,24 @@ def is_due(entry: WatchEntry, day: date, settings: WatchSettings, limited: bool)
     return entry.last_checked_on < own_day
 
 
+def following_run(day: date, frequency: Frequency) -> date:
+    """The run after ``day``'s: tomorrow, past the weekend in the weekdays mode."""
+    following = day + timedelta(days=1)
+    while frequency is Frequency.WEEKDAYS and following.weekday() >= 5:
+        following += timedelta(days=1)
+    return following
+
+
+@dataclass(frozen=True, slots=True)
+class NextCheck:
+    """Under the summary of a list that is not checked whole every day: the mode and the
+    next run (S8-12) — «проверено: 14» must not read as «остальные забыты»."""
+
+    frequency: Frequency
+    day: date
+    run_at: time
+
+
 @dataclass(frozen=True, slots=True)
 class MonitoringPolicy:
     # 09:00 by the business clock until the customer names another hour (S8-07).
@@ -233,8 +251,15 @@ class MonitoringTexts(Protocol):
         self, inn: str, name: str | None, comparison: Comparison, day: date
     ) -> str | None: ...
 
-    def summary(self, day: date, results: Sequence[DayResult], waiting: int = 0) -> str:
-        """``waiting``: companies the day's requests did not reach."""
+    def summary(
+        self,
+        day: date,
+        results: Sequence[DayResult],
+        waiting: int = 0,
+        next_check: NextCheck | None = None,
+    ) -> str:
+        """``waiting``: companies the day's requests did not reach; ``next_check``: the
+        mode and the next run, when the list is not checked whole every day."""
         ...
 
 
@@ -364,7 +389,7 @@ class MonitoringService:
         moment = self._clock().astimezone(self._zone)
         day = moment.date()
         if await self._store.day_finished(day):
-            day += timedelta(days=1)
+            return following_run(day, settings.frequency)
         while settings.frequency is Frequency.WEEKDAYS and day.weekday() >= 5:
             day += timedelta(days=1)
         return day
@@ -410,7 +435,7 @@ class MonitoringService:
                 unchecked += bool(comparison.unchecked)
                 failed += broke
             waiting += waits
-            await self._summary(owner_id, day, waits)
+            await self._summary(owner_id, day, settings, waits)
         await self._store.finish_day(day)
         keep = timedelta(days=self.policy.keep_messages_days)
         await self._store.purge_messages(self._clock() - keep)
@@ -465,7 +490,9 @@ class MonitoringService:
             return None
         return comparison, broke
 
-    async def _summary(self, owner_id: int, day: date, waiting: int = 0) -> None:
+    async def _summary(
+        self, owner_id: int, day: date, settings: WatchSettings, waiting: int = 0
+    ) -> None:
         if await self._store.has_summary(owner_id, day):
             return
         results = await self._store.results(owner_id, day)
@@ -474,7 +501,11 @@ class MonitoringService:
         quiet = not waiting and all(result.comparison.nothing_new for result in results)
         if quiet and not self.policy.quiet_summary:
             return
-        text = self._texts.summary(day, results, waiting)
+        next_check = None
+        if settings.frequency is not Frequency.DAILY:
+            following = following_run(day, settings.frequency)
+            next_check = NextCheck(settings.frequency, following, self.policy.run_at)
+        text = self._texts.summary(day, results, waiting, next_check)
         await self._store.queue_summary(owner_id, day, text)
 
 

@@ -182,6 +182,7 @@ async def test_the_first_check_is_a_baseline_and_the_summary_says_so(world):
     assert summary.owner_id == OWNER and summary.inn is None
     assert summary.text.startswith("📋 Мониторинг на 16.10.2026. Организаций проверено: 2.")
     assert "Впервые проверено: 2 организации" in summary.text
+    assert "Следующая" not in summary.text  # every day: nothing to add about the next run
     # The day is done: no second run today, and every company has its date. The source's
     # name fills a gap; the customer's own name stays (17.10.2026).
     assert await service.due() is None
@@ -478,6 +479,28 @@ async def test_weekdays_leave_the_weekend_out(world):
     assert await messages(world, 17) == () and await messages(world, 18) == ()
     world.clock.now = at(17, 10)  # Saturday after the run: the next one is Monday
     assert await service.next_run(OWNER) == date(2026, 10, 19)
+
+
+async def test_the_summary_names_the_mode_and_the_next_run(world):
+    """Not the whole list every day: the summary says when the next run is (S8-12), so
+    «проверено: 1» does not read as «остальных забыли»."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A)])
+    await service.set_frequency(OWNER, Frequency.WEEKDAYS)
+    await run(world, service, 16)  # Friday
+    [friday] = await messages(world, 16)
+    assert friday.text.endswith("Проверка по будням. Следующая — пн 19.10.2026 в 09:00.")
+    await service.set_frequency(OWNER, Frequency.WEEKLY)
+    for day in range(19, 26):
+        await run(world, service, day)
+    [(day, summary)] = [(d, m) for d in range(19, 26) for m in await messages(world, d)]
+    following = date(2026, 10, day + 1)
+    weekday = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")[following.weekday()]
+    # The date in full: a summary sent a day late must not say «завтра» (review A on #116).
+    assert summary.text.endswith(
+        "Проверка раз в неделю: каждый день — часть списка, у каждой организации свой день "
+        f"недели. Следующая проверка — {weekday} {following:%d.%m.%Y} в 09:00."
+    )
 
 
 async def test_weekly_checks_each_company_on_its_weekday(world):
