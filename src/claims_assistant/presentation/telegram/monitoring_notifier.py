@@ -38,7 +38,7 @@ class TelegramMonitoringTexts:
         waiting: int = 0,
         next_check: NextCheck | None = None,
     ) -> str:
-        after = [texts.watch_next_check(next_check, day)] if next_check else []
+        after = [texts.watch_next_check(next_check)] if next_check else []
         if not results:
             return "\n\n".join([texts.watch_nothing_reached(day, waiting), *after])
         checked = [Checked(result.inn, result.name, result.comparison) for result in results]

@@ -493,10 +493,13 @@ async def test_the_summary_names_the_mode_and_the_next_run(world):
     await service.set_frequency(OWNER, Frequency.WEEKLY)
     for day in range(19, 26):
         await run(world, service, day)
-    [summary] = [m for day in range(19, 26) for m in await messages(world, day)]
+    [(day, summary)] = [(d, m) for d in range(19, 26) for m in await messages(world, d)]
+    following = date(2026, 10, day + 1)
+    weekday = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")[following.weekday()]
+    # The date in full: a summary sent a day late must not say «завтра» (review A on #116).
     assert summary.text.endswith(
         "Проверка раз в неделю: каждый день — часть списка, у каждой организации свой день "
-        "недели. Следующая проверка — завтра в 09:00."
+        f"недели. Следующая проверка — {weekday} {following:%d.%m.%Y} в 09:00."
     )
 
 

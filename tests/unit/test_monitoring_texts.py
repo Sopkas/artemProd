@@ -123,12 +123,12 @@ def test_the_notes_close_a_cut_summary_whole():
     changed = [Checked(f"77{n:08d}", long, with_new_case()) for n in range(10)]
     partly = [Checked(f"78{n:08d}", long, replace(gapped(), changes=())) for n in range(10)]
     weekly = NextCheck(Frequency.WEEKLY, date(2026, 10, 17), time(9, 0))
-    notes = [watch_waiting(3), watch_next_check(weekly, DAY)]
+    notes = [watch_waiting(3), watch_next_check(weekly)]
     assert format_daily_summary(DAY, changed + partly).endswith("\n…")  # too long: cut
     text = format_daily_summary(DAY, changed + partly, notes)
     assert len(text) <= MESSAGE_LIMIT
     assert text.endswith("\n…\n\n" + "\n\n".join(notes))
-    assert notes[1].endswith("Следующая проверка — завтра в 09:00.")
+    assert notes[1].endswith("Следующая проверка — сб 17.10.2026 в 09:00.")
 
 
 def test_a_quiet_day_says_so_only_when_everything_was_read():

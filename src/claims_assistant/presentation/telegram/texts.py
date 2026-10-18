@@ -667,10 +667,12 @@ def watch_waiting(count: int) -> str:
     )
 
 
-def watch_next_check(next_check: NextCheck, day: date) -> str:
+def watch_next_check(next_check: NextCheck) -> str:
     """Under the day's summary when the list is not checked whole every day (S8-12): the
-    mode and the next run, so «проверено: 14» does not read as «остальных забыли»."""
-    when = watch_when(next_check.day, next_check.run_at, datetime.combine(day, next_check.run_at))
+    mode and the next run, so «проверено: 14» does not read as «остальных забыли». The date
+    in full, not «завтра»: a summary held back by Telegram away or the computer off arrives
+    a day late, and «завтра» would be wrong by then (review A on #116)."""
+    when = f"{_weekday(next_check.day)} в {next_check.run_at:%H:%M}"
     if next_check.frequency is Frequency.WEEKLY:
         return (
             "Проверка раз в неделю: каждый день — часть списка, у каждой организации свой "
