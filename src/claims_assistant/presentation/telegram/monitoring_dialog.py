@@ -172,6 +172,10 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
             reply += "\n\n" + texts.watch_added_footer(schedule(frequency))
         await back(message, state, reply)
 
+    async def not_saved(message: Message, state: FSMContext, exc: RepositoryError) -> None:
+        logger.error("watch_settings_failed error_type=%s", type(exc).__name__)
+        await back(message, state, texts.WATCH_SETTINGS_FAILED)
+
     # --- entry and exit ---
 
     @router.message(Command("monitor"))
@@ -240,14 +244,22 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
 
     @router.message(MonitorDialog.menu, F.text == WATCH_PAUSE)
     async def pause(message: Message, state: FSMContext) -> None:
-        settings = await service.pause(message.from_user.id)
+        try:
+            settings = await service.pause(message.from_user.id)
+        except RepositoryError as exc:
+            await not_saved(message, state, exc)
+            return
         await back(message, state, texts.watch_paused(settings.paused_since))
 
     @router.message(MonitorDialog.menu, F.text == WATCH_RESUME)
     async def resume(message: Message, state: FSMContext) -> None:
         user_id = message.from_user.id
-        await service.resume(user_id)
-        next_run = await service.next_run(user_id)
+        try:
+            await service.resume(user_id)
+            next_run = await service.next_run(user_id)
+        except RepositoryError as exc:
+            await not_saved(message, state, exc)
+            return
         resumed = texts.watch_resumed(next_run, service.policy.run_at, service.local_now())
         await back(message, state, resumed)
 
@@ -259,7 +271,11 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
     @router.message(MonitorDialog.frequency, F.text.in_(_FREQUENCIES))
     async def set_frequency(message: Message, state: FSMContext) -> None:
         frequency = _FREQUENCIES[message.text]
-        await service.set_frequency(message.from_user.id, frequency)
+        try:
+            await service.set_frequency(message.from_user.id, frequency)
+        except RepositoryError as exc:
+            await not_saved(message, state, exc)
+            return
         await back(message, state, texts.watch_frequency_set(schedule(frequency)))
 
     @router.message(MonitorDialog.frequency, _ours)

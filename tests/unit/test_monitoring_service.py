@@ -34,7 +34,7 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.domain.monitoring import MONITORED
-from claims_assistant.domain.watchlist import Candidate
+from claims_assistant.domain.watchlist import Candidate, WatchEntry
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
 from claims_assistant.infrastructure.persistence.watch import SqliteWatchStore
@@ -497,18 +497,117 @@ async def test_weekly_checks_each_company_on_its_weekday(world):
         assert {date(2026, 10, d).weekday() for d in checked[inn]} == {weekly_slot(inn)}
 
 
-def test_a_missed_weekday_is_made_up_and_a_cut_check_comes_first():
+def by_weekday(per_day: int) -> list[str]:
+    """``per_day`` synthetic INNs for every weekly slot, Monday's first."""
+    slots: dict[int, list[str]] = {slot: [] for slot in range(7)}
+    number = 500_000_000
+    while any(len(inns) < per_day for inns in slots.values()):
+        inn = inn10(str(number))
+        if len(slots[weekly_slot(inn)]) < per_day:
+            slots[weekly_slot(inn)].append(inn)
+        number += 1
+    return [inn for slot in range(7) for inn in slots[slot]]
+
+
+def business(day: date, hour: int = 9, minute: int = 30) -> datetime:
+    """A moment of ``day`` by the Moscow clock, for runs past the end of October."""
+    return datetime.combine(day, time(hour, minute), tzinfo=UTC) - timedelta(hours=3)
+
+
+async def checked_on(world, service: MonitoringService, day: date) -> list[str]:
+    """The companies the run of ``day`` asks the source about."""
+    world.clock.now = business(day)
+    assert await service.due() == day
+    world.source.calls.clear()
+    await service.run_day(day)
+    return list(world.source.calls)
+
+
+def of_weekday(inns: list[str], day: date) -> set[str]:
+    return {inn for inn in inns if weekly_slot(inn) == day.weekday()}
+
+
+async def test_a_resume_after_two_weeks_checks_a_seventh_and_keeps_the_days(world):
+    """Andrey's review of #111: «a week has passed» checked the whole list on the day of a
+    resume and then moved a seventh of it off its day for good."""
+    inns = by_weekday(3)
+    start = date(2026, 10, 16)
+    world.clock.now = business(start, 8)
+    service = world.service()
+    await service.add(OWNER, [Candidate(inn) for inn in inns])
+    await service.set_frequency(OWNER, Frequency.WEEKLY)
+    for offset in range(7):
+        day = start + timedelta(days=offset)
+        assert set(await checked_on(world, service, day)) == of_weekday(inns, day)
+    await service.pause(OWNER)
+    for offset in range(7, 21):
+        assert await checked_on(world, service, start + timedelta(days=offset)) == []
+    resumed = start + timedelta(days=21)
+    world.clock.now = business(resumed, 8)  # before the day's run
+    await service.resume(OWNER)
+    for offset in range(21, 35):
+        day = start + timedelta(days=offset)
+        assert set(await checked_on(world, service, day)) == of_weekday(inns, day), day
+
+
+async def test_a_switch_from_every_day_keeps_a_seventh_a_day(world):
+    inns = by_weekday(3)
+    start = date(2026, 10, 16)
+    world.clock.now = business(start, 8)
+    service = world.service()
+    await service.add(OWNER, [Candidate(inn) for inn in inns])
+    for offset in range(3):
+        assert len(await checked_on(world, service, start + timedelta(days=offset))) == 21
+    await service.set_frequency(OWNER, Frequency.WEEKLY)  # after the third day's run
+    for offset in range(3, 17):
+        day = start + timedelta(days=offset)
+        assert set(await checked_on(world, service, day)) == of_weekday(inns, day), day
+
+
+async def test_a_weekday_missed_is_made_up_once_and_the_day_stays(world):
+    """Its own weekday came without its check: the requests ran out before it, or the
+    computer was off. The next run makes it up, and the week after it is back on its day."""
+    [inn] = by_weekday(1)[:1]  # Monday's
     monday = date(2026, 10, 19)
-    slot = monday.weekday()
-    inn = next(f"{n:010d}" for n in range(10**9, 10**9 + 7) if int(f"{n:010d}") % 7 == slot)
+    world.clock.now = business(monday, 8)
+    service = world.service()
+    await service.add(OWNER, [Candidate(inn)])
+    await service.set_frequency(OWNER, Frequency.WEEKLY)
+    world.source.spent = {inn}
+    assert await checked_on(world, service, monday) == [inn]  # asked, nothing answered
+    world.source.spent = set()
+    seen = [
+        offset
+        for offset in range(1, 23)
+        if offset != 14  # the computer off on the third Monday
+        and await checked_on(world, service, monday + timedelta(days=offset))
+    ]
+    assert seen == [1, 7, 15, 21]
+
+
+def test_a_company_is_due_on_its_day_and_only_owed_days_are_made_up():
+    monday = date(2026, 10, 19)
+    [inn] = by_weekday(1)[:1]
+    weekly = WatchSettings(Frequency.WEEKLY)
+
+    def due(day, *, checked=None, added=date(2026, 10, 1), settings=weekly, limited=False):
+        entry = WatchEntry(inn, added, last_checked_on=checked)
+        return is_due(entry, day, settings, limited)
+
     tuesday = monday + timedelta(days=1)
-    assert is_due(inn, None, monday, Frequency.WEEKLY, False)
-    assert not is_due(inn, None, tuesday, Frequency.WEEKLY, False)  # waits for its day
-    assert not is_due(inn, monday, tuesday + timedelta(days=5), Frequency.WEEKLY, False)
-    # The computer was off on its Monday: made up the next day the week has passed.
-    assert is_due(inn, monday, monday + timedelta(days=8), Frequency.WEEKLY, False)
-    # The requests ran out on it: next day, whatever the weekday.
-    assert is_due(inn, monday, tuesday, Frequency.WEEKLY, True)
+    assert due(monday)  # its own weekday, never checked
+    assert due(monday, checked=monday - timedelta(days=1))  # on its day even after a switch
+    assert not due(tuesday, checked=monday)
+    assert not due(tuesday, added=tuesday)  # on the list since today: waits for Monday
+    assert due(tuesday, added=monday)  # added on its Monday after the run: owed
+    assert due(tuesday, checked=monday - timedelta(days=7))  # Monday came without it
+    assert due(monday + timedelta(days=6), checked=monday - timedelta(days=7))
+    assert not due(
+        tuesday, checked=monday - timedelta(days=7), settings=replace(weekly, changed_on=tuesday)
+    )
+    assert due(tuesday, checked=monday, limited=True)  # the requests ran out on it
+    assert due(tuesday, settings=WatchSettings(Frequency.DAILY))
+    assert not due(monday + timedelta(days=5), settings=WatchSettings(Frequency.WEEKDAYS))
 
 
 async def test_settings_are_the_owners_and_outlive_a_cleared_list(world):
@@ -521,10 +620,16 @@ async def test_settings_are_the_owners_and_outlive_a_cleared_list(world):
     kept = await service.settings(OWNER)
     assert kept.frequency is Frequency.WEEKLY and kept.paused
     assert await service.settings(OTHER) == WatchSettings()
-    # A pause twice keeps its first day; a resume keeps the frequency.
+    # A pause twice keeps its first day; a resume keeps the frequency and dates the change.
     world.clock.now = at(18)
     assert (await service.pause(OWNER)).paused_since == date(2026, 10, 16)
-    assert await service.resume(OWNER) == WatchSettings(Frequency.WEEKLY, None)
+    resumed = WatchSettings(Frequency.WEEKLY, None, date(2026, 10, 18))
+    assert await service.resume(OWNER) == resumed
+    # Neither a resume without a pause nor the same frequency again moves that date.
+    world.clock.now = at(20)
+    assert await service.resume(OWNER) == resumed
+    assert await service.set_frequency(OWNER, Frequency.WEEKLY) == resumed
+    assert await service.settings(OWNER) == resumed
 
 
 # --- the outbox ---

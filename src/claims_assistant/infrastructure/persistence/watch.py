@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import Connection, Engine, and_, delete, func, insert, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from claims_assistant.application.analysis_repository import RepositoryError
@@ -192,20 +193,21 @@ class SqliteWatchStore:
             frequency = Frequency(row.frequency)
         except ValueError:
             frequency = Frequency.DAILY  # an unknown mode reads as the default, not a stop
-        return WatchSettings(frequency, _day(row.paused_since))
+        return WatchSettings(frequency, _day(row.paused_since), _day(row.changed_on))
 
     def _save_settings(self, owner_id: int, settings: WatchSettings) -> None:
         values = {
             "frequency": settings.frequency.value,
             "paused_since": settings.paused_since.isoformat() if settings.paused_since else None,
+            "changed_on": settings.changed_on.isoformat() if settings.changed_on else None,
             "updated_at": _stamp(self._clock()),
         }
+        # One statement: two quick presses on a new owner must not both try to insert.
+        statement = sqlite_insert(watch_settings).values(owner_id=owner_id, **values)
         with self._engine.begin() as connection:
-            updated = connection.execute(
-                update(watch_settings).where(watch_settings.c.owner_id == owner_id).values(**values)
-            ).rowcount
-            if not updated:
-                connection.execute(insert(watch_settings).values(owner_id=owner_id, **values))
+            connection.execute(
+                statement.on_conflict_do_update(index_elements=["owner_id"], set_=values)
+            )
 
     def _inns(self, connection: Connection, owner_id: int) -> list[str]:
         query = select(watchlist.c.inn).where(watchlist.c.owner_id == owner_id)
