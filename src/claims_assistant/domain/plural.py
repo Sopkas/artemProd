@@ -20,3 +20,12 @@ def of_companies(count: int) -> str:
     if count % 10 == 1 and count % 100 != 11:
         return f"{count} организации"
     return f"{count} организаций"
+
+
+def requests(count: int) -> str:
+    """«1 запрос», «2 запроса», «5 запросов» — the source's requests (S8-12)."""
+    if count % 10 == 1 and count % 100 != 11:
+        return f"{count} запрос"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return f"{count} запроса"
+    return f"{count} запросов"

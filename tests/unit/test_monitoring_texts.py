@@ -6,8 +6,9 @@ rules' own tests; names and INNs are synthetic.
 
 import io
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 
+import pytest
 from openpyxl import load_workbook
 
 from claims_assistant.domain.external import Section
@@ -21,6 +22,7 @@ from claims_assistant.presentation.telegram.monitoring import (
     format_changes,
     format_daily_summary,
 )
+from claims_assistant.presentation.telegram.texts import watch_frequency_prompt
 from tests.unit.test_monitoring_changes import (
     INN,
     TODAY,
@@ -216,3 +218,62 @@ def test_an_empty_list_is_a_file_with_its_header():
     sheet = load_workbook(io.BytesIO(build_watchlist([], DAY)))[SHEET_NAME]
     assert sheet["A1"].value.endswith(": 0 из 100")
     assert sheet.max_row == 2
+
+
+# --- S8-12: a gap after a long break, the price of each frequency --------------------
+
+
+def gapped():
+    week_ago = datetime(2026, 10, 9, 9, tzinfo=UTC)
+    old = [case("А00-1/2026", "2026-10-01")]
+    new = [case("А00-2/2026", "2026-10-12")]
+    return compare(
+        INN,
+        full_day(week_ago, courts=court_snapshot(old, week_ago, total=150)),
+        full_day(TODAY, courts=court_snapshot(new, TODAY, total=400)),
+    )
+
+
+def test_a_gap_is_said_under_the_changes():
+    text = format_changes(INN, NAME, gapped(), DAY)
+    assert "Сравнено не полностью:" in text
+    assert (
+        "  арбитражные дела — источник отдаёт только новейшие записи, а с прошлой проверки "
+        "(09.10.2026) их прибавилось больше: появившиеся до 12.10.2026 могли не попасть в "
+        "список"
+    ) in text.splitlines()
+
+
+def test_a_gap_is_never_a_quiet_day():
+    summary = format_daily_summary(
+        DAY,
+        [Checked(INN, NAME, quiet()), Checked("7707083893", None, replace(gapped(), changes=()))],
+    )
+    assert "Изменений нет." not in summary
+    assert "Новых изменений не найдено, но проверено не всё — ниже." in summary
+    assert "Сравнено не полностью: 1 организация." in summary
+    assert "  ИНН 7707083893: арбитражные дела" in summary.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("count", "lines"),
+    [
+        (
+            100,
+            [
+                "Для 100 организаций в списке:",
+                "• каждый день: ≈ 500 запросов в день, около 1 800 ₽ в месяц;",
+                "• по будням: ≈ 500 запросов в будний день, около 1 290 ₽ в месяц;",
+                "• раз в неделю: ≈ 71 запрос в день, бесплатно.",
+            ],
+        ),
+        (14, ["• каждый день: ≈ 70 запросов в день, бесплатно;"]),
+    ],
+)
+def test_the_frequency_question_names_the_price_of_each_answer(count, lines):
+    text = watch_frequency_prompt(count).splitlines()
+    assert all(line in text for line in lines)
+
+
+def test_an_empty_list_has_no_price():
+    assert "₽" not in watch_frequency_prompt(0)
