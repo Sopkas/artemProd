@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from datetime import date, datetime, time
 
 from claims_assistant.application.analysis_pipeline import RunSummary
-from claims_assistant.application.monitoring import Frequency, WatchSettings
+from claims_assistant.application.monitoring import Frequency, NextCheck, WatchSettings
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
 from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
@@ -665,6 +665,18 @@ def watch_waiting(count: int) -> str:
         f"Не дошла очередь: {companies(count)} — кончился лимит запросов к источнику. "
         "В следующий раз — в первую очередь."
     )
+
+
+def watch_next_check(next_check: NextCheck, day: date) -> str:
+    """Under the day's summary when the list is not checked whole every day (S8-12): the
+    mode and the next run, so «проверено: 14» does not read as «остальных забыли»."""
+    when = watch_when(next_check.day, next_check.run_at, datetime.combine(day, next_check.run_at))
+    if next_check.frequency is Frequency.WEEKLY:
+        return (
+            "Проверка раз в неделю: каждый день — часть списка, у каждой организации свой "
+            f"день недели. Следующая проверка — {when}."
+        )
+    return f"Проверка по будням. Следующая — {when}."
 
 
 def watch_nothing_reached(day: date, count: int) -> str:

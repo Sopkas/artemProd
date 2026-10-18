@@ -15,7 +15,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from claims_assistant.application.analysis_repository import RepositoryError
-from claims_assistant.application.monitoring import DayResult, WatchStore
+from claims_assistant.application.monitoring import DayResult, NextCheck, WatchStore
 from claims_assistant.domain.monitoring import Comparison
 
 from . import texts
@@ -31,12 +31,19 @@ class TelegramMonitoringTexts:
     def changes(self, inn: str, name: str | None, comparison: Comparison, day: date) -> str | None:
         return format_changes(inn, name, comparison, day)
 
-    def summary(self, day: date, results: Sequence[DayResult], waiting: int = 0) -> str:
+    def summary(
+        self,
+        day: date,
+        results: Sequence[DayResult],
+        waiting: int = 0,
+        next_check: NextCheck | None = None,
+    ) -> str:
+        after = [texts.watch_next_check(next_check, day)] if next_check else []
         if not results:
-            return texts.watch_nothing_reached(day, waiting)
+            return "\n\n".join([texts.watch_nothing_reached(day, waiting), *after])
         checked = [Checked(result.inn, result.name, result.comparison) for result in results]
-        summary = format_daily_summary(day, checked)
-        return f"{summary}\n\n{texts.watch_waiting(waiting)}" if waiting else summary
+        notes = [texts.watch_waiting(waiting)] if waiting else []
+        return format_daily_summary(day, checked, [*notes, *after])
 
 
 class TelegramMonitoringNotifier:
