@@ -32,7 +32,7 @@ from claims_assistant.domain.ai_context import (
 )
 from claims_assistant.domain.ai_review import Explanation, Rejected, RejectionCode, review_answer
 from claims_assistant.domain.scoring import assess
-from claims_assistant.infrastructure.checko import courts, finances
+from claims_assistant.infrastructure.checko import courts, enforcements, finances
 from claims_assistant.infrastructure.llm.stub import StubRecommendationProvider
 from claims_assistant.presentation.telegram.card import (
     REVIEW_CARD_LIMIT,
@@ -97,6 +97,37 @@ def answer(text: str, grounds=()) -> str:
 
 
 # --- the context ------------------------------------------------------------------------
+
+
+def bailiffs(in_source: int | None):
+    records = [
+        {"ИспПрНомер": f"{n}/26/1-ИП", "ИспПрДата": "2026-09-01", "ОстЗадолж": 50_000.0}
+        for n in range(3)
+    ]
+    return enforcements.project_enforcements(
+        INN, records, 1, NOW, total=in_source, left=Decimal(150_000)
+    )
+
+
+@pytest.mark.parametrize(
+    ("in_source", "title"),
+    [
+        (3, "Незавершённых исполнительных производств"),
+        (250, "Незавершённых исполнительных производств — не меньше (источник отдал не все)"),
+    ],
+)
+def test_a_cut_bailiffs_list_reaches_the_model_as_a_floor(in_source, title):
+    """Live 17.10.2026: with «всего может быть больше» only in missing_data the model wrote
+    «74 производства» of «не меньше 74». The title of the figure says it now."""
+    snapshots = (bailiffs(in_source),)
+    request = build_request(
+        build_card_context(INN, assess(INN, snapshots), NOW.date(), snapshots, reference="card")
+    )
+    (open_count,) = [
+        fact for fact in request.context["facts"] if fact["id"].startswith("enforcements-open")
+    ]
+    assert open_count["title"] == title and open_count["value"] == "3"
+    assert "«не меньше 74" in CARD_INSTRUCTION
 
 
 def test_the_card_has_its_own_instruction_and_versions():

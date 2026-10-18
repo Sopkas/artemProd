@@ -142,8 +142,8 @@ INSTRUCTION = """\
 # скоринга от ИИ — оч важно по арбитражным делам и банкротству, и выручка год к году».
 # The same answer format and the same review (S5-06); the task is the open data, not the
 # list's priority, and there are no comments to read.
-CARD_CONTEXT_VERSION = "card-1"
-CARD_INSTRUCTION_VERSION = "card-1"
+CARD_CONTEXT_VERSION = "card-2"
+CARD_INSTRUCTION_VERSION = "card-2"
 CARD_INSTRUCTION = """\
 Ты помогаешь специалисту по работе с задолженностью. Тебе дают открытые данные об одной
 организации (сведения о ней, банкротство, арбитражные дела, исполнительные производства,
@@ -167,6 +167,8 @@ CARD_INSTRUCTION = """\
 6. Если данных мало или раздел не проверен, так и скажи; не заполняй пробелы догадками.
 7. Отвечай по-русски, деловым языком, без эмоций. Крупные суммы можно округлять:
    «3,4 млн ₽».
+8. Если показатель назван нижней границей («не меньше»), так и пиши: «не меньше 74
+   исполнительных производств», а не «74».
 
 Формат ответа — один объект JSON без текста вокруг и без других полей:
 {"explanation": "...", "promises": [], "grounds": ["id", ...]}
@@ -461,6 +463,20 @@ def _mask(text: str | None, inn: str, reference: str | None) -> str | None:
     return text.replace(inn, reference or "ref")
 
 
+# The source returned the newest hundred proceedings of more (S8-01): the open ones among
+# them are a floor. Said in the title itself — a note in missing_data alone was not enough:
+# live 17.10.2026 the model wrote «74 производства» of «не меньше 74».
+_FLOOR_TITLE = "Незавершённых исполнительных производств — не меньше (источник отдал не все)"
+
+
+def _title(fact: Fact, snapshot: ExternalSnapshot) -> str:
+    if fact.kind is FactKind.ENFORCEMENTS_OPEN and any(
+        f.kind is FactKind.ENFORCEMENTS_TOTAL for f in snapshot.facts
+    ):
+        return _FLOOR_TITLE
+    return _FACT_TITLES.get(fact.kind, fact.kind.value)
+
+
 # A defendant with a hundred cases and a hundred proceedings made a request of 71 684
 # characters against the limit of 24 000 (review A on #96): the model was never asked for
 # exactly the companies the customer wanted it for. The totals of a section stay whole;
@@ -520,7 +536,7 @@ def _facts(
                 FactLine(
                     id=fact.id,
                     section=_SECTION_TITLES.get(snapshot.section, snapshot.section.value),
-                    title=_FACT_TITLES.get(fact.kind, fact.kind.value),
+                    title=_title(fact, snapshot),
                     value=_text(fact.value),
                     source=source.source if source else snapshot.source,
                     record_id=source.record_id if source else None,
