@@ -380,6 +380,29 @@ async def test_a_card_too_large_for_the_request_says_so():
     assert REVIEW_TOO_MUCH in format_review(review, company)
 
 
+async def test_a_model_that_never_answers_is_not_called_a_spent_limit():
+    """18.10.2026 at the customer's: two timeouts, then the card's two calls were spent and
+    the reading said «исчерпан лимит расходов». Nothing was paid; the model did not answer."""
+
+    class Silent:
+        name = "silent"
+        model = "s"
+
+        async def explain(self, request, limits):
+            raise AiUnavailable(AiErrorCode.TIMEOUT, "Модель не ответила в срок.")
+
+    guard = GuardedRecommendationProvider(
+        Silent(), AiPolicy(max_retries=2), clock=lambda: NOW, sleep=no_sleep
+    )
+    company = check()
+    review = await CardReviewer(guard, clock=lambda: NOW).review(
+        company, assess(INN, company.snapshots), None
+    )
+    assert review.outcome.error.code is AiErrorCode.TIMEOUT
+    text = format_review(review, company)
+    assert REVIEW_TIMEOUT in text and REVIEW_CARD_LIMIT not in text
+
+
 # --- review A on #96 ------------------------------------------------------------------
 
 
