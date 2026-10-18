@@ -14,6 +14,7 @@ from aiogram.methods import AnswerCallbackQuery, EditMessageReplyMarkup, SendDoc
 from aiogram.types import InlineKeyboardMarkup, Update
 from openpyxl import Workbook
 
+from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.monitoring import (
     CheckRecord,
     MonitoringPolicy,
@@ -370,6 +371,36 @@ async def test_how_often_is_chosen_with_buttons(bot, update_factory, dispatcher)
     assert reply.text == texts.WATCH_STEP_CANCELLED
     screen = await send(dispatcher, bot, update_factory, "Мониторинг")
     assert "Проверка — раз в неделю" in screen.text  # «Отмена» kept the choice
+
+
+async def test_a_setting_the_base_did_not_keep_is_said_so(bot, update_factory, tmp_path):
+    class Refusing(SqliteWatchStore):
+        async def save_settings(self, owner_id, settings):
+            raise RepositoryError("synthetic")
+
+    repository = open_sqlite_repository(tmp_path / "refusing.sqlite3")
+    store = Refusing(repository.engine, lambda: NOW)
+    service = MonitoringService(
+        store,
+        Source(),
+        TelegramMonitoringTexts(),
+        mode=DataMode.DEMO,
+        policy=MonitoringPolicy(),
+        clock=lambda: NOW,
+    )
+    dispatcher = create_dispatcher(
+        frozenset({OWNER}), reader=OpenpyxlSheetReader(), monitoring=service
+    )
+    try:
+        reply = await send(dispatcher, bot, update_factory, "Мониторинг", "⏸ Приостановить")
+        assert reply.text == texts.WATCH_SETTINGS_FAILED
+        assert buttons(reply) == WATCH_MENU  # not paused
+        await send(dispatcher, bot, update_factory, "Как часто проверять")
+        reply = await send(dispatcher, bot, update_factory, "Раз в неделю")
+        assert reply.text == texts.WATCH_SETTINGS_FAILED
+        assert buttons(reply) == WATCH_MENU
+    finally:
+        repository.close()
 
 
 # --- the button under a notice ---

@@ -26,6 +26,9 @@ def upgrade() -> None:
         sa.Column("frequency", sa.String(16), nullable=False, server_default="daily"),
         # The business date the pause began; NULL — monitoring runs.
         sa.Column("paused_since", sa.String(10), nullable=True),
+        # The business date of the last resume or change of frequency: in the weekly mode
+        # the companies' own weekdays before it are not made up.
+        sa.Column("changed_on", sa.String(10), nullable=True),
         sa.Column("updated_at", sa.String(32), nullable=False),
     )
 

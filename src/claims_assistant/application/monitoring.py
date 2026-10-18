@@ -21,7 +21,7 @@ reads is too (``presentation/telegram/monitoring``). Here is the rest:
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from enum import StrEnum
 from typing import Protocol
@@ -75,6 +75,9 @@ class WatchSettings:
     # The pause began this business day; no requests until it is lifted. The list and its
     # last snapshots stay, so the comparison goes on from where it stopped.
     paused_since: date | None = None
+    # The business day the schedule last changed: a resume or another frequency. The own
+    # weekdays before it are not made up — nobody wanted those checks then.
+    changed_on: date | None = None
 
     @property
     def paused(self) -> bool:
@@ -87,27 +90,33 @@ def weekly_slot(inn: str) -> int:
     return int(inn) % WEEK
 
 
-def is_due(
-    inn: str, last_checked_on: date | None, day: date, frequency: Frequency, limited: bool
-) -> bool:
+def is_due(entry: WatchEntry, day: date, settings: WatchSettings, limited: bool) -> bool:
     """Whether a company is checked on ``day`` in its owner's mode.
 
-    Weekly: on its own weekday; earlier when the requests ran out on it last time; and in
-    any case once a week has passed — a weekday missed with the computer off is made up.
-    A company not checked yet waits for its weekday, so a long list sent at once is spread
-    over the week instead of spending a week's requests in one day.
+    Weekly: on its own weekday, and the next day when the requests ran out on it. A company
+    whose own weekday came and went without its check — the computer off, the day's
+    requests spent before it — is made up on the next run. One that was not due then (on a
+    pause, in another frequency, not on the list yet) waits for its weekday: so neither a
+    long list sent at once, nor a resume, nor a switch from every day checks the whole list
+    in one day, and every company keeps its weekday. («A week has passed» did both: on a
+    resume after a pause it checked the whole list, and a switch from every day moved a
+    seventh of it off its day for good — Andrey's review of #111, 17.10.2026.)
     """
-    if frequency is Frequency.DAILY:
+    if settings.frequency is Frequency.DAILY:
         return True
-    if frequency is Frequency.WEEKDAYS:
+    if settings.frequency is Frequency.WEEKDAYS:
         return day.weekday() < 5
     if limited:
         return True
-    on_its_day = weekly_slot(inn) == day.weekday()
-    if last_checked_on is None:
-        return on_its_day
-    gap = (day - last_checked_on).days
-    return gap >= WEEK or (on_its_day and gap > 1)
+    back = (day.weekday() - weekly_slot(entry.inn)) % WEEK
+    if back == 0:
+        return True
+    own_day = day - timedelta(days=back)  # the last one before today
+    if settings.changed_on is not None and own_day < settings.changed_on:
+        return False
+    if entry.last_checked_on is None:
+        return entry.added_on <= own_day
+    return entry.last_checked_on < own_day
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,19 +335,23 @@ class MonitoringService:
         current = await self._store.settings(owner_id)
         if current.paused:
             return current
-        paused = WatchSettings(current.frequency, self.today())
+        paused = replace(current, paused_since=self.today())
         await self._store.save_settings(owner_id, paused)
         return paused
 
     async def resume(self, owner_id: int) -> WatchSettings:
         current = await self._store.settings(owner_id)
-        resumed = WatchSettings(current.frequency, None)
+        if not current.paused:
+            return current
+        resumed = replace(current, paused_since=None, changed_on=self.today())
         await self._store.save_settings(owner_id, resumed)
         return resumed
 
     async def set_frequency(self, owner_id: int, frequency: Frequency) -> WatchSettings:
         current = await self._store.settings(owner_id)
-        changed = WatchSettings(frequency, current.paused_since)
+        if current.frequency is frequency:
+            return current
+        changed = replace(current, frequency=frequency, changed_on=self.today())
         await self._store.save_settings(owner_id, changed)
         return changed
 
@@ -383,14 +396,7 @@ class MonitoringService:
             for entry in queue_order(entries, limited):
                 if entry.last_checked_on == day:
                     continue  # done before a restart
-                due = is_due(
-                    entry.inn,
-                    entry.last_checked_on,
-                    day,
-                    settings.frequency,
-                    entry.inn in limited,
-                )
-                if not due:
+                if not is_due(entry, day, settings, entry.inn in limited):
                     continue
                 done = await self._check(owner_id, entry, day, source)
                 if done is None:
