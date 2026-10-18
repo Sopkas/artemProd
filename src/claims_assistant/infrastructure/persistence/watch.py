@@ -238,13 +238,14 @@ class SqliteWatchStore:
                         )
                     )
                 for candidate in result.already:
-                    if candidate.name:  # a name from a file fills a gap, never overwrites
+                    # The owner's name sent later replaces the earlier one — a correction
+                    # is sent again (17.10.2026). The source's name only ever fills a gap.
+                    if candidate.name:
                         connection.execute(
                             update(watchlist)
                             .where(
                                 watchlist.c.owner_id == owner_id,
                                 watchlist.c.inn == candidate.inn,
-                                watchlist.c.name.is_(None),
                             )
                             .values(name=candidate.name)
                         )

@@ -238,6 +238,27 @@ async def test_a_name_beside_an_inn_is_kept_and_fills_a_gap(bot, update_factory,
     screen = await send(dispatcher, bot, update_factory, "Мониторинг")
     assert f"  {B} — ООО «Бета»" in screen.text and f"  {A} — ПАО «Альфа»" in screen.text
     assert texts.WATCH_NAME_LATER not in screen.text
+    # A name typed beside the wrong INN is corrected by sending it again (17.10.2026).
+    reply = await send(
+        dispatcher, bot, update_factory, "Добавить на мониторинг", f"{A} АО «Альфа-2»\n{B}"
+    )
+    assert "Уже были на мониторинге: 2." in reply.text
+    # B came without a name: kept as it was. The change is shown, so a stray word is seen.
+    assert f"Названия обновлены: 1.\n• {A}: ПАО «Альфа» → АО «Альфа-2»" in reply.text
+    screen = await send(dispatcher, bot, update_factory, "Мониторинг")
+    assert f"  {A} — АО «Альфа-2»" in screen.text and f"  {B} — ООО «Бета»" in screen.text
+
+
+def test_a_renamed_company_shows_what_it_was_and_the_rest_are_counted():
+    renames = [(A, None, "ООО «Альфа»"), (B, "ПАО «Бета»", "тоже проверь")]
+    renames += [(inn10(f"77000001{n}"), "Старое", "Новое") for n in (3, 4)]
+    assert texts.watch_renamed(renames) == (
+        "Названия обновлены: 4.\n"
+        f"• {A}: без названия → ООО «Альфа»\n"
+        f"• {B}: ПАО «Бета» → тоже проверь\n"
+        f"• {renames[2][0]}: Старое → Новое\n"
+        "…и ещё 1 — в «Список файлом»."
+    )
 
 
 async def test_a_mistyped_inn_is_named_by_its_place_and_the_rest_is_added(

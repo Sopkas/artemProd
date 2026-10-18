@@ -353,13 +353,14 @@ async def test_the_list_keeps_its_limit_and_the_newest_come_first(world):
     first = await service.add(OWNER, [Candidate(A), Candidate(B), Candidate(C)])
     assert [c.inn for c in first.added] == [A, B] and [c.inn for c in first.over_limit] == [C]
     assert [entry.inn for entry in await service.entries(OWNER)] == [B, A]
-    # A name sent later fills a gap and never overwrites.
+    # A name sent later fills a gap — and replaces an earlier one: a correction is sent
+    # again (17.10.2026: a name typed beside the wrong INN). Sent without a name, it stays.
     again = await service.add(OWNER, [Candidate(B, "ООО «Бета»"), Candidate(A, "ООО «Альфа»")])
     assert len(again.already) == 2 and again.total == 2
-    second = await service.add(OWNER, [Candidate(A, "Другое имя")])
+    second = await service.add(OWNER, [Candidate(A, "АО «Альфа-2»"), Candidate(B)])
     assert second.added == ()
     names = {entry.inn: entry.name for entry in await service.entries(OWNER)}
-    assert names == {A: "ООО «Альфа»", B: "ООО «Бета»"}
+    assert names == {A: "АО «Альфа-2»", B: "ООО «Бета»"}
     assert all(entry.added_on == date(2026, 10, 16) for entry in await service.entries(OWNER))
 
 
