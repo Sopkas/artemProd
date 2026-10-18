@@ -362,24 +362,56 @@ def format_brief(
             "",
             "Своих данных по этой организации нет: приоритет считается в проверке списка.",
         ]
-    gaps = [
-        _PART_TITLES.get(part, part)
-        for part, coverage in assessment.coverage.items()
-        if coverage is not Coverage.COMPLETE and (part != "internal" or internal is not None)
-    ]
-    if gaps:
-        lines.append("Проверено не полностью: " + ", ".join(gaps) + ".")
-        # Why, when the source gave one reason for all of it: a spent limit or a lost
-        # connection reads differently from «nothing found» and must not be a button away.
-        causes = {
-            snapshot.error.message
-            for snapshot in check.snapshots
-            if snapshot.status is not FetchStatus.OK and snapshot.error is not None
-        }
-        if len(causes) == 1:
-            lines.append(f"Причина: {causes.pop()}")
+    lines += _brief_gaps(check, assessment, internal)
     lines += ["", *(f"{manual.title}: бот не проверяет." for manual in MANUAL_CHECKS), DETAILS_HINT]
     return "\n".join(lines)
+
+
+# A section the source answered only in part: its own notes are long («Показаны последние
+# 100 дел из 924…»), the full card has them.
+_PARTLY_ANSWERED = "ответ неполный, подробности — «Подробнее»."
+
+
+def _brief_gaps(
+    check: CompanyCheck, assessment: Assessment, internal: InternalContext | None
+) -> list[str]:
+    """What was not read in full, and why — a spent limit or a lost connection reads
+    differently from «nothing found» and must not be a button away. One reason for all of
+    it stays one line. Several are said each for its sections: one «лимит» under five
+    sections that had timed out was wrong (18.10.2026), and a section answered in part is
+    not one that failed."""
+    snapshots = {snapshot.section.value: snapshot for snapshot in check.snapshots}
+    groups: dict[str | None, list[str]] = {}
+    for part, coverage in assessment.coverage.items():
+        if coverage is Coverage.COMPLETE or (part == "internal" and internal is None):
+            continue
+        snapshot = snapshots.get(part)
+        failed = snapshot is not None and snapshot.status is not FetchStatus.OK
+        cause = snapshot.error.message if failed and snapshot.error is not None else None
+        groups.setdefault(cause, []).append(_PART_TITLES.get(part, part))
+    if not groups:
+        return []
+    titles = [title for parts in groups.values() for title in parts]
+    if len(groups) == 1:
+        (cause,) = groups
+        line = "Проверено не полностью: " + ", ".join(titles) + "."
+        return [line] if cause is None else [line, f"Причина: {cause}"]
+    lines = ["Проверено не полностью:"]
+    # What failed first, then what came in part.
+    for cause, parts in sorted(groups.items(), key=lambda group: group[0] is None):
+        why = _PARTLY_ANSWERED if cause is None else _after_dash(cause)
+        lines.append(f"  {', '.join(parts)} — {why}")
+    return lines
+
+
+def _after_dash(sentence: str) -> str:
+    """«Лимит времени…» → «лимит времени…» after a dash; a name («Checko …») or an acronym
+    keeps its capitals — the rule of the monitoring summary (review A on #101)."""
+    if sentence.startswith("Checko"):
+        return sentence
+    if len(sentence) > 1 and sentence[0].isupper() and sentence[1].islower():
+        return sentence[0].lower() + sentence[1:]
+    return sentence
 
 
 def format_card(check: CompanyCheck, internal: InternalContext | None = None) -> str:

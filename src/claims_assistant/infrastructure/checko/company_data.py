@@ -235,7 +235,18 @@ class CheckoCompanyDataProvider:
             Section.FEDRESURS: self._fedresurs,
             Section.ENFORCEMENTS: self._enforcements,
         }
-        return tuple([await handlers[section](request, fetched_at) for section in request.sections])
+        # All at once (18.10.2026: one after another, six sections at a 20 s timeout took two
+        # minutes on a bad link). A bug in one cancels the rest and propagates, as before.
+        tasks = [
+            asyncio.ensure_future(handlers[section](request, fetched_at))
+            for section in request.sections
+        ]
+        try:
+            return tuple(await asyncio.gather(*tasks))
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            raise
 
     def _entrepreneur_gap(
         self, request: CompanyDataRequest, section: Section, fetched_at: datetime

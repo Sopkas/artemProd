@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -112,7 +113,11 @@ async def test_brief_card_never_marks_an_incomplete_check_as_clean(scenario):
     assert first_line(brief) == "❔ Внешние данные неполные"
     assert "✅" not in brief
     assert "Проверено не полностью:" in brief and "финансы" in brief
-    assert "Причина: Синтетический пример сбоя источника." in brief
+    if scenario is DemoScenario.ERROR:  # every section failed, for one reason
+        assert "Причина: Синтетический пример сбоя источника." in brief
+    else:  # finances failed, the register answered in part: each says its own
+        assert "  финансы — синтетический пример сбоя источника." in brief
+        assert "  сообщения ЕФРСБ — ответ неполный, подробности — «Подробнее»." in brief
 
 
 async def test_brief_card_does_not_rate_reliability_and_keeps_the_manual_check():
@@ -343,6 +348,64 @@ def test_every_section_is_named_in_russian_in_the_brief_card():
         "Проверено не полностью: организация, сообщения ЕФРСБ, финансы, "
         "арбитражные дела, Федресурс, ФССП."
     )
+
+
+TIMEOUT = "Checko не ответил за отведённое время."
+OUT_OF_TIME = "Лимит времени или запросов проверки исчерпан; раздел не проверен."
+
+
+def answered(section: Section, coverage: Coverage = Coverage.COMPLETE) -> ExternalSnapshot:
+    return replace(
+        live_failure(section),
+        status=FetchStatus.OK,
+        coverage=coverage,
+        missing=("Показаны последние 100 дел из 924.",) if coverage is Coverage.PARTIAL else (),
+        error=None,
+    )
+
+
+def failing(section: Section, message: str) -> ExternalSnapshot:
+    return replace(
+        live_failure(section), missing=(message,), error=ProviderError("timeout", message)
+    )
+
+
+def gap_lines(*snapshots: ExternalSnapshot) -> list[str]:
+    check = CompanyCheck(INN, snapshots)
+    brief = format_brief(check, card_assessment(check, None))
+    lines = brief.splitlines()
+    start = next(n for n, line in enumerate(lines) if line.startswith("Проверено не полностью"))
+    end = next(n for n in range(start + 1, len(lines)) if not lines[n].startswith(("  ", "При")))
+    return lines[start:end]
+
+
+def test_one_reason_for_every_gap_stays_one_line():
+    """18.10.2026 at the customer's: the register answered, five sections timed out — and
+    the card said «лимит» for all five, the guard's word for the retry it had no time for."""
+    snapshots = [failing(section, TIMEOUT) for section in Section]
+    snapshots[1] = answered(Section.BANKRUPTCY)
+    assert gap_lines(*snapshots) == [
+        "Проверено не полностью: организация, финансы, арбитражные дела, Федресурс, ФССП.",
+        f"Причина: {TIMEOUT}",
+    ]
+
+
+def test_each_reason_is_said_for_its_own_sections():
+    """One «Причина» under sections that failed for different reasons, or under one that
+    came in part, was wrong for some of them."""
+    assert gap_lines(
+        failing(Section.COMPANY, TIMEOUT),
+        answered(Section.BANKRUPTCY),
+        failing(Section.FINANCES, OUT_OF_TIME),
+        answered(Section.COURTS, Coverage.PARTIAL),
+        failing(Section.FEDRESURS, TIMEOUT),
+        answered(Section.ENFORCEMENTS),
+    ) == [
+        "Проверено не полностью:",
+        "  организация, Федресурс — Checko не ответил за отведённое время.",
+        "  финансы — лимит времени или запросов проверки исчерпан; раздел не проверен.",
+        "  арбитражные дела — ответ неполный, подробности — «Подробнее».",
+    ]
 
 
 # --- the full card is one Telegram message (live, 17.10.2026) ---

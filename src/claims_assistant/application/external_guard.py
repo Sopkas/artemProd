@@ -9,7 +9,7 @@ never raises for expected source trouble; programming errors and cancellation pr
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -50,9 +50,11 @@ class GuardPolicy:
     max_pages: int = 20
     max_retries: int = 2
     backoff_seconds: float = 1.0
-    # Budget of one interactive card (plain fetch): a few sections with retries.
+    # Budget of one interactive card (plain fetch): a few sections with retries. A minute:
+    # the sections are asked at once now, and a source still silent after that is down —
+    # better said than waited for (18.10.2026: a card took three minutes).
     single_check_requests: int = 20
-    single_check_seconds: float = 120.0
+    single_check_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if self.max_retries < 0:
@@ -161,15 +163,27 @@ class GuardedCompanyDataProvider:
 
         attempt = 0
         while pending:
-            granted = budget.take(len(pending), self._clock())
+            now = self._clock()
+            granted = budget.take(len(pending), now)
             if granted < len(pending):
                 for section in pending[granted:]:
-                    results[section] = _exhausted(request.inn, section, self._mode, self._clock())
+                    # A retry the budget refuses keeps the failure it was for: «Checko не
+                    # ответил» is the reason, not «лимит» (a card said «лимит» for five
+                    # timeouts, 18.10.2026). A section never asked gets the limit.
+                    if section not in results:
+                        results[section] = _exhausted(
+                            request.inn, section, self._mode, self._clock()
+                        )
                 pending = pending[:granted]
                 if not pending:
                     break
+            limits = self._policy.request_limits
+            left = (budget.deadline - now).total_seconds()  # > 0: take() passed
+            if left < limits.timeout_seconds:
+                # No request outlives the budget's deadline.
+                limits = replace(limits, timeout_seconds=left)
             inner_request = CompanyDataRequest(
-                inn=request.inn, sections=tuple(pending), limits=self._policy.request_limits
+                inn=request.inn, sections=tuple(pending), limits=limits
             )
             snapshots = await self.inner.fetch(inner_request)
             retry: list[Section] = []

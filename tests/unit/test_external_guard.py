@@ -289,6 +289,33 @@ async def test_retries_count_against_the_budget(clock, sleeps):
     assert budget.used == 4
 
 
+async def test_a_retry_the_budget_refuses_keeps_the_failure_it_was_for(clock, sleeps):
+    """18.10.2026: five sections timed out, the card had no time left for the retry, and it
+    said «лимит» for all five. The reason is the source's; a section never asked — the
+    limit's."""
+    inner = ScriptedProvider([{Section.COMPANY: (FetchStatus.UNAVAILABLE, "timeout")}])
+    provider = guard(inner, clock, sleeps, max_retries=2)
+    budget = RunBudget(max_requests=3, deadline=START + timedelta(minutes=15))
+    snapshots = await provider.scoped(budget).fetch(CompanyDataRequest(INN, THREE))
+    assert snapshots[0].error.code == "timeout" and len(inner.calls) == 1
+    assert [s.status for s in snapshots[1:]] == [FetchStatus.OK] * 2
+    late = await provider.scoped(budget).fetch(CompanyDataRequest(OTHER, THREE))
+    assert all(s.error.code == BUDGET_EXHAUSTED for s in late)
+
+
+async def test_no_request_outlives_the_budget_deadline(clock, sleeps):
+    """Six sections of a card each waited their 20 s past the card's own budget."""
+    inner = ScriptedProvider([{}])
+    provider = guard(inner, clock, sleeps, timeout_seconds=20)
+    budget = RunBudget(max_requests=10, deadline=START + timedelta(seconds=5))
+    await provider.scoped(budget).fetch(CompanyDataRequest(INN, THREE))
+    assert inner.calls[0].limits.timeout_seconds == 5
+
+
+def test_a_card_waits_a_minute_at_most():
+    assert GuardPolicy().single_check_seconds == 60
+
+
 async def test_request_limits_from_policy_reach_the_inner_provider(clock, sleeps):
     inner = ScriptedProvider([{}])
     provider = guard(inner, clock, sleeps, timeout_seconds=5, max_pages=3)
