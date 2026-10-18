@@ -5,7 +5,9 @@ architecture promises: one main call and at most one retry of a transient failur
 timeout per call, a bound on the request and the answer, and a budget shared by every
 company of one check — requests and tokens. When the budget is gone the guard answers
 ``AiUnavailable(budget)`` without calling the model, so the check still finishes: the
-report carries the rules' recommendation for the rest (S5-04) and says so.
+report carries the rules' recommendation for the rest (S5-04) and says so. A call never
+outlives the budget's deadline, and a retry the budget stops ends with the model's own
+failure — the reason the caller should hear.
 
 Tokens are the provider's own count; the money limit follows from them and the tariff
 of the chosen provider, and is set per run through ``AiRunLimits`` (S6-05 measures it).
@@ -184,12 +186,19 @@ class GuardedRecommendationProvider:
             # model has to answer (review B on #63).
             await self.inner.prepare()
         attempt = 0
+        error: AiUnavailable | None = None
         while True:
-            if not budget.take_request(self._clock()):
-                raise AiUnavailable(AiErrorCode.BUDGET, BUDGET_MESSAGE)
+            now = self._clock()
+            if not budget.take_request(now):
+                # A retry the budget does not allow: the model's failure is the reason, the
+                # budget only stopped the retries. A card said «лимит расходов» for two
+                # timeouts (18.10.2026).
+                raise error or AiUnavailable(AiErrorCode.BUDGET, BUDGET_MESSAGE)
+            # Never past the budget's deadline: that card waited 142 s with 90 allowed.
+            timeout = min(limits.timeout_seconds, (budget.deadline - now).total_seconds())
             try:
                 answer = await asyncio.wait_for(
-                    self.inner.explain(request, limits), timeout=limits.timeout_seconds
+                    self.inner.explain(request, limits), timeout=timeout
                 )
             except TimeoutError:
                 error = AiUnavailable(AiErrorCode.TIMEOUT, "Модель не ответила в срок.")

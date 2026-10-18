@@ -153,6 +153,8 @@ async def test_run_deadline_is_measured_by_the_guard_clock():
 
 
 async def test_retries_count_against_the_run_budget():
+    """The retry the budget does not allow is not made — and the caller hears the model's
+    failure, not «лимит»: a card got «лимит расходов» for two timeouts (18.10.2026)."""
     context = await context_for()
     request = build_request(context)
     inner = Flaky(1)
@@ -161,7 +163,29 @@ async def test_retries_count_against_the_run_budget():
     )
     with pytest.raises(AiUnavailable) as failure:
         await scoped.explain(request, AiLimits())
-    assert failure.value.code is AiErrorCode.BUDGET and inner.calls == 1
+    assert failure.value.code is AiErrorCode.UNAVAILABLE and inner.calls == 1
+    assert scoped.budget.exhausted
+
+
+async def test_a_call_never_runs_past_the_budget_deadline():
+    """The card's 90 s with a 60 s timeout per call: two timeouts took 142 s (18.10.2026).
+    A call gets only the time the budget has left."""
+
+    class Sleeper:
+        name = "sleeper"
+        model = "s"
+
+        async def explain(self, request, limits):
+            await asyncio.sleep(5)
+
+    context = await context_for()
+    request = build_request(context)
+    scoped = guarded(Sleeper(), timeout_seconds=30, max_retries=1).scoped(
+        AiBudget(max_requests=10, max_tokens=10**9, deadline=NOW + timedelta(seconds=0.05))
+    )
+    with pytest.raises(AiUnavailable) as failure:
+        await asyncio.wait_for(scoped.explain(request, AiLimits()), timeout=2)
+    assert failure.value.code is AiErrorCode.TIMEOUT
 
 
 async def test_pipeline_finishes_partial_when_the_ai_budget_runs_out(tmp_path):
