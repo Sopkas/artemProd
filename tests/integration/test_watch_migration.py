@@ -10,7 +10,13 @@ from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.persistence import sqlite
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
 
-MONITORING_TABLES = {"watchlist", "watch_snapshots", "monitoring_days", "monitoring_outbox"}
+MONITORING_TABLES = {
+    "watchlist",
+    "watch_snapshots",
+    "monitoring_days",
+    "monitoring_outbox",
+    "watch_settings",
+}
 
 
 def _migrate(path, target: str, *, down: bool = False) -> None:
