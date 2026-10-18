@@ -201,6 +201,11 @@ class GuardedRecommendationProvider:
                     self.inner.explain(request, limits), timeout=timeout
                 )
             except TimeoutError:
+                if timeout < limits.timeout_seconds:
+                    # Cut short by the deadline: given 3 s, not its 60, the model is not to
+                    # blame — unless it had already failed, then that is the reason (review
+                    # B on #118).
+                    raise error or AiUnavailable(AiErrorCode.BUDGET, BUDGET_MESSAGE) from None
                 error = AiUnavailable(AiErrorCode.TIMEOUT, "Модель не ответила в срок.")
             except AiUnavailable as failure:
                 error = failure

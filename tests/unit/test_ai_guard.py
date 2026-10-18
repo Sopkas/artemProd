@@ -167,25 +167,45 @@ async def test_retries_count_against_the_run_budget():
     assert scoped.budget.exhausted
 
 
-async def test_a_call_never_runs_past_the_budget_deadline():
+class FailsThenSleeps:
+    """Fails the first ``failures`` calls at once, then never answers in time."""
+
+    name = "slow"
+    model = "s"
+
+    def __init__(self, failures: int = 0) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    async def explain(self, request, limits):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise AiUnavailable(AiErrorCode.UNAVAILABLE, "Сбой.")
+        await asyncio.sleep(5)
+
+
+@pytest.mark.parametrize(
+    ("failures", "code"),
+    [
+        # Cut short before the model failed once: our limit, not «модель не ответила»
+        # (review B on #118).
+        (0, AiErrorCode.BUDGET),
+        # The model failed first: that is the reason, the deadline only cut the retry.
+        (1, AiErrorCode.UNAVAILABLE),
+    ],
+)
+async def test_a_call_never_runs_past_the_budget_deadline(failures, code):
     """The card's 90 s with a 60 s timeout per call: two timeouts took 142 s (18.10.2026).
     A call gets only the time the budget has left."""
-
-    class Sleeper:
-        name = "sleeper"
-        model = "s"
-
-        async def explain(self, request, limits):
-            await asyncio.sleep(5)
-
     context = await context_for()
     request = build_request(context)
-    scoped = guarded(Sleeper(), timeout_seconds=30, max_retries=1).scoped(
+    inner = FailsThenSleeps(failures)
+    scoped = guarded(inner, timeout_seconds=30, max_retries=1).scoped(
         AiBudget(max_requests=10, max_tokens=10**9, deadline=NOW + timedelta(seconds=0.05))
     )
     with pytest.raises(AiUnavailable) as failure:
         await asyncio.wait_for(scoped.explain(request, AiLimits()), timeout=2)
-    assert failure.value.code is AiErrorCode.TIMEOUT
+    assert failure.value.code is code and inner.calls == failures + 1
 
 
 async def test_pipeline_finishes_partial_when_the_ai_budget_runs_out(tmp_path):
