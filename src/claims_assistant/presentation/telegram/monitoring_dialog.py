@@ -134,8 +134,17 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
         return texts.watch_schedule(policy.run_at, policy.utc_offset_hours, frequency)
 
     async def keyboard(user_id: int):
-        """The monitoring keyboard with «Приостановить» or «Возобновить», as it stands."""
-        return monitoring_menu((await service.settings(user_id)).paused)
+        """The monitoring keyboard with «Приостановить» or «Возобновить», as it stands.
+
+        A base that cannot be read gives the plain one: the reply «не удалось» goes out
+        through here and must not fail on the same base.
+        """
+        try:
+            settings = await service.settings(user_id)
+        except RepositoryError as exc:
+            logger.error("watch_settings_unread error_type=%s", type(exc).__name__)
+            return monitoring_menu()
+        return monitoring_menu(settings.paused)
 
     async def overview(message: Message, state: FSMContext) -> None:
         if service is None:
