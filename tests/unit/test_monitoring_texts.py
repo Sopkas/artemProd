@@ -6,11 +6,12 @@ rules' own tests; names and INNs are synthetic.
 
 import io
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 
 import pytest
 from openpyxl import load_workbook
 
+from claims_assistant.application.monitoring import Frequency, NextCheck
 from claims_assistant.domain.external import Section
 from claims_assistant.domain.monitoring import compare
 from claims_assistant.domain.watchlist import WatchEntry
@@ -22,7 +23,11 @@ from claims_assistant.presentation.telegram.monitoring import (
     format_changes,
     format_daily_summary,
 )
-from claims_assistant.presentation.telegram.texts import watch_frequency_prompt
+from claims_assistant.presentation.telegram.texts import (
+    watch_frequency_prompt,
+    watch_next_check,
+    watch_waiting,
+)
 from tests.unit.test_monitoring_changes import (
     INN,
     TODAY,
@@ -109,6 +114,21 @@ def test_a_long_list_is_cut_and_the_message_fits_telegram():
 
 
 # --- the day -------------------------------------------------------------------------
+
+
+def test_the_notes_close_a_cut_summary_whole():
+    """Whom the requests did not reach and when the next run is (S8-12) come last and
+    whole: the list of names is cut to leave them room."""
+    long = "ООО «" + "Очень длинное название " * 15 + "»"
+    changed = [Checked(f"77{n:08d}", long, with_new_case()) for n in range(10)]
+    partly = [Checked(f"78{n:08d}", long, replace(gapped(), changes=())) for n in range(10)]
+    weekly = NextCheck(Frequency.WEEKLY, date(2026, 10, 17), time(9, 0))
+    notes = [watch_waiting(3), watch_next_check(weekly)]
+    assert format_daily_summary(DAY, changed + partly).endswith("\n…")  # too long: cut
+    text = format_daily_summary(DAY, changed + partly, notes)
+    assert len(text) <= MESSAGE_LIMIT
+    assert text.endswith("\n…\n\n" + "\n\n".join(notes))
+    assert notes[1].endswith("Следующая проверка — сб 17.10.2026 в 09:00.")
 
 
 def test_a_quiet_day_says_so_only_when_everything_was_read():

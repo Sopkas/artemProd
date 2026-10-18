@@ -55,10 +55,10 @@ def _day(value: date) -> str:
     return f"{value:%d.%m.%Y}"
 
 
-def _cut(text: str) -> str:
-    if len(text) <= MESSAGE_LIMIT:
+def _cut(text: str, limit: int = MESSAGE_LIMIT) -> str:
+    if len(text) <= limit:
         return text
-    return text[: MESSAGE_LIMIT - 1].rsplit("\n", 1)[0] + "\n…"
+    return text[: limit - 1].rsplit("\n", 1)[0] + "\n…"
 
 
 # Names that open a reason and keep their capital: «Checko не ответил…» (review A on #101,
@@ -132,8 +132,12 @@ def _baseline(comparison: Comparison) -> list[Section]:
     return [s for s, state in comparison.states if state is SectionState.BASELINE]
 
 
-def format_daily_summary(day: date, checked: Sequence[Checked]) -> str:
-    """The day in one message: how many, which changed, what is not known and why."""
+def format_daily_summary(day: date, checked: Sequence[Checked], notes: Sequence[str] = ()) -> str:
+    """The day in one message: how many, which changed, what is not known and why.
+
+    ``notes`` close it whole — whom the requests did not reach, when the next run is: a long
+    list of names is cut to leave them room, never the notes themselves.
+    """
     if not checked:
         return f"📋 Мониторинг на {_day(day)}: в списке нет организаций."
     lines = [f"📋 Мониторинг на {_day(day)}. Организаций проверено: {len(checked)}."]
@@ -194,4 +198,5 @@ def format_daily_summary(day: date, checked: Sequence[Checked]) -> str:
         ]
         if len(partly) > MAX_NAMES:
             lines.append(f"  …и ещё {len(partly) - MAX_NAMES}")
-    return _cut("\n".join(lines))
+    tail = "".join(f"\n\n{note}" for note in notes)
+    return _cut("\n".join(lines), MESSAGE_LIMIT - len(tail)) + tail
