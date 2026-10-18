@@ -266,7 +266,7 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
     @router.message(MonitorDialog.menu, F.text == WATCH_FREQUENCY)
     async def ask_frequency(message: Message, state: FSMContext) -> None:
         await state.set_state(MonitorDialog.frequency)
-        await message.answer(texts.WATCH_FREQUENCY_PROMPT, reply_markup=frequency_menu())
+        await message.answer(await frequency_prompt(message), reply_markup=frequency_menu())
 
     @router.message(MonitorDialog.frequency, F.text.in_(_FREQUENCIES))
     async def set_frequency(message: Message, state: FSMContext) -> None:
@@ -280,7 +280,11 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
 
     @router.message(MonitorDialog.frequency, _ours)
     async def remind_frequency(message: Message) -> None:
-        await message.answer(texts.WATCH_FREQUENCY_PROMPT, reply_markup=frequency_menu())
+        await message.answer(await frequency_prompt(message), reply_markup=frequency_menu())
+
+    async def frequency_prompt(message: Message) -> str:
+        """The price of each choice for this owner's list as it is now (S8-12, part B)."""
+        return texts.watch_frequency_prompt(len(await service.entries(message.from_user.id)))
 
     @router.message(MonitorDialog.clearing, F.text == WATCH_CLEAR_CONFIRM)
     async def clear(message: Message, state: FSMContext) -> None:

@@ -354,10 +354,10 @@ async def test_a_pause_is_one_button_and_the_screen_says_so(bot, update_factory,
 async def test_how_often_is_chosen_with_buttons(bot, update_factory, dispatcher):
     await send(dispatcher, bot, update_factory, "Мониторинг")
     reply = await send(dispatcher, bot, update_factory, "Как часто проверять")
-    assert reply.text == texts.WATCH_FREQUENCY_PROMPT
+    assert reply.text == texts.watch_frequency_prompt(0)  # an empty list costs nothing
     assert buttons(reply) == ["Каждый день", "По будням", "Раз в неделю", "Отмена"]
     reply = await send(dispatcher, bot, update_factory, "что-то другое")
-    assert reply.text == texts.WATCH_FREQUENCY_PROMPT  # asked again, nothing changed
+    assert reply.text == texts.watch_frequency_prompt(0)  # asked again, nothing changed
     reply = await send(dispatcher, bot, update_factory, "Раз в неделю")
     assert reply.text == (
         "Готово. Проверка — раз в неделю: каждый день в 09:00 по Москве проверяется седьмая "

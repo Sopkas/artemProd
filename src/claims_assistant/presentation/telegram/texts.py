@@ -6,7 +6,14 @@ from claims_assistant.application.monitoring import Frequency, WatchSettings
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, RunStatus
 from claims_assistant.domain.external import DataMode, Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
-from claims_assistant.domain.plural import companies
+from claims_assistant.domain.monitoring_cost import (
+    FREE_PER_DAY,
+    PRICE_RUB,
+    REQUESTS_PER_COMPANY,
+    MonitoringCost,
+    monitoring_cost,
+)
+from claims_assistant.domain.plural import companies, of_companies, requests
 from claims_assistant.domain.scoring import Priority
 from claims_assistant.domain.watchlist import WatchEntry
 
@@ -483,15 +490,40 @@ WATCH_NAME_LATER = (
 
 
 _WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
-WATCH_FREQUENCY_PROMPT = (
-    "Как часто проверять список?\n"
-    "• «Каждый день» — о новом станет известно назавтра.\n"
-    "• «По будням» — без субботы и воскресенья: появившееся за выходные придёт в понедельник.\n"
-    "• «Раз в неделю» — каждая организация раз в неделю, а каждый день проверяется седьмая "
-    "часть списка. Запросов к источнику в семь раз меньше, но о новом деле можно узнать до "
-    "недели позже.\n"
-    "Проверка одной организации — около 5 запросов к источнику."
-)
+
+
+def _per_month(cost: MonitoringCost, day: str) -> str:
+    rub = f"{cost.rub_per_month:,.0f}".replace(",", " ")
+    load = f"≈ {requests(cost.requests_per_day)} {day}"
+    return f"{load}, бесплатно" if cost.free else f"{load}, около {rub} ₽ в месяц"
+
+
+def watch_frequency_prompt(count: int) -> str:
+    """The question with the price of each answer for the list as it is (S8-12, part B)."""
+    lines = [
+        "Как часто проверять список?",
+        "• «Каждый день» — о новом станет известно назавтра.",
+        "• «По будням» — без субботы и воскресенья: появившееся за выходные придёт в понедельник.",
+        "• «Раз в неделю» — каждая организация раз в неделю, а каждый день проверяется "
+        "седьмая часть списка. Запросов в семь раз меньше, но о новом деле можно узнать до "
+        "недели позже.",
+    ]
+    if count:
+        daily = monitoring_cost(count, "daily")
+        weekdays = monitoring_cost(count, "weekdays")
+        weekly = monitoring_cost(count, "weekly")
+        lines += [
+            "",
+            f"Для {of_companies(count)} в списке:",
+            f"• каждый день: {_per_month(daily, 'в день')};",
+            f"• по будням: {_per_month(weekdays, 'в будний день')};",
+            f"• раз в неделю: {_per_month(weekly, 'в день')}.",
+            f"Цена — по тарифу Checko «Стандарт»: {FREE_PER_DAY} запросов в сутки бесплатно, "
+            f"дальше {str(PRICE_RUB).replace('.', ',')} ₽ за запрос. Проверка организации — "
+            f"{REQUESTS_PER_COMPANY} запросов; «Проверить ИНН» тратит те же бесплатные "
+            f"{FREE_PER_DAY}.",
+        ]
+    return "\n".join(lines)
 
 
 def watch_schedule(
