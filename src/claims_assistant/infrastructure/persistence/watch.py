@@ -15,10 +15,17 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import Connection, Engine, and_, delete, func, insert, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from claims_assistant.application.analysis_repository import RepositoryError
-from claims_assistant.application.monitoring import CheckRecord, DayResult, Outgoing
+from claims_assistant.application.monitoring import (
+    CheckRecord,
+    DayResult,
+    Frequency,
+    Outgoing,
+    WatchSettings,
+)
 from claims_assistant.domain.external import FactKind, Section
 from claims_assistant.domain.monitoring import Change, Comparison, SectionState
 from claims_assistant.domain.serialization import (
@@ -36,7 +43,13 @@ from claims_assistant.domain.watchlist import (
     remove,
 )
 
-from .schema import monitoring_days, monitoring_outbox, watch_snapshots, watchlist
+from .schema import (
+    monitoring_days,
+    monitoring_outbox,
+    watch_settings,
+    watch_snapshots,
+    watchlist,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +174,40 @@ class SqliteWatchStore:
         query = select(watchlist.c.owner_id).distinct().order_by(watchlist.c.owner_id)
         with self._engine.connect() as connection:
             return tuple(connection.execute(query).scalars())
+
+    # --- pause and frequency (S8-12) ---
+
+    async def settings(self, owner_id: int) -> WatchSettings:
+        return await self._run(self._settings, owner_id)
+
+    async def save_settings(self, owner_id: int, settings: WatchSettings) -> None:
+        await self._run(self._save_settings, owner_id, settings)
+
+    def _settings(self, owner_id: int) -> WatchSettings:
+        query = select(watch_settings).where(watch_settings.c.owner_id == owner_id)
+        with self._engine.connect() as connection:
+            row = connection.execute(query).first()
+        if row is None:
+            return WatchSettings()
+        try:
+            frequency = Frequency(row.frequency)
+        except ValueError:
+            frequency = Frequency.DAILY  # an unknown mode reads as the default, not a stop
+        return WatchSettings(frequency, _day(row.paused_since), _day(row.changed_on))
+
+    def _save_settings(self, owner_id: int, settings: WatchSettings) -> None:
+        values = {
+            "frequency": settings.frequency.value,
+            "paused_since": settings.paused_since.isoformat() if settings.paused_since else None,
+            "changed_on": settings.changed_on.isoformat() if settings.changed_on else None,
+            "updated_at": _stamp(self._clock()),
+        }
+        # One statement: two quick presses on a new owner must not both try to insert.
+        statement = sqlite_insert(watch_settings).values(owner_id=owner_id, **values)
+        with self._engine.begin() as connection:
+            connection.execute(
+                statement.on_conflict_do_update(index_elements=["owner_id"], set_=values)
+            )
 
     def _inns(self, connection: Connection, owner_id: int) -> list[str]:
         query = select(watchlist.c.inn).where(watchlist.c.owner_id == owner_id)

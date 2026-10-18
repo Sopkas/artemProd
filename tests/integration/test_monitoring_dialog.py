@@ -14,6 +14,7 @@ from aiogram.methods import AnswerCallbackQuery, EditMessageReplyMarkup, SendDoc
 from aiogram.types import InlineKeyboardMarkup, Update
 from openpyxl import Workbook
 
+from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.monitoring import (
     CheckRecord,
     MonitoringPolicy,
@@ -49,8 +50,11 @@ WATCH_MENU = [
     "Убрать из мониторинга",
     "Список файлом",
     "Очистить весь список",
+    "⏸ Приостановить",
+    "Как часто проверять",
     "В главное меню",
 ]
+PAUSED_MENU = ["▶️ Возобновить" if button == "⏸ Приостановить" else button for button in WATCH_MENU]
 NOW = datetime(2026, 10, 16, 12, tzinfo=UTC)
 
 
@@ -321,6 +325,82 @@ async def test_one_users_list_is_not_anothers(bot, update_factory, dispatcher):
     await send(dispatcher, bot, update_factory, "Мониторинг", "Добавить на мониторинг", A)
     reply = await send(dispatcher, bot, update_factory, "Мониторинг", user_id=43)
     assert reply.text.startswith("🔔 Мониторинг: в списке пока никого нет.")
+
+
+# --- pause and frequency (S8-12) ---
+
+
+async def test_a_pause_is_one_button_and_the_screen_says_so(bot, update_factory, dispatcher):
+    """The customer, 17.10.2026: «по кнопке отключать ежедневную проверку, чтобы не тратить
+    деньги». The list stays; the button turns into «Возобновить»."""
+    await send(dispatcher, bot, update_factory, "Мониторинг", "Добавить на мониторинг", A)
+    screen = await send(dispatcher, bot, update_factory, "Мониторинг")
+    # 15:00 by Moscow, today's run not done yet: it starts within minutes.
+    assert "Следующая проверка: сегодня, в ближайшие минуты." in screen.text
+    reply = await send(dispatcher, bot, update_factory, "⏸ Приостановить")
+    assert reply.text.startswith("⏸ Мониторинг на паузе с 16.10.2026.")
+    assert buttons(reply) == PAUSED_MENU
+    screen = await send(dispatcher, bot, update_factory, "Мониторинг")
+    assert "⏸ На паузе с 16.10.2026: запросов к источнику нет." in screen.text
+    assert screen.text.startswith("🔔 Мониторинг: 1 из 100.")  # the list kept
+    assert buttons(screen) == PAUSED_MENU
+    reply = await send(dispatcher, bot, update_factory, "▶️ Возобновить")
+    assert reply.text.startswith(
+        "▶️ Мониторинг возобновлён. Следующая проверка — сегодня, в ближайшие минуты."
+    )
+    assert buttons(reply) == WATCH_MENU
+
+
+async def test_how_often_is_chosen_with_buttons(bot, update_factory, dispatcher):
+    await send(dispatcher, bot, update_factory, "Мониторинг")
+    reply = await send(dispatcher, bot, update_factory, "Как часто проверять")
+    assert reply.text == texts.WATCH_FREQUENCY_PROMPT
+    assert buttons(reply) == ["Каждый день", "По будням", "Раз в неделю", "Отмена"]
+    reply = await send(dispatcher, bot, update_factory, "что-то другое")
+    assert reply.text == texts.WATCH_FREQUENCY_PROMPT  # asked again, nothing changed
+    reply = await send(dispatcher, bot, update_factory, "Раз в неделю")
+    assert reply.text == (
+        "Готово. Проверка — раз в неделю: каждый день в 09:00 по Москве проверяется седьмая "
+        "часть списка."
+    )
+    assert buttons(reply) == WATCH_MENU
+    screen = await send(dispatcher, bot, update_factory, "Мониторинг")
+    assert "Проверка — раз в неделю" in screen.text
+    await send(dispatcher, bot, update_factory, "Как часто проверять")
+    reply = await send(dispatcher, bot, update_factory, "Отмена")
+    assert reply.text == texts.WATCH_STEP_CANCELLED
+    screen = await send(dispatcher, bot, update_factory, "Мониторинг")
+    assert "Проверка — раз в неделю" in screen.text  # «Отмена» kept the choice
+
+
+async def test_a_setting_the_base_did_not_keep_is_said_so(bot, update_factory, tmp_path):
+    class Refusing(SqliteWatchStore):
+        async def save_settings(self, owner_id, settings):
+            raise RepositoryError("synthetic")
+
+    repository = open_sqlite_repository(tmp_path / "refusing.sqlite3")
+    store = Refusing(repository.engine, lambda: NOW)
+    service = MonitoringService(
+        store,
+        Source(),
+        TelegramMonitoringTexts(),
+        mode=DataMode.DEMO,
+        policy=MonitoringPolicy(),
+        clock=lambda: NOW,
+    )
+    dispatcher = create_dispatcher(
+        frozenset({OWNER}), reader=OpenpyxlSheetReader(), monitoring=service
+    )
+    try:
+        reply = await send(dispatcher, bot, update_factory, "Мониторинг", "⏸ Приостановить")
+        assert reply.text == texts.WATCH_SETTINGS_FAILED
+        assert buttons(reply) == WATCH_MENU  # not paused
+        await send(dispatcher, bot, update_factory, "Как часто проверять")
+        reply = await send(dispatcher, bot, update_factory, "Раз в неделю")
+        assert reply.text == texts.WATCH_SETTINGS_FAILED
+        assert buttons(reply) == WATCH_MENU
+    finally:
+        repository.close()
 
 
 # --- the button under a notice ---
