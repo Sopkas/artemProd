@@ -33,8 +33,9 @@ def finance_lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if "Выручка 2" in line or "прибыль 2" in line]
 
 
-def test_the_customers_example_shows_both_directions_without_an_alarm():
-    """15.10.2026: revenue +12 %, net profit 3,8 → 0,76 million — no rule fires on it."""
+def test_the_customers_example_marks_the_profit_fall_as_the_rule_does():
+    """15.10.2026: revenue +12 %, net profit 3,8 → 0,76 million. Since 17.10.2026 a profit
+    down 1.5 times or more is ⚠️ (question 7), the figure the same as the reason's."""
     text = brief(
         {
             2024: {"2110": 100_000_000, "2400": 3_800_000},
@@ -43,7 +44,7 @@ def test_the_customers_example_shows_both_directions_without_an_alarm():
     )
     assert finance_lines(text) == [
         "🔺 Выручка 2025: 112 млн ₽, +12 % к 2024",
-        "🔻 Чистая прибыль 2025: 760 тыс. ₽, −80 % к 2024",
+        "⚠️ Чистая прибыль 2025: 760 тыс. ₽, −80 % к 2024",
     ]
 
 
