@@ -167,7 +167,7 @@ def test_two_different_medium_signals_make_high():
 
 
 def test_internal_and_external_medium_signals_combine():
-    drop = {2024: {"2110": 1000, "2400": 10}, 2025: {"2110": 700, "2400": 5}}
+    drop = {2024: {"2110": 1000, "2400": 10}, 2025: {"2110": 700, "2400": 9}}  # profit −10 %
     result = assess(INN, clean_external(drop), row(overdue=45))
     assert {s.code for s in result.signals} == {"overdue_30", "revenue_drop_30"}
     assert result.priority is Priority.HIGH
