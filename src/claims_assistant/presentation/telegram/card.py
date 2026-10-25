@@ -650,7 +650,7 @@ REVIEW_NONE = "🤖 Разбора ИИ нет ({who}): {why}. Карточка 
 REVIEW_MONTH = "лимит расходов на ИИ за месяц исчерпан, модель не спрашивали"
 REVIEW_REJECTED = "ответ модели не прошёл проверку по данным карточки"
 REVIEW_TOO_MUCH = "данных слишком много для одного разбора, модель не спрашивали"
-REVIEW_CARD_LIMIT = "исчерпан лимит расходов на одну карточку"
+REVIEW_CARD_LIMIT = "исчерпан лимит на одну карточку — по времени, вызовам или деньгам"
 REVIEW_TIMEOUT = "модель не ответила вовремя"
 REVIEW_FAILED = "модель недоступна"
 REVIEW_NOT_PREPARED = "не удалось подготовить разбор"
@@ -684,7 +684,8 @@ def _no_review(review: CardReview | None) -> str:
         return REVIEW_REJECTED
     error = outcome.error if outcome is not None else None
     if error is not None and error.code is AiErrorCode.BUDGET:
-        # Our limits, not the model: the card's money is spent, or the request is too large.
+        # Our limits, not the model: the card's time, calls or money are spent, or the
+        # request is too large. A model that failed first is named by its failure (guard).
         return REVIEW_CARD_LIMIT if error.message == BUDGET_MESSAGE else REVIEW_TOO_MUCH
     if error is not None and error.code is AiErrorCode.TIMEOUT:
         return REVIEW_TIMEOUT
