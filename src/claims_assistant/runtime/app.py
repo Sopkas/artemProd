@@ -219,6 +219,7 @@ def _monitoring(
         quiet_summary=settings.monitoring.quiet_summary,
         max_requests=settings.monitoring.request_limit,
         keep_messages_days=settings.retention_days,
+        overdue_days=settings.monitoring.overdue_days,
     )
     return MonitoringService(store, provider, TelegramMonitoringTexts(), mode=mode, policy=policy)
 

@@ -14,14 +14,17 @@ from openpyxl.styles import Alignment
 from claims_assistant.application.watchlist_files import (
     NO_INN_COLUMN,
     REPORT_WITHOUT_INN,
+    nothing_overdue,
     read_watch_file,
 )
 from claims_assistant.domain.inn import InnProblem
 from claims_assistant.domain.sheet_rules import CellError, parse_inn
 from claims_assistant.domain.watchlist import (
     WATCH_LIMIT,
+    WATCH_OVERDUE_DAYS,
     Candidate,
     Invalid,
+    OverdueCut,
     add,
     parse_inns,
     remove,
@@ -164,8 +167,8 @@ def sample_report(with_inn=True) -> bytes:
     return workbook([values for _i, values in rows], [indent for indent, _v in rows])
 
 
-def read(data: bytes):
-    return read_watch_file(data, OpenpyxlSheetReader())
+def read(data: bytes, **options):
+    return read_watch_file(data, OpenpyxlSheetReader(), **options)
 
 
 def test_the_1c_report_with_an_inn_column_gives_names_and_inns():
@@ -261,3 +264,184 @@ def test_a_number_cell_that_lost_its_leading_zero_is_named_so_not_a_kpp():
 def test_the_package_reader_says_the_same_for_a_number_cell(cell):
     with pytest.raises(CellError, match="Excel убрал ноль"):
         parse_inn(cell)
+
+
+# --- the 1C report cut by its overdue (S8-14) ------------------------------------------
+# The customer, 17.10.2026 (question 8): «Всех с просрочкой больше 60 дней».
+
+
+def overdue_report(*companies) -> bytes:
+    """A synthetic «образец»: (name, INN or None, the days of each contract) per company,
+    a contract's days None when its «Дней» cell is blank. The company's row shows its
+    worst days, as the report's subtotal does."""
+    legend = ["Контрагент", None, "ИНН", "Сумма просроченной задолженности", "Дней"]
+    rows = [
+        (0, ["Отчет по просроченным лизинговым платежам на дату"]),
+        (0, legend),
+        (0, ["Договор лизинга", None, "Срок действия до"]),
+    ]
+    number = 0
+    for name, company_inn, days in companies:
+        known = [d for d in days if d is not None]
+        rows.append((2, [name, None, company_inn, 100 * len(days), max(known, default=None)]))
+        for contract_days in days:
+            number += 1
+            contract = f"Дог. фин. лизинга № {number} от 01.02.2024"
+            rows.append((4, [contract, None, "01.02.2027", 100, contract_days]))
+    rows.append((0, ["Итого", None, None, 100 * number]))
+    return workbook([values for _i, values in rows], [indent for indent, _v in rows])
+
+
+def test_the_threshold_is_the_customers_sixty_days():
+    assert WATCH_OVERDUE_DAYS == 60
+
+
+def test_from_the_report_only_those_overdue_more_than_sixty_days_are_taken():
+    data = overdue_report(
+        ("ООО «Шестьдесят один»", ONE, [61]),
+        ("ООО «Шестьдесят»", TWO, [60]),
+        ("ООО «Без дней»", THREE, [None]),
+        ("ООО «Худший договор»", inn(4), [30, 90]),  # the worst contract decides
+    )
+    result = read(data)
+    assert result.candidates == (
+        Candidate(ONE, "ООО «Шестьдесят один»"),
+        Candidate(inn(4), "ООО «Худший договор»"),
+    )
+    assert result.cut == OverdueCut(days=60, total=4, taken=2, not_overdue=1, no_days=1)
+    assert result.problem is None and result.without_inn == 0
+
+
+def test_a_company_printed_twice_is_one_judged_by_its_worst_contract():
+    """The report lists a client under every sales point: merged by ``merge_repeats``
+    first, so 30 days under one point and 90 under another is one debtor of 90 days."""
+    data = overdue_report(
+        ("ООО «Дважды»", ONE, [30]),
+        ("ООО «Недолгая»", TWO, [10]),
+        ("ООО «Дважды»", ONE, [90]),
+    )
+    result = read(data)
+    assert result.candidates == (Candidate(ONE, "ООО «Дважды»"),)
+    assert result.cut == OverdueCut(days=60, total=2, taken=1, not_overdue=1, no_days=0)
+    assert result.repeats == 0
+
+
+def test_two_companies_of_one_name_with_different_inns_are_not_merged():
+    """Two «ИП Иванов …» under different sales points are two companies: each is judged by
+    its own days, and the one of 10 days does not go on as a debtor of 90."""
+    data = overdue_report(
+        ("ООО «Тёзка»", ONE, [10]),
+        ("ООО «Другая»", THREE, [70]),
+        ("ООО «Тёзка»", TWO, [90]),
+    )
+    result = read(data)
+    assert result.candidates == (Candidate(THREE, "ООО «Другая»"), Candidate(TWO, "ООО «Тёзка»"))
+    assert result.cut == OverdueCut(days=60, total=3, taken=2, not_overdue=1, no_days=0)
+
+
+def test_a_company_with_days_only_on_some_contracts_is_judged_by_them():
+    result = read(overdue_report(("ООО «Часть дней»", ONE, [None, 75])))
+    assert result.candidates == (Candidate(ONE, "ООО «Часть дней»"),)
+    assert result.cut.no_days == 0
+
+
+def test_a_taken_company_without_an_inn_is_counted_not_guessed():
+    """Only the taken ones are counted: a company cut out by its days is not on the list
+    whatever its INN, and is already counted among «не взяты»."""
+    data = overdue_report(
+        ("ООО «С ИНН»", ONE, [90]),
+        ("ООО «Без ИНН»", None, [120]),
+        ("ООО «Без ИНН, недолгая»", None, [10]),
+    )
+    result = read(data)
+    assert result.candidates == (Candidate(ONE, "ООО «С ИНН»"),)
+    assert result.without_inn == 1
+    assert result.cut == OverdueCut(days=60, total=3, taken=2, not_overdue=1, no_days=0)
+
+
+def test_nobody_overdue_enough_is_said_plainly():
+    data = overdue_report(("ООО «Шестьдесят»", ONE, [60]), ("ООО «Без дней»", TWO, [None]))
+    result = read(data)
+    assert result.candidates == ()
+    assert result.cut == OverdueCut(days=60, total=2, taken=0, not_overdue=1, no_days=1)
+    assert result.problem == nothing_overdue(result.cut)
+    assert result.problem == (
+        "Ни у одной из 2 организаций отчёта нет просрочки больше 60 дн., а из отчёта на "
+        "мониторинг берутся только такие — добавлять некого. Без дней просрочки в отчёте: "
+        "1 организация. Если кто-то из них всё же нужен, пришлите его ИНН сообщением."
+    )
+
+
+@pytest.mark.parametrize(
+    ("days", "why"),
+    [(60, "нет просрочки больше 60 дн."), (None, "нет дней просрочки")],
+)
+def test_nobody_of_a_one_company_report_is_said_of_it_alone(days, why):
+    result = read(overdue_report(("ООО «Одна»", ONE, [days])))
+    assert result.candidates == ()
+    assert result.problem == (
+        f"У единственной организации отчёта {why}, а из отчёта на мониторинг берутся только "
+        "должники с просрочкой больше 60 дн. — добавлять некого. Если она всё же нужна, "
+        "пришлите её ИНН сообщением."
+    )
+
+
+def test_a_report_without_inns_says_so_before_any_cut():
+    result = read(overdue_report(("ООО «Без ИНН»", None, [10]), ("ИП Без ИНН", None, [None])))
+    assert result.problem == REPORT_WITHOUT_INN and result.without_inn == 2
+
+
+@pytest.mark.parametrize(
+    ("overdue_days", "taken"),
+    [
+        (30, [ONE, TWO, THREE]),
+        (60, [ONE, TWO]),
+        (89, [ONE, TWO]),
+        (90, [ONE]),
+        (0, [ONE, TWO, THREE]),
+    ],
+)
+def test_the_threshold_from_the_settings_moves_the_cut(overdue_days, taken):
+    data = overdue_report(
+        ("ООО «Сто»", ONE, [100]), ("ООО «Девяносто»", TWO, [90]), ("ООО «Сорок»", THREE, [40])
+    )
+    result = read(data, overdue_days=overdue_days)
+    assert [c.inn for c in result.candidates] == taken
+    assert result.cut.days == overdue_days
+
+
+def test_a_table_and_a_bare_column_are_taken_whole_whatever_their_days():
+    """The user's own list is his choice: only the 1C report is cut."""
+    table = workbook(
+        [["Наименование", "ИНН", "Дней"], ["ООО «Один»", ONE, 10], ["ООО «Два»", TWO, None]]
+    )
+    for data in (table, workbook([[ONE], [TWO]])):
+        result = read(data, overdue_days=60)
+        assert [c.inn for c in result.candidates] == [ONE, TWO]
+        assert result.cut is None and result.problem is None
+
+
+def test_the_reply_says_how_the_report_was_cut():
+    cut = OverdueCut(days=60, total=318, taken=121, not_overdue=190, no_days=7)
+    current = [inn(n) for n in range(10, 10 + WATCH_LIMIT - 2)]  # 98 on the list
+    result = add(current, [Candidate(ONE), Candidate(TWO), Candidate(THREE)])
+    text = format_added(result, from_file=True, cut=cut, without_inn=1)
+    assert text.splitlines()[:4] == [
+        "Добавлено на мониторинг: 2.",
+        "В отчёте 318 организаций, просрочка больше 60 дн. — у 121 организации.",
+        "Не взяты — просрочка не больше 60 дн.: 190 организаций.",
+        "Не взяты — в отчёте нет дней просрочки: 7 организаций.",
+    ]
+    assert "Без ИНН среди отобранных: 1 организация — по названию" in text
+    assert "Без ИНН в отчёте" not in text
+    assert f"не больше {WATCH_LIMIT} организаций (1)" in text
+    assert text.endswith(f"Сейчас на мониторинге: {WATCH_LIMIT} из {WATCH_LIMIT}.")
+
+
+def test_the_reply_names_only_the_reasons_there_are():
+    cut = OverdueCut(days=90, total=3, taken=3, not_overdue=0, no_days=0)
+    text = format_added(add([], [Candidate(ONE)]), cut=cut)
+    assert "В отчёте 3 организации, просрочка больше 90 дн. — у 3 организаций." in text
+    assert "Не взяты" not in text
+    assert "В отчёте" not in format_added(add([], [Candidate(ONE)]))
+    assert "Без ИНН в отчёте: 1 организация" in format_added(add([], []), without_inn=1)

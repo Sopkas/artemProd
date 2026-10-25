@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
 from aiogram.methods import AnswerCallbackQuery, EditMessageReplyMarkup, SendDocument, SendMessage
 from aiogram.types import InlineKeyboardMarkup, Update
 from openpyxl import Workbook
+from openpyxl.styles import Alignment
 
 from claims_assistant.application.analysis_repository import RepositoryError
 from claims_assistant.application.monitoring import (
@@ -299,6 +300,84 @@ async def test_a_file_without_inns_or_of_another_type_is_explained(bot, update_f
     assert "колонки «ИНН»" in reply.text and buttons(reply) == ["Отмена"]
     reply = await send_file(dispatcher, bot, update_factory, b"not a workbook")
     assert reply.text.endswith(texts.WATCH_FILE_UNREADABLE)
+
+
+def overdue_report(*companies) -> bytes:
+    """A synthetic 1C overdue report: (name, INN, days) per company, one contract each."""
+    book = Workbook()
+    sheet = book.active
+    rows = [
+        (0, ["Отчет по просроченным лизинговым платежам на дату"]),
+        (0, ["Контрагент", None, "ИНН", "Сумма просроченной задолженности", "Дней"]),
+        (0, ["Договор лизинга", None, "Срок действия до"]),
+    ]
+    for number, (name, inn, days) in enumerate(companies, start=1):
+        rows.append((2, [name, None, inn, 100, days]))
+        rows.append((4, [f"Дог. № {number} от 01.02.2024", None, "01.02.2027", 100, days]))
+    for indent, values in rows:
+        sheet.append(values)
+        sheet.cell(row=sheet.max_row, column=1).alignment = Alignment(indent=indent)
+    buffer = BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
+C = inn10("770000002")
+
+
+async def test_from_a_1c_report_only_those_overdue_more_than_60_days_go_on(
+    bot, update_factory, dispatcher
+):
+    """S8-14, the customer's answer of 17.10.2026: «Всех с просрочкой больше 60 дней»."""
+    data = overdue_report(("ООО «Альфа»", A, 61), ("ООО «Бета»", B, 60), ("ООО «Гамма»", C, None))
+    await send(dispatcher, bot, update_factory, "Мониторинг", "Добавить на мониторинг")
+    reply = await send_file(dispatcher, bot, update_factory, data)
+    assert reply.text.splitlines()[:4] == [
+        "Добавлено на мониторинг: 1.",
+        "В отчёте 3 организации, просрочка больше 60 дн. — у 1 организации.",
+        "Не взяты — просрочка не больше 60 дн.: 1 организация.",
+        "Не взяты — в отчёте нет дней просрочки: 1 организация.",
+    ]
+    screen = await send(dispatcher, bot, update_factory, "Мониторинг")
+    assert f"  {A} — ООО «Альфа»" in screen.text and B not in screen.text
+
+
+async def test_a_report_with_nobody_overdue_enough_says_so_and_adds_nothing(
+    bot, update_factory, dispatcher
+):
+    data = overdue_report(("ООО «Альфа»", A, 60), ("ООО «Бета»", B, 12))
+    await send(dispatcher, bot, update_factory, "Мониторинг", "Добавить на мониторинг")
+    reply = await send_file(dispatcher, bot, update_factory, data)
+    assert reply.text.startswith("Ни у одной из 2 организаций отчёта нет просрочки больше 60 дн.")
+    assert "Добавлено" not in reply.text and buttons(reply) == ["Отмена"]
+    screen = await send(dispatcher, bot, update_factory, "Отмена", "Мониторинг")
+    assert A not in screen.text and B not in screen.text
+
+
+async def test_the_overdue_threshold_comes_from_the_policy(bot, update_factory, store):
+    service = MonitoringService(
+        store,
+        Source(),
+        TelegramMonitoringTexts(),
+        mode=DataMode.DEMO,
+        policy=MonitoringPolicy(overdue_days=30),
+        clock=lambda: NOW,
+    )
+    dispatcher = create_dispatcher(
+        frozenset({OWNER}), reader=OpenpyxlSheetReader(), monitoring=service
+    )
+    data = overdue_report(("ООО «Альфа»", A, 61), ("ООО «Бета»", B, 45), ("ООО «Гамма»", C, 30))
+    await send(dispatcher, bot, update_factory, "Мониторинг", "Добавить на мониторинг")
+    reply = await send_file(dispatcher, bot, update_factory, data)
+    assert reply.text.startswith(
+        "Добавлено на мониторинг: 2.\n"
+        "В отчёте 3 организации, просрочка больше 30 дн. — у 2 организаций."
+    )
+
+
+def test_the_policy_refuses_a_negative_threshold():
+    with pytest.raises(ValueError, match="overdue"):
+        MonitoringPolicy(overdue_days=-1)
 
 
 # --- taking off ---

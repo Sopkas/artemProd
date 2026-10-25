@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from claims_assistant.domain.external import DataMode
 from claims_assistant.infrastructure.demo.company_data import DemoScenario
 from claims_assistant.runtime.settings import ConfigurationError, Settings
 
@@ -31,6 +32,7 @@ def clean_environment(monkeypatch):
         "MONITORING_TIME",
         "MONITORING_QUIET_SUMMARY",
         "MONITORING_REQUEST_LIMIT",
+        "MONITORING_OVERDUE_DAYS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -447,6 +449,35 @@ def test_monitoring_runs_daily_at_nine_by_default_and_takes_another_hour(tmp_pat
     assert monitoring.run_at == time(7, 5)
     assert not monitoring.quiet_summary and not monitoring.enabled
     assert monitoring.request_limit == 600
+
+
+def test_a_report_brings_those_overdue_more_than_60_days_unless_set_otherwise(
+    tmp_path, monkeypatch
+):
+    """S8-14: the customer's «больше 60 дней» (17.10.2026) is the default; the setting
+    reaches the policy the monitoring dialog cuts a 1C report by."""
+    from claims_assistant.runtime.app import _monitoring
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    settings = Settings.load(tmp_path / "missing.env")
+    assert settings.monitoring.overdue_days == 60
+    service = _monitoring(settings, object(), object(), DataMode.DEMO)
+    assert service.policy.overdue_days == 60
+    for raw, days in ((" 90 ", 90), ("0", 0)):
+        monkeypatch.setenv("MONITORING_OVERDUE_DAYS", raw)
+        settings = Settings.load(tmp_path / "missing.env")
+        assert settings.monitoring.overdue_days == days
+        assert _monitoring(settings, object(), object(), DataMode.DEMO).policy.overdue_days == days
+
+
+@pytest.mark.parametrize("raw", ["-1", "sixty", "60.5"])
+def test_the_overdue_threshold_is_a_whole_number_of_days(raw, tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("MONITORING_OVERDUE_DAYS", raw)
+    with pytest.raises(ConfigurationError, match="MONITORING_OVERDUE_DAYS"):
+        Settings.load(tmp_path / "missing.env")
 
 
 @pytest.mark.parametrize("raw", ["9", "24:00", "09:60", "nine", "09:00:00"])

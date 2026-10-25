@@ -6,7 +6,9 @@ Two kinds of file come, and both are read as they are:
   «ИНН» column (the customer's «образец», 16.10.2026: 318 companies, all with an INN). It
   is read by the report's own parser (S7-01), and the name comes with the INN. A company
   of the report without an INN — the other variant prints none — cannot be watched and is
-  counted, not guessed by its name.
+  counted, not guessed by its name. Only companies overdue more than
+  ``WATCH_OVERDUE_DAYS`` are taken (S8-14, the customer's answer of 17.10.2026: «Всех с
+  просрочкой больше 60 дней»); the rest are counted by why.
 - **Any table with an «ИНН» column**, its header in one of the first rows: a list the
   customer keeps himself. A column of names next to it («Наименование», «Контрагент»…)
   gives the names; a table of INNs alone with no header at all is taken as one too.
@@ -16,12 +18,19 @@ Wrong values are named by their row; the value itself is never repeated.
 
 from dataclasses import dataclass
 
-from claims_assistant.domain.debt_report import read_debt_report
+from claims_assistant.domain.debt_report import CounterpartyDebt, read_debt_report
 from claims_assistant.domain.inn import LOST_ZERO_LENGTHS, InnProblem, InvalidInn, validate_inn
+from claims_assistant.domain.plural import companies, of_companies
 from claims_assistant.domain.sheet_rules import Cell, CellError, parse_inn
-from claims_assistant.domain.watchlist import Candidate, Invalid, unique
+from claims_assistant.domain.watchlist import (
+    WATCH_OVERDUE_DAYS,
+    Candidate,
+    Invalid,
+    OverdueCut,
+    unique,
+)
 
-from .contract_link import merge_repeats
+from .contract_link import merge_repeats, normalize_name
 from .imports import ImportLimits, OutlineReader, RawSheetReader
 
 HEADER_ROWS = 20
@@ -42,6 +51,7 @@ class FileList:
     invalid: tuple[Invalid, ...] = ()
     repeats: int = 0
     without_inn: int = 0  # companies of a report that prints no INN for them
+    cut: OverdueCut | None = None  # a 1C report: how it was cut by its overdue (S8-14)
     # Why nothing could be taken, in the user's words; None when something was.
     problem: str | None = None
 
@@ -56,6 +66,27 @@ REPORT_WITHOUT_INN = (
 )
 
 
+def nothing_overdue(cut: OverdueCut) -> str:
+    """Nobody of a report passed the cut: said plainly, not as «Добавлено: 0» alone.
+
+    A report of one company is said of it alone: «ни у одной из 1 организации» and «кто-то
+    из них» do not read."""
+    if cut.total == 1:
+        why = "нет дней просрочки" if cut.no_days else f"нет просрочки больше {cut.days} дн."
+        return (
+            f"У единственной организации отчёта {why}, а из отчёта на мониторинг берутся "
+            f"только должники с просрочкой больше {cut.days} дн. — добавлять некого. Если она "
+            "всё же нужна, пришлите её ИНН сообщением."
+        )
+    text = (
+        f"Ни у одной из {of_companies(cut.total)} отчёта нет просрочки больше {cut.days} дн., "
+        "а из отчёта на мониторинг берутся только такие — добавлять некого."
+    )
+    if cut.no_days:
+        text += f" Без дней просрочки в отчёте: {companies(cut.no_days)}."
+    return text + " Если кто-то из них всё же нужен, пришлите его ИНН сообщением."
+
+
 def _title(cell: Cell) -> str:
     return " ".join(str(cell).split()).lower() if isinstance(cell, str) else ""
 
@@ -67,18 +98,53 @@ def _name(cell: Cell) -> str | None:
     return text[:300] or None
 
 
-def _from_report(rows) -> FileList | None:
-    """The 1C report, if this is one; None when the file is something else."""
+def _merged(counterparties: tuple[CounterpartyDebt, ...]) -> list[CounterpartyDebt]:
+    """``merge_repeats`` within one INN, in the report's order.
+
+    ``merge_repeats`` joins entries by the printed name and keeps the first INN: two
+    different companies of one name (two «ИП Иванов …» under different sales points) would
+    become one, carrying the first INN but judged by the other's days — a debtor of 10
+    days taken as one of 90, and the real one of 90 lost uncounted. Since the cut decides
+    by the merged days (S8-14), entries whose INNs differ are never joined; those without
+    an INN are still joined by name, as before.
+    """
+    groups: dict[str, list[CounterpartyDebt]] = {}
+    first: dict[tuple[str, str], int] = {}
+    for index, counterparty in enumerate(counterparties):
+        groups.setdefault(counterparty.inn or "", []).append(counterparty)
+        first.setdefault((counterparty.inn or "", normalize_name(counterparty.name)), index)
+    merged = [joined for group in groups.values() for joined in merge_repeats(group)[0]]
+    return sorted(merged, key=lambda c: first[(c.inn or "", normalize_name(c.name))])
+
+
+def _from_report(rows, overdue_days: int) -> FileList | None:
+    """The 1C report, if this is one; None when the file is something else.
+
+    A company is judged once, after its entries under every sales point are merged, by its
+    worst contract: 30 days on one and 90 on another is a debtor of 90 days (two INNs under
+    one name are two companies, see ``_merged``). A report that prints no INN at all is
+    said so first — cutting it would only hide the real reason.
+    """
     report = read_debt_report(list(rows))
     if not report.counterparties:
         return None
-    counterparties, _repeats = merge_repeats(report.counterparties)
-    found = [Candidate(c.inn, _name(c.name)) for c in counterparties if c.inn]
-    without = sum(1 for c in counterparties if not c.inn)
-    if not found:
-        return FileList(without_inn=without, problem=REPORT_WITHOUT_INN)
+    counterparties = _merged(report.counterparties)
+    if not any(c.inn for c in counterparties):
+        return FileList(without_inn=len(counterparties), problem=REPORT_WITHOUT_INN)
+    taken = [c for c in counterparties if c.worst_days is not None and c.worst_days > overdue_days]
+    no_days = sum(1 for c in counterparties if c.worst_days is None)
+    cut = OverdueCut(
+        days=overdue_days,
+        total=len(counterparties),
+        taken=len(taken),
+        not_overdue=len(counterparties) - len(taken) - no_days,
+        no_days=no_days,
+    )
+    if not taken:
+        return FileList(cut=cut, problem=nothing_overdue(cut))
+    found = [Candidate(c.inn, _name(c.name)) for c in taken if c.inn]
     candidates, repeats = unique(found)
-    return FileList(candidates, repeats=repeats, without_inn=without)
+    return FileList(candidates, repeats=repeats, without_inn=len(taken) - len(found), cut=cut)
 
 
 def _header(rows: tuple[tuple[Cell, ...], ...]) -> tuple[int, int, int | None] | None:
@@ -169,11 +235,18 @@ def _problem(cell: Cell) -> InnProblem:
 
 
 def read_watch_file(
-    data: bytes, reader: OutlineReader | RawSheetReader, limits: ImportLimits = ImportLimits()
+    data: bytes,
+    reader: OutlineReader | RawSheetReader,
+    limits: ImportLimits = ImportLimits(),
+    *,
+    overdue_days: int = WATCH_OVERDUE_DAYS,
 ) -> FileList:
-    """The INNs of a file sent for monitoring; a reader error propagates (WorkbookError)."""
+    """The INNs of a file sent for monitoring; a reader error propagates (WorkbookError).
+
+    ``overdue_days`` cuts the 1C report only: a table or a column of INNs is the user's own
+    choice of companies and is taken whole."""
     if isinstance(reader, OutlineReader):
-        report = _from_report(reader.read_outline(data, limits))
+        report = _from_report(reader.read_outline(data, limits), overdue_days)
         if report is not None:
             return report
     return _from_table(reader.read_rows(data, limits))

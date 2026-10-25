@@ -24,9 +24,11 @@ from claims_assistant.domain.inn import InnProblem, InvalidInn, validate_inn
 
 __all__ = [
     "WATCH_LIMIT",
+    "WATCH_OVERDUE_DAYS",
     "Candidate",
     "WatchEntry",
     "Invalid",
+    "OverdueCut",
     "ParsedList",
     "AddResult",
     "RemoveResult",
@@ -36,6 +38,11 @@ __all__ = [
 ]
 
 WATCH_LIMIT = 100
+# From the 1C overdue report only companies overdue MORE than this go on the list: «Всех с
+# просрочкой больше 60 дней» (the customer, 17.10.2026 — question 8 of S8-07; the report's
+# «образец» holds 318 companies against the limit of 100). Exclusive, like the scoring's
+# OVERDUE_HIGH_AFTER_DAYS: 60 days stay off, 61 go on. MONITORING_OVERDUE_DAYS sets another.
+WATCH_OVERDUE_DAYS = 60
 # Lengths of an INN, and of one with a digit lost or added: taken for a typo, not skipped.
 _INN_LENGTHS = (10, 12)
 _TYPO_LENGTHS = (9, 11)
@@ -76,6 +83,20 @@ class Invalid:
     @property
     def reason(self) -> str:
         return str(InvalidInn(self.problem))
+
+
+@dataclass(frozen=True, slots=True)
+class OverdueCut:
+    """How a 1C report was cut by its overdue (S8-14): the companies of the report with
+    its repeats merged, and where each went. A company is judged by its worst contract
+    (``CounterpartyDebt.worst_days``); one whose contracts show no days at all cannot be
+    judged and is not taken — counted, so the user can send its INN himself."""
+
+    days: int  # the threshold: more than this is taken
+    total: int
+    taken: int  # overdue more than ``days``; INNs and the limit are checked after
+    not_overdue: int  # ``days`` or fewer
+    no_days: int
 
 
 @dataclass(frozen=True, slots=True)
