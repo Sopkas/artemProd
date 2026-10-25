@@ -32,8 +32,9 @@ def trends(years):
     return {trend.kind: trend for trend in finance_trends(fin(years))}
 
 
-def test_the_customers_example_profit_down_80_without_a_loss_is_no_alarm():
-    """15.10.2026: revenue +12 %, net profit 3,8 → 0,76 million. A fall, not a rule."""
+def test_the_customers_example_profit_down_80_without_a_loss_is_the_rules_alarm():
+    """15.10.2026: revenue +12 %, net profit 3,8 → 0,76 million. A fall only until the
+    customer named the threshold (17.10.2026): 1.5 times or more is ``net_profit_drop``."""
     result = trends(
         {
             2024: {"2110": 100_000_000, "2400": 3_800_000},
@@ -42,7 +43,11 @@ def test_the_customers_example_profit_down_80_without_a_loss_is_no_alarm():
     )
     revenue, profit = result[FactKind.REVENUE], result[FactKind.NET_PROFIT]
     assert (revenue.trend, revenue.percent, revenue.alarm) == (Trend.UP, Decimal(12), None)
-    assert (profit.trend, profit.percent, profit.alarm) == (Trend.DOWN, Decimal(-80), None)
+    assert (profit.trend, profit.percent, profit.alarm) == (
+        Trend.DOWN,
+        Decimal(-80),
+        "net_profit_drop",
+    )
     assert (profit.year, profit.previous, profit.value) == (2025, Decimal(3_800_000), 760_000)
 
 
@@ -55,6 +60,11 @@ def test_a_revenue_drop_from_the_threshold_is_the_rules_alarm():
 def test_a_revenue_drop_below_the_threshold_is_a_fall_only():
     revenue = trends({2024: {"2110": 1000}, 2025: {"2110": 701}})[FactKind.REVENUE]
     assert (revenue.trend, revenue.alarm) == (Trend.DOWN, None)
+
+
+def test_a_profit_fall_short_of_one_and_a_half_times_is_a_fall_only():
+    profit = trends({2024: {"2400": 1500}, 2025: {"2400": 1001}})[FactKind.NET_PROFIT]
+    assert (profit.trend, profit.alarm) == (Trend.DOWN, None)
 
 
 def test_a_loss_is_the_rules_alarm_with_its_percent():
@@ -104,6 +114,9 @@ def test_no_finances_no_trends():
         {2024: {"2110": 0, "2400": 0}, 2025: {"2110": 100, "2400": 5}},
         {2023: {"2110": 1000}, 2024: {"2110": 500}, 2025: {"2110": 450}},
         {2024: {"2110": 10, "2400": -1}, 2025: {"2110": 10, "2400": 5}},
+        {2024: {"2110": 1000, "2400": 30}, 2025: {"2110": 700, "2400": 10}},
+        {2024: {"2400": 1500}, 2025: {"2400": 1000}},
+        {2024: {"2400": 1000}, 2025: {"2400": 0}},
     ],
 )
 def test_marks_never_disagree_with_the_priority(years):
@@ -112,5 +125,5 @@ def test_marks_never_disagree_with_the_priority(years):
     snapshot = fin(years)
     alarms = {t.alarm for t in finance_trends(snapshot) if t.alarm}
     signals = {s.code for s in assess(INN, [snapshot]).signals}
-    finance_codes = signals & {"revenue_drop_30", "net_loss"}
+    finance_codes = signals & {"revenue_drop_30", "net_loss", "net_profit_drop"}
     assert alarms == finance_codes

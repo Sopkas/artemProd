@@ -127,13 +127,65 @@ def test_checko_unavailable_and_no_internal_data_is_unknown():
 
 
 def test_revenue_drop_of_exactly_30_percent_is_medium():
-    years = {2024: {"2110": 1000, "2400": 10}, 2025: {"2110": 700, "2400": 5}}
+    years = {2024: {"2110": 1000, "2400": 10}, 2025: {"2110": 700, "2400": 9}}  # profit −10 %
     result = assess(INN, [company(), efrsb(), fin(years)], FULL_ROW)
     assert [s.code for s in result.signals] == ["revenue_drop_30"]
     assert result.priority is Priority.MEDIUM
     assert result.signals[0].fact_ids == ("revenue-2024", "revenue-2025")
     assert result.signals[0].reason == "Выручка снизилась на 30,0% за 2024–2025 годы."
     assert result.signals[0].value == "-30.0%"
+
+
+def test_a_profit_down_by_one_and_a_half_times_is_medium():
+    """The customer, 17.10.2026 (question 7): a profit that fell 1.5 times or more and stayed
+    a profit is ⚠️, as revenue down 30 %. His example of 15.10: 3,8 → 0,76 million."""
+    years = {
+        2024: {"2110": 100_000_000, "2400": 3_800_000},
+        2025: {"2110": 112_000_000, "2400": 760_000},
+    }
+    result = assess(INN, [company(), efrsb(), fin(years)], FULL_ROW)
+    [signal] = result.signals
+    assert (signal.code, signal.level, result.priority) == (
+        "net_profit_drop",
+        Priority.MEDIUM,
+        Priority.MEDIUM,
+    )
+    assert signal.reason == "Чистая прибыль снизилась в 5,0 раза (на 80,0%) за 2024–2025 годы."
+    assert signal.fact_ids == ("net-profit-2024", "net-profit-2025") and signal.value == "-80.0%"
+    assert result.next_step == "Уточнить финансовое положение контрагента и условия оплаты."
+
+
+@pytest.mark.parametrize(
+    ("previous", "value", "fires"),
+    [
+        (1500, 1000, True),  # exactly 1.5 times: the threshold fires, as revenue's 30 %
+        (1500, 1001, False),  # just short of it
+        (1000, 0, True),  # down to nothing, still not a loss
+        (1000, -1, False),  # a loss: ``net_loss`` alone, never both
+        (0, 0, False),  # no profit before: nothing to fall from
+        (-100, -500, False),  # a loss both years: ``net_loss``
+    ],
+)
+def test_the_profit_drop_threshold(previous, value, fires):
+    years = {2024: {"2400": previous}, 2025: {"2400": value}}
+    codes = {s.code for s in assess(INN, [company(), efrsb(), fin(years)], FULL_ROW).signals}
+    assert ("net_profit_drop" in codes) is fires
+    assert ("net_loss" in codes) is (value < 0)
+
+
+def test_a_profit_down_to_nothing_says_so():
+    years = {2024: {"2400": 1000}, 2025: {"2400": 0}}
+    result = assess(INN, [company(), efrsb(), fin(years)], FULL_ROW)
+    assert [s.reason for s in result.signals] == [
+        "Чистая прибыль снизилась до нуля за 2024–2025 годы."
+    ]
+
+
+def test_profit_and_revenue_drops_are_two_medium_signals_so_high():
+    years = {2024: {"2110": 1000, "2400": 30}, 2025: {"2110": 700, "2400": 10}}
+    result = assess(INN, [company(), efrsb(), fin(years)], FULL_ROW)
+    assert {s.code for s in result.signals} == {"revenue_drop_30", "net_profit_drop"}
+    assert result.priority is Priority.HIGH
 
 
 def test_loss_and_revenue_drop_are_two_medium_signals_so_high():
