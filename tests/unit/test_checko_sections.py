@@ -4,6 +4,7 @@ Field names are confirmed against the live API (20.09.2026); these tests use syn
 payloads of that same minimal shape, never stored real responses.
 """
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -60,6 +61,53 @@ class OneShot:
 
 def provider(**transports):
     return CheckoCompanyDataProvider(KEY, OneShot(), lambda: NOW, **transports)
+
+
+class Overlap:
+    """Counts the requests in flight at once."""
+
+    def __init__(self) -> None:
+        self.active = self.most = 0
+
+    async def request(self, *args):
+        self.active += 1
+        self.most = max(self.most, self.active)
+        await asyncio.sleep(0.01)
+        self.active -= 1
+        return 404, None
+
+
+async def test_sections_are_asked_at_once():
+    """18.10.2026: one after another, six sections at a 20 s timeout took two minutes on a
+    bad link. Asked at once, the card waits for the slowest, not for the sum."""
+    overlap = Overlap()
+    checko = CheckoCompanyDataProvider(KEY, overlap, lambda: NOW, finances_transport=overlap)
+    request = CompanyDataRequest(INN, (Section.COMPANY, Section.FINANCES))
+    snapshots = await checko.fetch(request)
+    assert [s.section for s in snapshots] == [Section.COMPANY, Section.FINANCES]
+    assert overlap.most == 2
+
+
+async def test_a_bug_in_one_section_cancels_the_others_and_propagates():
+    class Broken:
+        async def request(self, *args):
+            raise RuntimeError("bug")
+
+    class Slow:
+        cancelled = False
+
+        async def request(self, *args):
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                Slow.cancelled = True
+                raise
+
+    checko = CheckoCompanyDataProvider(KEY, Slow(), lambda: NOW, finances_transport=Broken())
+    with pytest.raises(RuntimeError):
+        await checko.fetch(CompanyDataRequest(INN, (Section.COMPANY, Section.FINANCES)))
+    await asyncio.sleep(0)
+    assert Slow.cancelled
 
 
 # --- EFRSB projection (pure) ---
