@@ -396,7 +396,17 @@ class PolzaRecommendationProvider:
                 AiErrorCode.TRUNCATED, "Ответ модели обрезан лимитом длины.", spent=received
             )
         if text is None:
-            raise AiUnavailable(AiErrorCode.UNAVAILABLE, "Ответ провайдера ИИ не разобран.")
+            # A 200 without text is paid for all the same (review g6), so its price goes
+            # with the failure. A refusal or the content filter will say the same to the
+            # same request: refused, not retried. Any other empty answer may be a fluke
+            # and stays «unavailable» — worth one more paid try, now counted.
+            if _refused(body):
+                raise AiUnavailable(
+                    AiErrorCode.REFUSED, _MESSAGES[AiErrorCode.REFUSED], spent=received
+                )
+            raise AiUnavailable(
+                AiErrorCode.UNAVAILABLE, "Ответ провайдера ИИ не разобран.", spent=received
+            )
         return received
 
 
@@ -419,6 +429,16 @@ def _content(body: object) -> str | None:
 def _truncated(body: object) -> bool:
     choice = _choice(body)
     return choice is not None and choice.get("finish_reason") == "length"
+
+
+def _refused(body: object) -> bool:
+    """The model declined: a structured-output «refusal» or the provider's content filter."""
+    choice = _choice(body)
+    if choice is None:
+        return False
+    message = choice.get("message")
+    refusal = message.get("refusal") if isinstance(message, dict) else None
+    return choice.get("finish_reason") == "content_filter" or bool(refusal)
 
 
 def _price(usage: dict[str, Any]) -> Decimal | None:
