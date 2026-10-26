@@ -521,3 +521,11 @@ async def test_details_longer_than_a_message_come_in_parts(bot, update_factory, 
     assert "\n".join(call.text for call in sent) == long_card
     assert [call.reply_markup is None for call in sent] == [True, True, False]
     assert buttons(sent[-1]) == MAIN_MENU
+
+
+@pytest.mark.parametrize("command", ["/check", "Новая проверка"])
+async def test_a_new_check_leaves_the_inn_prompt(bot, update_factory, command):
+    """/check is in the bot's command menu: at the INN prompt it is not a mistyped INN."""
+    dispatcher = create_dispatcher(frozenset({42}))
+    reply = await feed(dispatcher, bot, update_factory, "Проверить ИНН", command)
+    assert reply.text == texts.CHECK_DATE_PROMPT
