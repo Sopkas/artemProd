@@ -903,7 +903,13 @@ class InterruptedBankruptcy:
 
 @pytest.mark.parametrize(
     "code, final",
-    [("timeout", False), ("network_error", False), ("daily_limit", False), ("api_error", True)],
+    [
+        ("timeout", False),
+        ("network_error", False),
+        ("daily_limit", False),
+        ("budget_exhausted", False),
+        ("api_error", True),
+    ],
 )
 async def test_an_interrupted_sample_is_saved_only_when_a_repeat_would_not_finish_it(
     tmp_path, code, final
@@ -923,6 +929,17 @@ async def test_a_company_with_an_unfinished_sample_is_not_counted_as_checked(tmp
     )
     assert outcome.status == RunStatus.PARTIAL
     assert "Организаций с неполными внешними данными: 2." in outcome.failure
+
+
+async def test_a_sample_cut_by_the_run_budget_says_the_limit_was_spent(tmp_path):
+    """Review G5: EFRSB pages are paid from the run's budget; a sample it cut is the limit's
+    doing and the summary says so, as for a section it never asked."""
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    outcome = await pipeline(
+        files, repository, guard(InterruptedBankruptcy("budget_exhausted"))
+    ).process(run)
+    assert (await load_summary(run.id, repository)).budget_exhausted is True
+    assert "Лимит времени или запросов проверки исчерпан." in outcome.failure
 
 
 async def test_a_sample_cut_by_the_daily_limit_tells_the_user_to_come_back_tomorrow(tmp_path):

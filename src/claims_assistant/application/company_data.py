@@ -1,5 +1,6 @@
 """Provider boundary: caller validates INN using the shared S1-01 validator."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
 from typing import Protocol
@@ -26,6 +27,12 @@ class CompanyDataRequest:
     inn: str
     sections: tuple[Section, ...] = tuple(Section)
     limits: RequestLimits = RequestLimits()
+    # Asked before every request a section makes beyond its first (a later EFRSB page): the
+    # caller's run budget pays for it. Returns the timeout that request may take, never past
+    # the budget's deadline, or None when the budget has nothing left; the section then
+    # stops with what it has. Without it only ``limits`` apply (review G5: twenty pages were
+    # charged to the run as one request, and each got a fresh timeout past the deadline).
+    next_request: Callable[[], float | None] | None = None
 
     def __post_init__(self) -> None:
         # This is a type guard, not a second INN/checksum validator.

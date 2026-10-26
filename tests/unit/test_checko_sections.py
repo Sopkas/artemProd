@@ -199,6 +199,31 @@ async def test_bankruptcy_marks_partial_when_pages_exceed_budget():
     assert any("неполная" in reason for reason in snapshot.missing)
 
 
+async def test_bankruptcy_asks_the_caller_before_each_later_page():
+    """Review G5: a later page is paid from the caller's budget and waits only the time it
+    grants; a refusal keeps the pages read and marks the cut as not final."""
+
+    class Timed(PagedBankruptcy):
+        async def request(self, key, inn, page, timeout):
+            self.timeouts.append(timeout)
+            return await super().request(key, inn, page, timeout)
+
+    pages = [
+        efrsb_page([{"Дата": "2026-01-01", "Номер": str(i)}], total_pages=5, current=i)
+        for i in range(1, 6)
+    ]
+    transport = Timed(pages)
+    transport.timeouts = []
+    grants = iter([3.0, None])
+    request = CompanyDataRequest(
+        INN, (Section.BANKRUPTCY,), RequestLimits(timeout_seconds=5), lambda: next(grants)
+    )
+    (snapshot,) = await provider(bankruptcy_transport=transport).fetch(request)
+    assert transport.calls == [1, 2] and transport.timeouts == [5, 3.0]
+    assert snapshot.coverage == Coverage.PARTIAL and len(snapshot.facts) == 2
+    assert snapshot.interrupted.code == "budget_exhausted"
+
+
 @pytest.mark.parametrize(
     "transport,code",
     [
@@ -337,7 +362,7 @@ def test_finances_empty_year_before_the_data_is_not_mentioned():
 
 def test_finances_says_when_the_latest_year_is_left_out():
     years = finances.read_finances(
-        fin_payload({2022: {"2110": 1}, 2023: {"2110": 2}, 2025: {"2110": 3}})
+        fin_payload({2022: {"2110": 1, "2400": 1}, 2023: {"2110": 2, "2400": 2}, 2025: {"2110": 3}})
     )
     snapshot = finances.project_finances(INN, years, NOW)
     assert (snapshot.covered_period.start.year, snapshot.covered_period.end.year) == (2022, 2023)
@@ -357,6 +382,24 @@ def test_finances_says_which_line_is_missing_in_the_pair():
         (FactKind.NET_PROFIT, 2023),
         (FactKind.NET_PROFIT, 2024),
     }
+
+
+@pytest.mark.parametrize(
+    "lines, kind, reason",
+    [
+        ({"2110": 1}, FactKind.REVENUE, "Нет строки 2400 (чистая прибыль) за 2023–2024."),
+        ({"2400": -1}, FactKind.NET_PROFIT, "Нет строки 2110 (выручка) за 2023–2024."),
+    ],
+    ids=["no_net_profit", "no_revenue"],
+)
+def test_finances_says_when_a_line_is_missing_in_both_years(lines, kind, reason):
+    """Review G5: a line missing in one year of the pair was partial, in both — «полные»
+    with no reason, though its drop rules could not fire."""
+    years = finances.read_finances(fin_payload({2023: lines, 2024: lines}))
+    snapshot = finances.project_finances(INN, years, NOW)
+    assert snapshot.coverage == Coverage.PARTIAL
+    assert snapshot.missing == (reason,)
+    assert {f.kind for f in snapshot.facts} == {kind}
 
 
 def test_finances_partial_when_empty():

@@ -23,6 +23,7 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.infrastructure.cache.memory import TtlSnapshotCache
+from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 
 INN = "1234567894"
@@ -310,6 +311,59 @@ async def test_no_request_outlives_the_budget_deadline(clock, sleeps):
     budget = RunBudget(max_requests=10, deadline=START + timedelta(seconds=5))
     await provider.scoped(budget).fetch(CompanyDataRequest(INN, THREE))
     assert inner.calls[0].limits.timeout_seconds == 5
+
+
+class EfrsbPages:
+    """A Checko EFRSB section with ``total`` pages; each page takes ``seconds`` of the clock
+    and records the timeout it was given."""
+
+    def __init__(self, clock: Clock, total: int, seconds: float = 0) -> None:
+        self.clock, self.total, self.seconds = clock, total, seconds
+        self.timeouts: list[float] = []
+
+    async def request(self, key, inn, page, timeout):
+        self.timeouts.append(timeout)
+        self.clock.advance(self.seconds)
+        record = {"Дата": "2026-01-01", "GUID": f"g-{page}", "Тип": "X", "ТипНаим": "Решение"}
+        data = {"ЗапВсего": self.total, "СтрВсего": self.total, "СтрТекущ": page}
+        return 200, {"meta": {"status": "ok"}, "data": {**data, "Записи": [record]}}
+
+
+def checko(clock: Clock, pages: EfrsbPages) -> CheckoCompanyDataProvider:
+    return CheckoCompanyDataProvider("synthetic-key", clock=clock, bankruptcy_transport=pages)
+
+
+async def test_later_pages_are_charged_to_the_run_budget(clock, sleeps):
+    """Review G5: twenty EFRSB pages were charged as one request, so the card's 20 and the
+    run's 1 500 were not ceilings. Each page is a unit now; the budget's end cuts the
+    sample, keeps what came, and says it is not final."""
+    pages = EfrsbPages(clock, total=50)
+    provider = guard(checko(clock, pages), clock, sleeps)
+    budget = RunBudget(max_requests=5, deadline=START + timedelta(minutes=15))
+    (snapshot,) = await provider.scoped(budget).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert len(pages.timeouts) == 5 and budget.used == 5 and budget.exhausted
+    assert snapshot.coverage is Coverage.PARTIAL and len(snapshot.facts) == 5
+    assert snapshot.interrupted.code == BUDGET_EXHAUSTED
+    await provider.scoped(RunBudget.unlimited()).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert len(pages.timeouts) == 5 + 20  # not cached: asked again, up to max_pages
+
+
+async def test_a_later_page_gets_only_the_time_the_budget_has_left(clock, sleeps):
+    """Review G5: each page had its own 20 s, so a slow register ran a card past its minute
+    page by page. A page now waits no longer than the budget's deadline, and none starts
+    after it."""
+    pages = EfrsbPages(clock, total=10, seconds=4)
+    provider = guard(checko(clock, pages), clock, sleeps, timeout_seconds=20)
+    budget = RunBudget(max_requests=100, deadline=START + timedelta(seconds=10))
+    (snapshot,) = await provider.scoped(budget).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert pages.timeouts == [10, 6, 2]
+    assert snapshot.interrupted.code == BUDGET_EXHAUSTED and budget.used == 3
 
 
 def test_a_card_waits_a_minute_at_most():

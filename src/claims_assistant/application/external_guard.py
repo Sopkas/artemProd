@@ -161,6 +161,15 @@ class GuardedCompanyDataProvider:
                 results[section] = _source_limited(request.inn, section, self._mode, self._clock())
             pending = []
 
+        def next_request() -> float | None:
+            # A later page is a request like any other: one unit of the budget, and its
+            # timeout ends with the budget's deadline (review G5: a card charged one unit
+            # for twenty EFRSB pages and ran past its minute page by page).
+            now = self._clock()
+            if budget.take(1, now) == 0:
+                return None
+            return min(self._policy.timeout_seconds, (budget.deadline - now).total_seconds())
+
         attempt = 0
         while pending:
             now = self._clock()
@@ -183,7 +192,10 @@ class GuardedCompanyDataProvider:
                 # No request outlives the budget's deadline.
                 limits = replace(limits, timeout_seconds=left)
             inner_request = CompanyDataRequest(
-                inn=request.inn, sections=tuple(pending), limits=limits
+                inn=request.inn,
+                sections=tuple(pending),
+                limits=limits,
+                next_request=next_request,
             )
             snapshots = await self.inner.fetch(inner_request)
             retry: list[Section] = []

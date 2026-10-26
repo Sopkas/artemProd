@@ -1,4 +1,4 @@
-"""S1-05: one bounded HTTPS request for organization details only."""
+"""Checko sections (S1-05, S3-04, S8-01): one bounded HTTPS request each, EFRSB paged."""
 
 import asyncio
 import re
@@ -9,6 +9,7 @@ from typing import Protocol
 import aiohttp
 
 from claims_assistant.application.company_data import CompanyDataRequest
+from claims_assistant.application.external_guard import BUDGET_EXHAUSTED
 from claims_assistant.domain.external import (
     CompanyStatus,
     Coverage,
@@ -85,6 +86,7 @@ _DAILY_LIMIT = "Исчерпан суточный лимит запросов Ch
 _API_ERROR = "Checko отклонил запрос; проверьте доступ и лимиты в кабинете."
 _INVALID = "Ответ Checko не соответствует ожидаемому формату."
 _NOT_FOUND = "Организация с таким ИНН не найдена в источнике."
+_BUDGET_CUT = "Лимит времени или запросов проверки исчерпан до конца выборки."
 # S7-02: an entrepreneur is a different record in the source, behind a different method
 # we have not been able to check yet. Asking the company method about a 12-digit INN
 # would answer «не найдено», which reads as «no such person» — and that is not true.
@@ -306,10 +308,11 @@ class CheckoCompanyDataProvider:
             budget = min(limits.max_pages, limits.max_requests)
             pages_to_fetch = budget
             total_pages = 1
+            timeout = limits.timeout_seconds
             while True:
-                async with asyncio.timeout(limits.timeout_seconds):
+                async with asyncio.timeout(timeout):
                     http_status, payload = await self._bankruptcy_transport.request(
-                        self._api_key, request.inn, page, limits.timeout_seconds
+                        self._api_key, request.inn, page, timeout
                     )
                 mapped = _http_error(http_status, payload)
                 if mapped is not None:
@@ -326,6 +329,21 @@ class CheckoCompanyDataProvider:
                         request.inn, records, fetched_at, complete=complete, unreadable=0
                     )
                 page += 1
+                if request.next_request is not None:
+                    # Each later page is paid from the caller's run budget and gets only the
+                    # time it has left. When it has none, the pages that came are kept and
+                    # the cut is not final: a later run with a fresh budget may finish it.
+                    granted = request.next_request()
+                    if granted is None:
+                        return bankruptcy.project_bankruptcy(
+                            request.inn,
+                            records,
+                            fetched_at,
+                            complete=False,
+                            unreadable=0,
+                            interrupted=ProviderError(BUDGET_EXHAUSTED, _BUDGET_CUT),
+                        )
+                    timeout = granted
         except TimeoutError:
             code, message = "timeout", "Checko не ответил за отведённое время."
         except (aiohttp.ClientError, OSError):
