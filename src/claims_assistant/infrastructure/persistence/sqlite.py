@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
+from alembic.util.exc import CommandError
 from sqlalchemy import Connection, Engine, create_engine, event, func, select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -75,6 +76,15 @@ def open_sqlite_repository(
     except SQLAlchemyError as error:
         engine.dispose()
         raise RepositoryError("Не удалось подготовить базу данных.") from error
+    except CommandError as error:
+        # A revision this code does not know: the database was upgraded by a newer release
+        # and the code rolled back without `alembic downgrade` (docs/operations.md). Not a
+        # SQLAlchemyError, so without this the bot only logged bot_failed CommandError.
+        engine.dispose()
+        raise RepositoryError(
+            "Схема базы данных новее этой версии бота: после отката выпуска её нужно понизить"
+            " (docs/operations.md, «Возврат к предыдущему выпуску»)."
+        ) from error
     return SqliteAnalysisRepository(engine, clock)
 
 
