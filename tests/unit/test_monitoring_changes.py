@@ -328,7 +328,7 @@ def test_a_liquidation_the_live_adapter_does_not_match_is_still_sent():
     # And back: a status matched again is a change too; an unmatched one twice is not.
     back = compare(INN, full_day(YESTERDAY, company=liquidating), full_day(TODAY, company=active))
     assert [c.text for c in back.to_notify] == [
-        "Статус организации изменился: теперь «действует», прежний бот не распознал"
+        "Статус организации изменился: был другой (бот его не распознал), теперь «действует»"
     ]
     again = checko_company("101", "Находится в стадии ликвидации", TODAY)
     assert compare(INN, [liquidating], [again]).changes == ()
