@@ -937,3 +937,110 @@ async def test_the_export_is_taken_in_the_old_format_as_well(setup, bot, update_
     reply = await send_document(dispatcher, bot, update_factory, export_file(), name="1c.xls")
     assert "Платежей принято: 2" in reply.text
     assert ".xls" in texts.EXPORT_FILE_PROMPT
+
+
+# --- a non-text message at a step that does not take it (review g7) -------------------------
+
+PHOTO = {"photo": [{"file_id": "p", "file_unique_id": "p", "width": 1, "height": 1}]}
+# Not attachments, but just as likely to land mid-check: they must not drop it either.
+STICKER = {
+    "sticker": {
+        "file_id": "s",
+        "file_unique_id": "s",
+        "type": "regular",
+        "width": 1,
+        "height": 1,
+        "is_animated": False,
+        "is_video": False,
+    }
+}
+LOCATION = {"location": {"latitude": 55.75, "longitude": 37.62}}
+
+
+async def send_stray(dispatcher, bot, update_factory, content=PHOTO):
+    await dispatcher.feed_update(bot, update_factory(None, user_id=OWNER, **content))
+    return messages(bot)[-1]
+
+
+@pytest.mark.parametrize(
+    ("steps", "prompt", "keyboard"),
+    [
+        (
+            ["Добавить платежи"],
+            texts.PAYMENTS_SOURCE_PROMPT,
+            ["По нашему шаблону", "Выгрузка из 1С", "Отмена"],
+        ),
+        (["Добавить платежи", "По нашему шаблону"], texts.PAYMENTS_PERIOD_PROMPT, ["Отмена"]),
+        (["Добавить платежи", "Выгрузка из 1С"], texts.EXPORT_INN_PROMPT, ["Отмена"]),
+    ],
+)
+async def test_a_file_at_a_typed_step_repeats_the_step_and_keeps_the_package(
+    setup, bot, update_factory, steps, prompt, keyboard
+):
+    """The payments file is at hand before the period or the INN is asked: the bot says what
+    the step needs and goes on; the accepted «Контрагенты» stay in the dialog."""
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    for step in steps:
+        await send(dispatcher, bot, update_factory, step)
+    data = payments_file([[INN_1, "P-1", date(2026, 7, 15), 100.0]])
+    reply = await send_document(dispatcher, bot, update_factory, data, name="platezhi.xlsx")
+    assert reply.text == texts.ATTACHMENT_NOT_HERE + "\n\n" + prompt
+    assert buttons(reply) == keyboard
+    assert texts.FILE_UNSUPPORTED not in reply.text
+    assert len((await repository.list_runs(OWNER))[0].files) == 1
+    reply = await send(dispatcher, bot, update_factory, "Отмена")
+    assert reply.text == texts.LEDGER_CANCELLED and buttons(reply) == LAUNCH_MENU
+    reply = await send(dispatcher, bot, update_factory, "Запустить проверку")
+    assert reply.text.startswith(texts.CHECK_QUEUED_PREFIX)
+
+
+@pytest.mark.parametrize("stray", [PHOTO, STICKER, LOCATION], ids=["photo", "sticker", "location"])
+async def test_a_stray_message_at_any_step_of_the_check_keeps_the_check(
+    setup, bot, update_factory, stray
+):
+    dispatcher, repository = setup
+    await send(dispatcher, bot, update_factory, "Новая проверка")
+    reply = await send_stray(dispatcher, bot, update_factory, stray)
+    assert reply.text == texts.ATTACHMENT_NOT_HERE + "\n\n" + texts.CHECK_DATE_PROMPT
+    assert buttons(reply) == ["Сегодня", "Отмена"]
+    await send(dispatcher, bot, update_factory, "01.09.2026")
+    reply = await send_stray(dispatcher, bot, update_factory, stray)
+    assert reply.text == texts.ATTACHMENT_NOT_HERE + "\n\n" + texts.CHECK_FILE_PROMPT
+    assert buttons(reply) == ["Отмена"]
+    await send_document(dispatcher, bot, update_factory, build_counterparties_template())
+    reply = await send_stray(dispatcher, bot, update_factory, stray)
+    assert reply.text == texts.ATTACHMENT_NOT_HERE + "\n\n" + texts.CHECK_CONFIRM
+    assert buttons(reply) == LAUNCH_MENU
+    await send(dispatcher, bot, update_factory, "Добавить историю долга")
+    reply = await send_stray(dispatcher, bot, update_factory, stray)
+    assert reply.text == texts.ATTACHMENT_NOT_HERE + "\n\n" + texts.HISTORY_FILE_PROMPT
+    await send(dispatcher, bot, update_factory, "Отмена")
+    reply = await send(dispatcher, bot, update_factory, "Запустить проверку")
+    assert reply.text.startswith(texts.CHECK_QUEUED_PREFIX)
+    assert (await repository.list_runs(OWNER))[0].status == RunStatus.QUEUED
+
+
+@pytest.mark.parametrize(
+    ("name", "size", "data", "first_line"),
+    [
+        ("vypiska.xls", None, None, "Нужен файл .xlsx"),
+        ("big.xlsx", 10 * 1024 * 1024 + 1, None, texts.FILE_TOO_LARGE_NOT_ADDED),
+        ("pay.xlsx", None, "payments", texts.CHECK_REJECTED_TITLE),
+    ],
+)
+async def test_a_wrong_file_at_confirmation_keeps_the_package_and_its_buttons(
+    setup, bot, update_factory, name, size, data, first_line
+):
+    """At confirmation «Отмена» drops the whole check: a refused file must not point to it."""
+    dispatcher, repository = await package_ready(setup, bot, update_factory)
+    if data == "payments":
+        content = payments_file([[INN_1, "P-1", date(2026, 7, 15), 100.0]])
+    else:
+        content = build_counterparties_template()
+    reply = await send_document(dispatcher, bot, update_factory, content, name=name, size=size)
+    assert reply.text.startswith(first_line)
+    assert texts.PACKAGE_KEPT in reply.text and "«Отмена»" not in reply.text
+    assert buttons(reply) == LAUNCH_MENU
+    reply = await send(dispatcher, bot, update_factory, "Запустить проверку")
+    assert reply.text.startswith(texts.CHECK_QUEUED_PREFIX)
+    assert len((await repository.list_runs(OWNER))[0].files) == 1

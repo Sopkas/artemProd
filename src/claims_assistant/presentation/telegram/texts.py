@@ -85,6 +85,17 @@ CHECK_FILE_PROMPT = (
 )
 FILE_NOT_XLSX = "Нужен файл .xlsx. Отправьте файл ещё раз или нажмите «Отмена»."
 FILE_TOO_LARGE = "Файл больше 10 МБ. Уменьшите выгрузку или нажмите «Отмена»."
+# At confirmation «Отмена» drops the whole check, so a refused file there names the step-3
+# buttons instead (review g7): the package and its keyboard stay.
+PACKAGE_KEPT = (
+    "Пакет сохранён. Платежи, историю долга, взаимодействия и отчёт по договорам "
+    "(выгрузки 1С — и в .xls) добавляйте кнопками ниже."
+)
+FILE_NOT_ADDED = "Нужен файл .xlsx, этот не добавлен."
+FILE_TOO_LARGE_NOT_ADDED = "Файл больше 10 МБ, не добавлен."
+# A file, a photo, a sticker or any other non-text message where the step waits for a
+# button, a date, a period or an INN: the step is repeated, the check goes on (review g7).
+ATTACHMENT_NOT_HERE = "Это сообщение на этом шаге не нужно, проверка продолжается."
 CHECK_REJECTED_TITLE = "Файл не принят"
 CHECK_SUMMARY_TITLE = "Пакет принят"
 CHECK_DUPLICATE = "Этот файл уже есть в пакете; повторно не добавлен."
@@ -223,10 +234,10 @@ def _issues_block(issues: tuple[ImportIssue, ...]) -> list[str]:
     return lines
 
 
-def package_rejected(issues: tuple[ImportIssue, ...]) -> str:
+def package_rejected(issues: tuple[ImportIssue, ...], *, kept: bool = False) -> str:
     lines = [f"{CHECK_REJECTED_TITLE}: пригодных строк нет."]
     lines.extend(_issues_block(issues))
-    lines.append("Исправьте файл и отправьте снова или нажмите «Отмена».")
+    lines.append(PACKAGE_KEPT if kept else "Исправьте файл и отправьте снова или нажмите «Отмена».")
     return "\n".join(lines)
 
 

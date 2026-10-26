@@ -74,6 +74,10 @@ def _money(values: dict[str, str | None], key: str, default: str) -> Decimal:
         amount = Decimal(raw)
     except InvalidOperation:
         raise ConfigurationError(f"{key}: укажите сумму в рублях, например 1000.") from None
+    # NaN broke the comparison below with a traceback, and Infinity lifted the agreed cap
+    # without a word (review g7): a limit is a finite sum.
+    if not amount.is_finite():
+        raise ConfigurationError(f"{key}: укажите сумму в рублях, например 1000.")
     if amount <= 0:
         raise ConfigurationError(f"{key}: сумма должна быть больше нуля.")
     return amount

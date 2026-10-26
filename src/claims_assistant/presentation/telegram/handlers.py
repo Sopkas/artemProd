@@ -199,11 +199,22 @@ def create_dispatcher(
     async def receive_package(message: Message, state: FSMContext, bot: Bot) -> None:
         document = message.document
         name = (document.file_name or "").lower()
+        # At confirmation the package is there and «Отмена» would drop it: a refusal keeps
+        # the launch keyboard and points to the step-3 buttons (review g7).
+        kept = await state.get_state() == CheckDialog.confirming
         if not name.endswith(".xlsx"):
-            await message.answer(texts.FILE_NOT_XLSX, reply_markup=cancel_menu())
+            if kept:
+                text = texts.FILE_NOT_ADDED + " " + texts.PACKAGE_KEPT
+                await message.answer(text, reply_markup=launch_menu())
+            else:
+                await message.answer(texts.FILE_NOT_XLSX, reply_markup=cancel_menu())
             return
         if document.file_size is None or document.file_size > texts.MAX_UPLOAD_BYTES:
-            await message.answer(texts.FILE_TOO_LARGE, reply_markup=cancel_menu())
+            if kept:
+                text = texts.FILE_TOO_LARGE_NOT_ADDED + " " + texts.PACKAGE_KEPT
+                await message.answer(text, reply_markup=launch_menu())
+            else:
+                await message.answer(texts.FILE_TOO_LARGE, reply_markup=cancel_menu())
             return
         data = await state.get_data()
         analysis_date = date.fromisoformat(data["analysis_date"])
@@ -229,7 +240,10 @@ def create_dispatcher(
             await message.answer(texts.package_conflict(result.reason), reply_markup=launch_menu())
             return
         if not isinstance(result, PackageAccepted):
-            await message.answer(texts.package_rejected(result.issues), reply_markup=cancel_menu())
+            await message.answer(
+                texts.package_rejected(result.issues, kept=kept),
+                reply_markup=launch_menu() if kept else cancel_menu(),
+            )
             return
         rows = dict(data.get("rows", {}))
         rows[result.file.id] = len(result.rows)
@@ -409,7 +423,37 @@ def create_dispatcher(
             reply_markup=launch_menu(),
         )
 
-    @router.message(F.document | F.photo | F.video | F.audio | F.voice | F.animation | F.video_note)
+    attachments = F.document | F.photo | F.video | F.audio | F.voice | F.animation | F.video_note
+
+    # What each step of the check waits for, to repeat it after a stray message.
+    step_prompts = {
+        CheckDialog.waiting_for_date: (texts.CHECK_DATE_PROMPT, date_menu),
+        CheckDialog.waiting_for_file: (texts.CHECK_FILE_PROMPT, cancel_menu),
+        CheckDialog.confirming: (texts.CHECK_CONFIRM, launch_menu),
+        CheckDialog.waiting_for_payments_source: (
+            texts.PAYMENTS_SOURCE_PROMPT,
+            payments_source_menu,
+        ),
+        CheckDialog.waiting_for_payments_period: (texts.PAYMENTS_PERIOD_PROMPT, cancel_menu),
+        CheckDialog.waiting_for_payments_file: (texts.PAYMENTS_FILE_PROMPT, cancel_menu),
+        CheckDialog.waiting_for_export_inn: (texts.EXPORT_INN_PROMPT, cancel_menu),
+        CheckDialog.waiting_for_export_file: (texts.EXPORT_FILE_PROMPT, cancel_menu),
+        CheckDialog.waiting_for_history_file: (texts.HISTORY_FILE_PROMPT, cancel_menu),
+        CheckDialog.waiting_for_interactions_file: (texts.INTERACTIONS_FILE_PROMPT, cancel_menu),
+        CheckDialog.waiting_for_debt_report_file: (texts.DEBT_REPORT_FILE_PROMPT, cancel_menu),
+    }
+
+    # A file sent before the period or the INN is typed, or a photo, a sticker or a location
+    # at any step, is not a reason to lose the package: the draft would stay in the base with
+    # nothing pointing to it (review g7). Any non-text message, not only `attachments`, so
+    # nothing but text reaches `fallback` mid-check. The step is repeated with its keyboard;
+    # files the step does take were caught above, text goes to the step handlers below.
+    @router.message(StateFilter(CheckDialog), ~F.text)
+    async def attachment_in_check(message: Message, state: FSMContext) -> None:
+        prompt, keyboard = step_prompts[await state.get_state()]
+        await message.answer(texts.ATTACHMENT_NOT_HERE + "\n\n" + prompt, reply_markup=keyboard())
+
+    @router.message(attachments)
     async def attachment(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(texts.FILE_UNSUPPORTED, reply_markup=main_menu())
@@ -472,6 +516,14 @@ def create_dispatcher(
         except RepositoryError as exc:
             # The user already has the file; a bookkeeping failure is not their problem.
             logger.error("report_delivery_unrecorded error_type=%s", type(exc).__name__)
+
+    # Before the INN step, or /check from the command menu is read there as a mistyped INN.
+    @router.message(Command("check"))
+    @router.message(F.text == NEW_CHECK)
+    async def new_check(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await state.set_state(CheckDialog.waiting_for_date)
+        await message.answer(texts.CHECK_DATE_PROMPT, reply_markup=date_menu())
 
     # --- INN card ---
 
@@ -566,13 +618,6 @@ def create_dispatcher(
         await message.answer(last, reply_markup=main_menu())
 
     # --- new check: date → file → launch ---
-
-    @router.message(Command("check"))
-    @router.message(F.text == NEW_CHECK)
-    async def new_check(message: Message, state: FSMContext) -> None:
-        await state.clear()
-        await state.set_state(CheckDialog.waiting_for_date)
-        await message.answer(texts.CHECK_DATE_PROMPT, reply_markup=date_menu())
 
     optional_steps = StateFilter(
         CheckDialog.waiting_for_payments_source,

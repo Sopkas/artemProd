@@ -487,3 +487,15 @@ def test_monitoring_time_must_be_a_clock_time(raw, tmp_path, monkeypatch):
     monkeypatch.setenv("MONITORING_TIME", raw)
     with pytest.raises(ConfigurationError, match="MONITORING_TIME"):
         Settings.load(tmp_path / "missing.env")
+
+
+@pytest.mark.parametrize("key", ["AI_RUN_RUB_LIMIT", "AI_MONTH_RUB_LIMIT"])
+@pytest.mark.parametrize("raw", ["NaN", "nan", "sNaN", "Infinity", "inf", "-Infinity"])
+def test_a_money_limit_must_be_a_finite_sum(tmp_path, monkeypatch, key, raw):
+    """NaN broke the comparison with a traceback; Infinity lifted the agreed cap silently."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv(key, raw)
+    with pytest.raises(ConfigurationError, match=key) as error:
+        Settings.load(tmp_path / "missing.env")
+    assert raw not in str(error.value)
