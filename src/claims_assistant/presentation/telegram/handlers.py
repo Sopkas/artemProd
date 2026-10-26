@@ -425,7 +425,7 @@ def create_dispatcher(
 
     attachments = F.document | F.photo | F.video | F.audio | F.voice | F.animation | F.video_note
 
-    # What each step of the check waits for, to repeat it after a stray attachment.
+    # What each step of the check waits for, to repeat it after a stray message.
     step_prompts = {
         CheckDialog.waiting_for_date: (texts.CHECK_DATE_PROMPT, date_menu),
         CheckDialog.waiting_for_file: (texts.CHECK_FILE_PROMPT, cancel_menu),
@@ -443,11 +443,12 @@ def create_dispatcher(
         CheckDialog.waiting_for_debt_report_file: (texts.DEBT_REPORT_FILE_PROMPT, cancel_menu),
     }
 
-    # A file sent before the period or the INN is typed, or a photo at any step, is not a
-    # reason to lose the package: the draft would stay in the base with nothing pointing to
-    # it (review g7). The step is repeated with its keyboard; files the step does take were
-    # caught above.
-    @router.message(StateFilter(CheckDialog), attachments)
+    # A file sent before the period or the INN is typed, or a photo, a sticker or a location
+    # at any step, is not a reason to lose the package: the draft would stay in the base with
+    # nothing pointing to it (review g7). Any non-text message, not only `attachments`, so
+    # nothing but text reaches `fallback` mid-check. The step is repeated with its keyboard;
+    # files the step does take were caught above, text goes to the step handlers below.
+    @router.message(StateFilter(CheckDialog), ~F.text)
     async def attachment_in_check(message: Message, state: FSMContext) -> None:
         prompt, keyboard = step_prompts[await state.get_state()]
         await message.answer(texts.ATTACHMENT_NOT_HERE + "\n\n" + prompt, reply_markup=keyboard())

@@ -939,13 +939,26 @@ async def test_the_export_is_taken_in_the_old_format_as_well(setup, bot, update_
     assert ".xls" in texts.EXPORT_FILE_PROMPT
 
 
-# --- an attachment at a step that does not take it (review g7) ----------------------
+# --- a non-text message at a step that does not take it (review g7) -------------------------
 
 PHOTO = {"photo": [{"file_id": "p", "file_unique_id": "p", "width": 1, "height": 1}]}
+# Not attachments, but just as likely to land mid-check: they must not drop it either.
+STICKER = {
+    "sticker": {
+        "file_id": "s",
+        "file_unique_id": "s",
+        "type": "regular",
+        "width": 1,
+        "height": 1,
+        "is_animated": False,
+        "is_video": False,
+    }
+}
+LOCATION = {"location": {"latitude": 55.75, "longitude": 37.62}}
 
 
-async def send_photo(dispatcher, bot, update_factory):
-    await dispatcher.feed_update(bot, update_factory(None, user_id=OWNER, **PHOTO))
+async def send_stray(dispatcher, bot, update_factory, content=PHOTO):
+    await dispatcher.feed_update(bot, update_factory(None, user_id=OWNER, **content))
     return messages(bot)[-1]
 
 
@@ -981,22 +994,25 @@ async def test_a_file_at_a_typed_step_repeats_the_step_and_keeps_the_package(
     assert reply.text.startswith(texts.CHECK_QUEUED_PREFIX)
 
 
-async def test_a_photo_at_any_step_of_the_check_keeps_the_check(setup, bot, update_factory):
+@pytest.mark.parametrize("stray", [PHOTO, STICKER, LOCATION], ids=["photo", "sticker", "location"])
+async def test_a_stray_message_at_any_step_of_the_check_keeps_the_check(
+    setup, bot, update_factory, stray
+):
     dispatcher, repository = setup
     await send(dispatcher, bot, update_factory, "Новая проверка")
-    reply = await send_photo(dispatcher, bot, update_factory)
+    reply = await send_stray(dispatcher, bot, update_factory, stray)
     assert reply.text == texts.ATTACHMENT_NOT_HERE + "\n\n" + texts.CHECK_DATE_PROMPT
     assert buttons(reply) == ["Сегодня", "Отмена"]
     await send(dispatcher, bot, update_factory, "01.09.2026")
-    reply = await send_photo(dispatcher, bot, update_factory)
+    reply = await send_stray(dispatcher, bot, update_factory, stray)
     assert reply.text == texts.ATTACHMENT_NOT_HERE + "\n\n" + texts.CHECK_FILE_PROMPT
     assert buttons(reply) == ["Отмена"]
     await send_document(dispatcher, bot, update_factory, build_counterparties_template())
-    reply = await send_photo(dispatcher, bot, update_factory)
+    reply = await send_stray(dispatcher, bot, update_factory, stray)
     assert reply.text == texts.ATTACHMENT_NOT_HERE + "\n\n" + texts.CHECK_CONFIRM
     assert buttons(reply) == LAUNCH_MENU
     await send(dispatcher, bot, update_factory, "Добавить историю долга")
-    reply = await send_photo(dispatcher, bot, update_factory)
+    reply = await send_stray(dispatcher, bot, update_factory, stray)
     assert reply.text == texts.ATTACHMENT_NOT_HERE + "\n\n" + texts.HISTORY_FILE_PROMPT
     await send(dispatcher, bot, update_factory, "Отмена")
     reply = await send(dispatcher, bot, update_factory, "Запустить проверку")
@@ -1007,7 +1023,7 @@ async def test_a_photo_at_any_step_of_the_check_keeps_the_check(setup, bot, upda
 @pytest.mark.parametrize(
     ("name", "size", "data", "first_line"),
     [
-        ("vypiska.xls", None, None, texts.FILE_NOT_ADDED),
+        ("vypiska.xls", None, None, "Нужен файл .xlsx"),
         ("big.xlsx", 10 * 1024 * 1024 + 1, None, texts.FILE_TOO_LARGE_NOT_ADDED),
         ("pay.xlsx", None, "payments", texts.CHECK_REJECTED_TITLE),
     ],

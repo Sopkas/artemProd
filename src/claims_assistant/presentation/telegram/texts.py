@@ -91,11 +91,11 @@ PACKAGE_KEPT = (
     "Пакет сохранён. Платежи, историю долга, взаимодействия и отчёт по договорам "
     "(выгрузки 1С — и в .xls) добавляйте кнопками ниже."
 )
-FILE_NOT_ADDED = "Файл не добавлен."
+FILE_NOT_ADDED = "Нужен файл .xlsx, этот не добавлен."
 FILE_TOO_LARGE_NOT_ADDED = "Файл больше 10 МБ, не добавлен."
-# A file or a photo where the step waits for a button, a date, a period or an INN: the
-# step is repeated, the check goes on (review g7).
-ATTACHMENT_NOT_HERE = "Это вложение на этом шаге не нужно, проверка продолжается."
+# A file, a photo, a sticker or any other non-text message where the step waits for a
+# button, a date, a period or an INN: the step is repeated, the check goes on (review g7).
+ATTACHMENT_NOT_HERE = "Это сообщение на этом шаге не нужно, проверка продолжается."
 CHECK_REJECTED_TITLE = "Файл не принят"
 CHECK_SUMMARY_TITLE = "Пакет принят"
 CHECK_DUPLICATE = "Этот файл уже есть в пакете; повторно не добавлен."
