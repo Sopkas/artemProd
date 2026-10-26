@@ -83,8 +83,15 @@ _LEVEL_WORDS = (
     (re.compile(r"средн"), {"medium"}),
     (re.compile(r"низк"), {"low"}),
 )
-# Inside a word too: «высокоприоритетный», «рисков».
-_LEVEL_ANCHOR = re.compile(r"приоритет|риск")
+# Inside a word too: «высокоприоритетный», «рисков». The nouns that say the same of the
+# case count as well — «срочность взыскания высокая», «уровень угрозы высокий» (review G2,
+# round 3); «срочно» and «важно» alone are advice, not a level, and do not.
+_LEVEL_ANCHOR = re.compile(r"приоритет|риск|уров(?:ень|н)|срочност|важност|угроз|опасност")
+# The next sentence keeps talking of the priority when it points back at it: «Приоритет
+# низкий. На наш взгляд, он высокий.», or opens with the level itself: «Приоритет низкий.
+# Высокий — по сути.». «Приоритет средний. Выручка низкая.» names its own subject and is
+# free. A pronoun about something else is rejected with them — the safe side again.
+_BACK_REFERENCE = frozenset({"он", "она", "оно", "его", "это", "этот", "эта", "такой", "таков"})
 # A sentence ends at «;», «!», «?» or at a dot before a capital letter or the end: «75 дн.
 # высокий» goes on, «3.5» is no end at all.
 _SENTENCE = re.compile(r"[;!?]|\.(?=\s+[A-ZА-ЯЁ«]|\s*$)")
@@ -421,11 +428,19 @@ def _priority_conflict(text: str, priority: str) -> bool:
     lowered = text.lower()
     if any(claim in lowered for claim in _PRIORITY_CLAIMS):
         return True
+    anchored = False
     for sentence in _SENTENCE.split(text):
         words = re.findall(r"\w+", sentence.lower())
-        anchored = any(_LEVEL_ANCHOR.search(word) for word in words)
-        for word in words:
-            agrees = next((levels for root, levels in _LEVEL_WORDS if root.match(word)), None)
+        levels = [
+            next((agrees for root, agrees in _LEVEL_WORDS if root.match(word)), None)
+            for word in words
+        ]
+        anchored = any(_LEVEL_ANCHOR.search(word) for word in words) or (
+            anchored
+            and bool(words)
+            and (levels[0] is not None or bool(_BACK_REFERENCE & set(words)))
+        )
+        for agrees in levels:
             if agrees is None or priority in agrees:
                 continue
             if "critical" in agrees or anchored:
