@@ -327,7 +327,10 @@ class SqliteWatchStore:
         values: dict[str, Any] = {
             "last_checked_on": record.day.isoformat(),
             "last_result": comparison_to_json(record.comparison, limited=record.limited),
-            "name": record.name,
+            # Only a gap is filled: the name in the record was read before the requests, and
+            # the owner's correction sent meanwhile must win (review of S8-09). The owner's
+            # own names are written by ``_add`` alone.
+            "name": func.coalesce(watchlist.c.name, record.name),
         }
         notices = record.comparison.to_notify
         if notices:
@@ -394,8 +397,11 @@ class SqliteWatchStore:
     async def day_finished(self, day: date) -> bool:
         return await self._run(self._day_finished, day)
 
-    async def start_day(self, day: date) -> None:
-        await self._run(self._start_day, day)
+    async def start_day(self, day: date) -> int:
+        return await self._run(self._start_day, day)
+
+    async def spend(self, day: date, used: int) -> None:
+        await self._run(self._spend, day, used)
 
     async def finish_day(self, day: date) -> None:
         await self._run(self._finish_day, day)
@@ -407,17 +413,29 @@ class SqliteWatchStore:
         with self._engine.connect() as connection:
             return connection.execute(query).scalar_one_or_none() is not None
 
-    def _start_day(self, day: date) -> None:
+    def _start_day(self, day: date) -> int:
+        """The day's row, made on its first attempt; the requests its attempts used so far."""
         with self._engine.begin() as connection:
-            exists = connection.execute(
-                select(monitoring_days.c.day).where(monitoring_days.c.day == day.isoformat())
-            ).first()
-            if exists is None:
+            used = connection.execute(
+                select(monitoring_days.c.requests_used).where(
+                    monitoring_days.c.day == day.isoformat()
+                )
+            ).scalar_one_or_none()
+            if used is None:
                 connection.execute(
                     insert(monitoring_days).values(
                         day=day.isoformat(), started_at=_stamp(self._clock())
                     )
                 )
+        return used or 0
+
+    def _spend(self, day: date, used: int) -> None:
+        with self._engine.begin() as connection:
+            connection.execute(
+                update(monitoring_days)
+                .where(monitoring_days.c.day == day.isoformat())
+                .values(requests_used=used)
+            )
 
     def _finish_day(self, day: date) -> None:
         with self._engine.begin() as connection:

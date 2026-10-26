@@ -16,6 +16,7 @@ from claims_assistant.domain.external import Section
 from claims_assistant.domain.monitoring import compare
 from claims_assistant.domain.watchlist import WatchEntry
 from claims_assistant.infrastructure.excel.watchlist import SHEET_NAME, TITLES, build_watchlist
+from claims_assistant.presentation.telegram.card import telegram_length
 from claims_assistant.presentation.telegram.monitoring import (
     MAX_CHANGES,
     MESSAGE_LIMIT,
@@ -129,6 +130,23 @@ def test_the_notes_close_a_cut_summary_whole():
     assert len(text) <= MESSAGE_LIMIT
     assert text.endswith("\n…\n\n" + "\n\n".join(notes))
     assert notes[1].endswith("Следующая проверка — сб 17.10.2026 в 09:00.")
+
+
+def test_a_cut_message_fits_telegram_in_its_own_units():
+    """Review of S8-09: the cut counted Python characters, but Telegram counts UTF-16 units
+    and 📋 or 🔔 take two — a cut ending on a line break at the last place came to 4097,
+    Telegram refused it, and the day's summary was never sent again."""
+    changes, gaps = with_new_case(), replace(gapped(), changes=())
+    weekly = NextCheck(Frequency.WEEKLY, date(2026, 10, 17), time(9, 0))
+    for pad in range(150, 260):
+        long = "ООО «" + "Я" * pad + "»"
+        checked = [Checked(f"77{n:08d}", long, changes) for n in range(10)]
+        checked += [Checked(f"78{n:08d}", long, gaps) for n in range(10)]
+        for notes in ((), (watch_next_check(weekly),)):
+            text = format_daily_summary(DAY, checked, notes)
+            assert telegram_length(text) <= MESSAGE_LIMIT, pad
+    # A single line longer than a message — no line break to cut at.
+    assert telegram_length(format_changes(INN, "Я" * 5000, changes, DAY)) <= MESSAGE_LIMIT
 
 
 def test_a_quiet_day_says_so_only_when_everything_was_read():

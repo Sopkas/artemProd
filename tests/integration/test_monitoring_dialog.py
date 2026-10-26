@@ -29,6 +29,7 @@ from claims_assistant.infrastructure.excel.reader import OpenpyxlSheetReader
 from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
 from claims_assistant.infrastructure.persistence.watch import SqliteWatchStore
 from claims_assistant.presentation.telegram import texts
+from claims_assistant.presentation.telegram.card import telegram_length
 from claims_assistant.presentation.telegram.handlers import create_dispatcher
 from claims_assistant.presentation.telegram.monitoring_dialog import names_in
 from claims_assistant.presentation.telegram.monitoring_notifier import (
@@ -373,6 +374,44 @@ async def test_the_overdue_threshold_comes_from_the_policy(bot, update_factory, 
         "Добавлено на мониторинг: 2.\n"
         "В отчёте 3 организации, просрочка больше 30 дн. — у 2 организаций."
     )
+
+
+async def test_a_long_reply_after_adding_comes_in_parts_telegram_takes(bot, update_factory, store):
+    """Review of S8-09: names up to 300 characters in the renamed and over-the-limit lines
+    made one reply longer than Telegram takes — refused after the list was already saved,
+    and the user read «попробуйте ещё раз»."""
+    service = MonitoringService(
+        store,
+        Source(),
+        TelegramMonitoringTexts(),
+        mode=DataMode.DEMO,
+        policy=MonitoringPolicy(limit=5),
+        clock=lambda: NOW,
+    )
+    dispatcher = create_dispatcher(
+        frozenset({OWNER}), reader=OpenpyxlSheetReader(), monitoring=service
+    )
+    listed = [inn10(f"7700001{n:02d}") for n in range(5)]
+    over = [inn10(f"7700002{n:02d}") for n in range(8)]
+
+    def long(mark: str) -> str:
+        return f"ООО «{mark} " + "Я" * 290 + "»"
+
+    await service.add(OWNER, [Candidate(inn, long("Старое")) for inn in listed])
+    rows = [["Наименование", "ИНН"]]
+    rows += [[long("Новое"), inn] for inn in listed]
+    rows += [[long("Сверх"), inn] for inn in over]
+    rows += [[long("Ошибка"), "123456789"] for _ in range(8)]
+    await send(dispatcher, bot, update_factory, "Мониторинг", "Добавить на мониторинг")
+    bot.session.calls.clear()
+    await send_file(dispatcher, bot, update_factory, workbook(rows))
+    replies = [call for call in bot.session.calls if isinstance(call, SendMessage)]
+    assert len(replies) > 1
+    assert all(telegram_length(reply.text) <= 4096 for reply in replies)
+    text = "\n".join(reply.text for reply in replies)
+    assert text.startswith("Добавлено на мониторинг: 0.") and texts.ERROR not in text
+    assert "Названия обновлены: 5." in text and "Сейчас на мониторинге: 5 из 5." in text
+    assert buttons(replies[-1]) == WATCH_MENU
 
 
 def test_the_policy_refuses_a_negative_threshold():

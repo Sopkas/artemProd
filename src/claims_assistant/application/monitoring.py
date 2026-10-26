@@ -8,7 +8,11 @@ reads is too (``presentation/telegram/monitoring``). Here is the rest:
   starts from a new baseline.
 - **One run a business day**, at the agreed time or later: a bot that was off at that
   hour runs when it starts. A run is resumable — a company checked today is not asked
-  again after a restart, so a crash costs no second day's requests.
+  again after a restart, and the requests the day has used are kept, so a crash costs no
+  second day's requests.
+- **One queue a day for every owner's list**: the longest unchecked first, whoever's they
+  are, the owners taking turns among equals — the day's requests are not the first
+  owner's every day (review of S8-09).
 - **The last successful snapshot of each section is kept**, not yesterday's: a case that
   appeared on a day the source was down is still new the next day (S8-06).
 - **Every message goes to an outbox first**, in the same transaction as the check it
@@ -236,7 +240,13 @@ class WatchStore(Protocol):
 
     async def day_finished(self, day: date) -> bool: ...
 
-    async def start_day(self, day: date) -> None: ...
+    async def start_day(self, day: date) -> int:
+        """The day's row; returns the requests its earlier attempts used."""
+        ...
+
+    async def spend(self, day: date, used: int) -> None:
+        """The requests the day has used so far: a restart goes on from them."""
+        ...
 
     async def finish_day(self, day: date) -> None: ...
 
@@ -292,17 +302,34 @@ def waits_for_limit(snapshots: Sequence[ExternalSnapshot]) -> bool:
     )
 
 
+def _queue_key(entry: WatchEntry, limited: frozenset[str]) -> tuple[bool, date]:
+    settled = entry.last_checked_on is not None and entry.inn not in limited
+    return settled, entry.last_checked_on or date.min
+
+
 def queue_order(
     entries: Sequence[WatchEntry], limited: frozenset[str] = frozenset()
 ) -> list[WatchEntry]:
     """Never checked and cut short by the limit last time first, then the longest
     unchecked; among equals, the store's order (newest first)."""
+    return sorted(entries, key=lambda entry: _queue_key(entry, limited))
 
-    def key(entry: WatchEntry) -> tuple[bool, date]:
-        settled = entry.last_checked_on is not None and entry.inn not in limited
-        return settled, entry.last_checked_on or date.min
 
-    return sorted(entries, key=key)
+def shared_queue(
+    lists: Sequence[tuple[int, Sequence[WatchEntry], frozenset[str]]],
+) -> list[tuple[int, WatchEntry]]:
+    """The day's one queue over every owner's due companies: ``queue_order`` across the
+    lists, and among equals the owners take turns — each one's first, then each one's
+    second. Owner by owner, the first list (the lowest Telegram ID) took the requests every
+    day and the next one waited for good, told every day it goes first next time (review of
+    S8-09)."""
+    ranked = [
+        (_queue_key(entry, limited), rank, position, owner_id, entry)
+        for position, (owner_id, entries, limited) in enumerate(lists)
+        for rank, entry in enumerate(queue_order(entries, limited))
+    ]
+    ranked.sort(key=lambda item: item[:3])
+    return [(owner_id, entry) for *_key, owner_id, entry in ranked]
 
 
 def failed_comparison(inn: str) -> Comparison:
@@ -411,36 +438,51 @@ class MonitoringService:
         return None if await self._store.day_finished(day) else day
 
     async def run_day(self, day: date) -> DayOutcome:
-        await self._store.start_day(day)
+        # The ceiling is the day's: an attempt after a restart or a failed run goes on from
+        # what the earlier ones used, not from a fresh budget (review of S8-09). The time
+        # limit is the attempt's own — it stops a hung run, it costs nothing.
+        spent = await self._store.start_day(day)
         budget = RunBudget.for_run(self.policy.max_requests, self.policy.max_seconds, self._clock())
+        budget.used = spent
         source = self._provider.scoped(budget)
         owners = await self._store.owners()
-        checked = changed = unchecked = failed = waiting = 0
+        checked = changed = unchecked = failed = 0
+        lists: list[tuple[int, list[WatchEntry], frozenset[str]]] = []
+        schedules: dict[int, WatchSettings] = {}
         for owner_id in owners:
-            waits = 0
             settings = await self._store.settings(owner_id)
             if settings.paused:
                 continue  # not a request on a pause, and no summary to say so
-            entries = await self._store.entries(owner_id)
             limited = await self._store.limited(owner_id)
-            for entry in queue_order(entries, limited):
-                if entry.last_checked_on == day:
-                    continue  # done before a restart
-                if not is_due(entry, day, settings, entry.inn in limited):
-                    continue
-                done = await self._check(owner_id, entry, day, source)
-                if done is None:
-                    continue  # taken off the list while it was being checked
-                if done is _WAITS:
-                    waits += 1
-                    continue
-                comparison, broke = done
-                checked += 1
-                changed += bool(comparison.to_notify)
-                unchecked += bool(comparison.unchecked)
-                failed += broke
-            waiting += waits
-            await self._summary(owner_id, day, settings, waits)
+            due = [
+                entry
+                for entry in await self._store.entries(owner_id)
+                # Not the ones done before a restart.
+                if entry.last_checked_on != day
+                and is_due(entry, day, settings, entry.inn in limited)
+            ]
+            lists.append((owner_id, due, limited))
+            schedules[owner_id] = settings
+        waits = dict.fromkeys(schedules, 0)
+        for owner_id, entry in shared_queue(lists):
+            done = await self._check(owner_id, entry, day, source)
+            if budget.used != spent:
+                spent = budget.used
+                await self._store.spend(day, spent)
+            if done is None:
+                continue  # taken off the list while it was being checked
+            if done is _WAITS:
+                waits[owner_id] += 1
+                continue
+            comparison, broke = done
+            checked += 1
+            changed += bool(comparison.to_notify)
+            unchecked += bool(comparison.unchecked)
+            failed += broke
+        # Each summary after the whole queue: an owner's companies are spread over it.
+        for owner_id, settings in schedules.items():
+            await self._summary(owner_id, day, settings, waits[owner_id])
+        waiting = sum(waits.values())
         await self._store.finish_day(day)
         keep = timedelta(days=self.policy.keep_messages_days)
         await self._store.purge_messages(self._clock() - keep)

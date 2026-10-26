@@ -138,19 +138,20 @@ def world(tmp_path):
     repository = open_sqlite_repository(tmp_path / "claims.sqlite3")
     clock = Clock(at(16))
     store = SqliteWatchStore(repository.engine, clock)
-    source = Source()
+    world = SimpleNamespace(store=store, source=Source(), clock=clock)
 
     def service(mode: DataMode = DataMode.DEMO, **policy) -> MonitoringService:
         return MonitoringService(
             store,
-            source,
+            world.source,
             TelegramMonitoringTexts(),
             mode=mode,
             policy=MonitoringPolicy(**policy),
             clock=clock,
         )
 
-    yield SimpleNamespace(store=store, source=source, clock=clock, service=service)
+    world.service = service
+    yield world
     repository.close()
 
 
@@ -442,6 +443,97 @@ async def test_a_day_nothing_could_be_asked_still_says_so(world):
         "📋 Мониторинг на 16.10.2026. Проверить не удалось: кончился лимит запросов к "
         "источнику. Ждут проверки: 1 организация, в следующий раз — в первую очередь."
     )
+
+
+class Metered(Source):
+    """The guard's budget as it is spent: five requests a company, the placeholder once
+    the run's requests are gone — the source itself is not asked then."""
+
+    def __init__(self, clock: Clock) -> None:
+        super().__init__()
+        self.clock = clock
+
+    async def fetch(self, request):
+        if self.budgets[-1].take(len(request.sections), self.clock()) < len(request.sections):
+            self.calls.append(request.inn)
+            demo = DemoCompanyDataProvider(DemoScenario.ORDINARY)
+            return tuple(out_of_requests(s) for s in await demo.fetch(request))
+        return await super().fetch(request)
+
+
+@pytest.fixture
+def metered(world):
+    world.source = Metered(world.clock)
+    return world
+
+
+def checked_today(entries, day: int) -> set[str]:
+    return {entry.inn for entry in entries if entry.last_checked_on == date(2026, 10, day)}
+
+
+async def test_one_owners_list_does_not_take_every_days_requests(metered):
+    """Review of S8-09: the queue was per owner and owners went by their Telegram ID — a
+    first list that used up the day left the next one waiting every day, each time told
+    «в следующий раз — в первую очередь». One queue across the owners, interleaved."""
+    world = metered
+    service = world.service(max_requests=2 * len(MONITORED))  # two companies a day
+    await service.add(OWNER, [Candidate(A), Candidate(B)])
+    await service.add(OTHER, [Candidate(C)])
+    outcome = await run(world, service, 16)
+    assert (outcome.checked, outcome.waiting) == (2, 1)
+    assert checked_today(await service.entries(OTHER), 16) == {C}
+    by_owner = {m.owner_id: m.text for m in await messages(world, 16)}
+    assert "Не дошла очередь: 1 организация" in by_owner[OWNER]
+    assert "Не дошла очередь" not in by_owner[OTHER]
+    # Then the one that waited goes first, and the oldest check after it.
+    await run(world, service, 17)
+    assert checked_today(await service.entries(OWNER), 17) == {A}
+    assert checked_today(await service.entries(OTHER), 17) == {C}
+    await run(world, service, 18)
+    assert checked_today(await service.entries(OWNER), 18) == {B}
+
+
+async def test_a_run_tried_again_the_same_day_keeps_the_days_requests(metered):
+    """Review of S8-09: every attempt of the day started a fresh budget, so a run that
+    failed at its end (the scheduler tries it again in 15 minutes) or a restart asked the
+    source about those left waiting with another full day's requests."""
+    world = metered
+    service = world.service(max_requests=2 * len(MONITORED))
+    await service.add(OWNER, [Candidate(A), Candidate(B), Candidate(C)])
+    finish_day = world.store.finish_day
+    world.store.finish_day = AsyncMock(side_effect=RuntimeError("database is locked"))
+    world.clock.now = at(16)
+    with pytest.raises(RuntimeError):
+        await service.run_day(await service.due())
+    assert world.source.budgets[-1].used == 2 * len(MONITORED)
+    asked = list(world.source.calls)
+    # A quarter of an hour later, the same business day: nothing left to spend.
+    world.store.finish_day = finish_day
+    world.clock.now = at(16, 9, 46)
+    outcome = await service.run_day(await service.due())
+    assert (outcome.checked, outcome.waiting) == (0, 1)
+    assert world.source.budgets[-1].used == 2 * len(MONITORED)
+    assert len(checked_today(await service.entries(OWNER), 16)) == 2
+    assert world.source.calls[len(asked) :] == [A]  # the guard's placeholder, not the source
+    # The next day has its own requests.
+    outcome = await run(world, service, 17)
+    assert outcome.checked == 2
+
+
+async def test_a_name_sent_while_the_company_is_checked_is_kept(world):
+    """Review of S8-09: the check wrote back the name read before its requests — a
+    correction sent meanwhile was lost, or the source's name replaced the owner's."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A, "Ошибка"), Candidate(B)])
+
+    async def corrected(inn):
+        if inn == B:  # B goes first (newest), A is checked after the correction
+            await service.add(OWNER, [Candidate(A, "ПАО «Исправлено»"), Candidate(B, "Своё")])
+
+    world.source.before_fetch = corrected
+    await run(world, service, 16)
+    names = {entry.inn: entry.name for entry in await service.entries(OWNER)}
+    assert names == {A: "ПАО «Исправлено»", B: "Своё"}
 
 
 # --- pause and frequency (S8-12) ---
