@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 from openpyxl import Workbook
+from openpyxl.styles import Border, Side
 
 from claims_assistant.application.imports import (
     CorruptWorkbook,
@@ -141,6 +142,17 @@ def test_error_reason_never_echoes_the_raw_inn():
         (4, 5, True),  # overdue days
         (4, -5, False),
         (4, 5.5, False),
+        # Review: str.isdigit() is true for «²», and int() then crashed the whole upload.
+        (4, "²", False),
+        (4, "5²", False),
+        (4, "--5", False),
+        (4, "12", True),
+        # Review: a sum pasted as a value keeps the binary double of what Excel computed —
+        # it shows «300,30» and must not be refused as finer than a kopeck.
+        (3, 100.1 * 3, True),
+        (3, 0.1 + 0.2, True),
+        (3, 1234.5600000000002, True),
+        (3, 1.005, False),  # a real third decimal is still refused
     ],
 )
 def test_debt_and_overdue_rules(field_index, value, ok):
@@ -223,6 +235,19 @@ def test_row_limit_is_enforced():
     assert "row_limit" in codes(result)
 
 
+def test_blank_rows_do_not_count_toward_the_row_limit():
+    """Review: blank rows used up the limit, so a short file was refused as too long."""
+    data = [[VALID_INN], [None], [""], ["  "], [None], [OTHER_INN]]
+    result = parse_counterparties(("ИНН",), rows(*data), ImportLimits(max_rows=3))
+    assert [r.inn for r in result.rows] == [VALID_INN, OTHER_INN]
+    assert result.issues == () and result.has_usable_rows
+
+
+def test_debt_artifact_of_a_float_is_read_to_the_kopeck():
+    result = parse(HEADERS, [OTHER_INN, None, date(2026, 9, 1), 100.1 * 3, None, None])
+    assert [r.debt for r in result.rows] == [Decimal("300.3")]
+
+
 # --- reader + pipeline over real .xlsx bytes ----------------------------------
 
 
@@ -257,6 +282,50 @@ def test_formula_in_real_xlsx_is_detected():
     result = import_counterparties(OpenpyxlSheetReader(), data)
     assert not result.rows
     assert "formula_forbidden" in codes(result)
+
+
+def formatted_tail_xlsx(data, tail):
+    """A sheet whose empty rows — ``None`` in ``data`` and ``tail`` rows below it — carry
+    only a border, as a formatted table range does; the reader gets every one of them."""
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = SHEET_NAME
+    worksheet.append(["ИНН"])
+    border = Border(bottom=Side(style="thin"))
+    for number, value in enumerate([*data, *[None] * tail], start=2):
+        cell = worksheet.cell(row=number, column=1)
+        if value is None:
+            cell.border = border
+        else:
+            cell.value = value
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def test_a_formatted_empty_range_does_not_block_a_short_file():
+    """Review: one INN above a bordered range longer than the limit was refused whole."""
+    limits = ImportLimits(max_rows=20)
+    data = formatted_tail_xlsx([VALID_INN], tail=50)
+    result = import_counterparties(OpenpyxlSheetReader(), data, limits)
+    assert [r.inn for r in result.rows] == [VALID_INN]
+    assert result.issues == () and result.has_usable_rows
+
+
+def test_data_after_a_long_formatted_gap_is_still_read():
+    """Blank rows do not use up the reader's window either, so nothing past them is cut."""
+    limits = ImportLimits(max_rows=20)
+    data = formatted_tail_xlsx([VALID_INN, *[None] * 40, OTHER_INN], tail=5)
+    result = import_counterparties(OpenpyxlSheetReader(), data, limits)
+    assert [r.inn for r in result.rows] == [VALID_INN, OTHER_INN]
+    assert result.issues == ()
+
+
+def test_the_row_limit_still_counts_rows_with_data_between_blanks():
+    limits = ImportLimits(max_rows=3)
+    data = formatted_tail_xlsx([VALID_INN, None, OTHER_INN] * 2, tail=5)
+    result = import_counterparties(OpenpyxlSheetReader(), data, limits)
+    assert "row_limit" in codes(result)
 
 
 def test_corrupt_file_becomes_a_file_error():

@@ -143,6 +143,23 @@ def parse_date(cell: Cell) -> date | None:
     raise CellError("date_invalid", "Дата не распознана.")
 
 
+def _float_amount(value: float) -> Decimal:
+    """A numeric cell as the amount it shows, without the noise of binary arithmetic.
+
+    Excel keeps the double it computed: 10,10 + 20,20 pasted as a value is stored as
+    30.299999999999997 and shown as «30,30». A double holds 15 significant digits
+    reliably, so when the shortest form has more than two decimals, the value cut to 15
+    digits is taken instead — the noise goes, a real third decimal (1.005) stays and is
+    refused as before. A text or Decimal cell is read exactly; this is for floats only.
+    """
+    exact = Decimal(str(value))
+    if exact.is_finite() and exact.as_tuple().exponent < -2:
+        rounded = Decimal(format(value, ".15g"))
+        if rounded.as_tuple().exponent >= -2:
+            return rounded
+    return exact
+
+
 def parse_amount(cell: Cell, *, prefix: str, label: str, positive: bool = False) -> Decimal | None:
     """Rubles to the kopeck; a decimal comma and group separators are accepted.
 
@@ -157,7 +174,7 @@ def parse_amount(cell: Cell, *, prefix: str, label: str, positive: bool = False)
     if isinstance(cell, int):
         dec = Decimal(cell)
     elif isinstance(cell, float):
-        dec = Decimal(str(cell))
+        dec = _float_amount(cell)
     elif isinstance(cell, Decimal):
         dec = cell
     elif isinstance(cell, str):
@@ -276,9 +293,15 @@ def data_rows(
     sheet: str,
     issues: list[ImportIssue],
 ) -> Iterator[tuple[int, tuple[Cell, ...]]]:
-    """Non-blank data rows up to the limit; exceeding it is one error and the rest is cut."""
+    """Non-blank data rows up to the limit; exceeding it is one error and the rest is cut.
+
+    Blank rows are skipped before they are counted: a formatted empty range below the
+    table is not data and must not use up the limit of a short sheet.
+    """
     seen = 0
     for row_number, cells in rows:
+        if all(is_blank(cell) for cell in cells):
+            continue
         seen += 1
         if seen > max_rows:
             issues.append(
@@ -291,8 +314,6 @@ def data_rows(
                 )
             )
             return
-        if all(is_blank(cell) for cell in cells):
-            continue
         yield row_number, cells
 
 

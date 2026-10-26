@@ -142,7 +142,9 @@ def _overdue_days(cell: Cell) -> int | None:
         value = int(dec)
     elif isinstance(cell, str):
         text = cell.strip()
-        if not text.lstrip("-").isdigit():
+        # ASCII digits only: str.isdigit() is true for «²» as well, and int() refuses it.
+        digits = text.removeprefix("-")
+        if not (digits.isascii() and digits.isdigit()):
             raise _CellError("overdue_not_integer", "Дней просрочки должно быть целым числом.")
         value = int(text)
     else:
@@ -257,6 +259,9 @@ def parse_counterparties(
     order: list[str] = []
     seen = 0
     for row_number, cells in rows:
+        # Blank rows first, so they do not count: a formatted empty range is not data.
+        if all(_is_blank(cell) for cell in cells):
+            continue
         seen += 1
         if seen > limits.max_rows:
             issues.append(
@@ -268,8 +273,6 @@ def parse_counterparties(
                 )
             )
             break
-        if all(_is_blank(cell) for cell in cells):
-            continue
         row_issues, parsed = _parse_row(row_number, cells, fields, analysis_date)
         if parsed is None:
             issues.extend(row_issues)

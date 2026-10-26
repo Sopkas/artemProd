@@ -185,6 +185,11 @@ class OpenpyxlSheetReader:
             if offset == 0:
                 header = cells
                 continue
+            # An empty row — a formatted range below the table gives thousands — is not
+            # data: it is left out and does not use up the window, or a short sheet would
+            # be cut at the limit and data after a long gap lost.
+            if all(cell is None or (isinstance(cell, str) and not cell.strip()) for cell in cells):
+                continue
             rows.append((offset + 1, cells))
             # One extra row past the limit lets the parser report the overflow.
             if len(rows) > limits.max_rows:

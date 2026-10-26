@@ -139,6 +139,41 @@ def test_totals_and_filter_rows_are_not_data():
     assert all("Итого" not in c.name for c in result.counterparties)
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["Итоговые решения, ООО", "Отчетность-Сервис, ООО", "ОТБОРНОЕ ЗЕРНО ООО", "Итого Плюс, ООО"],
+)
+def test_a_client_named_like_a_service_row_is_a_counterparty(name):
+    """Review: «Итоговые решения, ООО» was skipped as an «Итого» row, and its contract
+    went to the client above it — someone else's debt in a claim, and nothing said."""
+    rows = legend() + [
+        row(0, "Департамент"),
+        row(2, "Ромашка, ООО"),
+        row(4, "Договор 1", amount=100, overdue=100, days=30),
+        row(2, name),
+        row(4, "Договор 2", amount=200, overdue=200, days=90),
+        row(0, "Итого", amount=300),
+    ]
+    result = read_debt_report(rows)
+    assert [(c.name, c.total_overdue, c.worst_days) for c in result.counterparties] == [
+        ("Ромашка, ООО", Decimal("100"), 30),
+        (name, Decimal("200"), 90),
+    ]
+    assert result.issues == ()
+
+
+@pytest.mark.parametrize("title", ["Итого", "ИТОГО:", "Итого по точке продаж", "Отбор:  Дней"])
+def test_the_service_rows_in_their_own_forms_are_still_skipped(title):
+    rows = report()
+    rows.insert(3 + len(legend()), row(2, title))  # even at the counterparty indent
+    result = read_debt_report(rows)
+    assert [c.name for c in result.counterparties] == [
+        "РОМАШКА ООО",
+        "Данилов Максим Владимирович, ИП",
+    ]
+    assert result.contracts == 3 and result.issues == ()
+
+
 # The filtered table of the customer's print: the same legend, other column positions.
 SHIFTED = {
     "name": 0,

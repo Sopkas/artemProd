@@ -17,7 +17,13 @@ import pytest
 
 from claims_assistant.application.company_data import CompanyDataRequest
 from claims_assistant.domain.external import Coverage, FactKind, FetchStatus, Section
-from claims_assistant.domain.scoring import INTENT_WINDOW_DAYS, Priority, assess
+from claims_assistant.domain.scoring import (
+    INTENT_WINDOW_DAYS,
+    Assessment,
+    Priority,
+    Signal,
+    assess,
+)
 from claims_assistant.infrastructure.checko import company_data as checko
 from claims_assistant.infrastructure.checko import courts, fedresurs
 from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
@@ -359,6 +365,33 @@ async def test_the_court_case_alone_is_enough():
     snapshots = [s for s in await customers_debtor() if s.section is not Section.FEDRESURS]
     assessment = assess(INN, snapshots, analysis_date=NOW.date())
     assert [s.code for s in assessment.signals] == ["bankruptcy_filed"]
+
+
+CHECK_THE_EVENT = "Проверить событие и документы по указанному источнику."
+
+
+async def test_a_filing_asks_to_check_the_case_not_to_work_as_usual():
+    """Review of S8-01: a high with a bankruptcy filing said «Работать в обычном порядке»
+    in the report's «Рекомендация», the template explanation and the AI context."""
+    assessment = assess(INN, await customers_debtor(), analysis_date=NOW.date())
+    assert assessment.next_step == CHECK_THE_EVENT
+
+
+async def test_a_creditors_notice_asks_to_check_it_not_to_work_as_usual():
+    assessment = assess(INN, await snapshots_with_intent("2026-03-20"), analysis_date=NOW.date())
+    assert [s.code for s in assessment.signals] == ["bankruptcy_intent"]
+    assert assessment.next_step == CHECK_THE_EVENT
+
+
+@pytest.mark.parametrize("code", ["bankruptcy_filed", "bankruptcy_intent"])
+def test_a_bankruptcy_signal_outranks_overdue_in_the_next_step(code):
+    """With an overdue as well, the court case is still the first thing to look at."""
+    signals = (
+        Signal(code, Priority.HIGH, "Банкротство."),
+        Signal("overdue_60", Priority.HIGH, "Просрочка."),
+    )
+    assessment = Assessment(INN, Priority.HIGH, signals, (), {}, True)
+    assert assessment.next_step == CHECK_THE_EVENT
 
 
 async def test_an_old_filing_notice_without_a_case_is_history():

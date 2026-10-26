@@ -20,7 +20,9 @@ Three things it does not have and one it gives for free:
 
 - **no ИНН** — the file is per counterparty, named in the header only; the INN comes from
   the dialog, where the user already said whose file this is;
-- **no payment id** — the number inside «Документ» («00БП-036835») serves as one;
+- **no payment id** — the number inside «Документ» with its date («00БП-036835 от
+  02.09.2024») serves as one: 1C starts the numbering anew every year, so the number alone
+  repeats across a file of several years;
 - **no single amount** — receipts are in «Поступление», and a row with «Списание» is an
   outgoing payment, which the contract does not accept yet: it is skipped and reported;
 - **the covered period is in the header** («Дата начала»/«Дата окончания»), so the user
@@ -39,7 +41,7 @@ from claims_assistant.domain.sheet_rules import Cell, FormulaCell, issue
 
 MAX_HEADER_ROWS = 20  # the header block of a 1C print is short; beyond that we give up
 TOTALS_WORD = "итого"
-_DOCUMENT_NUMBER = re.compile(r"[0-9A-ZА-ЯЁ]+-[0-9]+")
+_DOCUMENT_NUMBER = re.compile(r"([0-9A-ZА-ЯЁ]+-[0-9]+)(?:\s+от\s+(\d{2}\.\d{2}\.\d{4}))?")
 _HEADER_VALUE = re.compile(r"^\s*([^:]{2,40}):\s*(.+?)\s*$")
 _DATE_TEXT = re.compile(r"^\s*(\d{2})\.(\d{2})\.(\d{4})")
 
@@ -129,13 +131,22 @@ def find_table(rows: list[tuple[Cell, ...]]) -> int | None:
 
 
 def payment_id(document: Cell) -> Cell:
-    """The document's own number («00БП-036835»), or the whole line if there is none."""
+    """The document's number with its date («00БП-036835 от 02.09.2024»), or the whole
+    line if there is no number.
+
+    The date is part of the id because 1C restarts the numbering every year: «00БП-000123»
+    of 2025 and of 2026 are two receipts, and by the number alone the later one was refused
+    as a conflict, so the payment age came from the older date. The time is left out — the
+    same document printed twice is still one payment. A line with a number and no date
+    gives the number alone.
+    """
     text = _text(document)
     if text is None:
         return None
     match = _DOCUMENT_NUMBER.search(text)
     if match is not None:
-        return match.group()
+        number, day = match.groups()
+        return number if day is None else f"{number} от {day}"
     return text[:100]
 
 
