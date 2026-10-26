@@ -50,7 +50,9 @@ class GuardPolicy:
     max_pages: int = 20
     max_retries: int = 2
     backoff_seconds: float = 1.0
-    # Budget of one interactive card (plain fetch): a few sections with retries. A minute:
+    # Budget of one interactive card (plain fetch): a few sections with retries; later
+    # EFRSB pages get only what the other sections' retries leave (six sections: four
+    # pages after the first, review G5). A minute:
     # the sections are asked at once now, and a source still silent after that is down —
     # better said than waited for (18.10.2026: a card took three minutes).
     single_check_requests: int = 20
@@ -161,11 +163,19 @@ class GuardedCompanyDataProvider:
                 results[section] = _source_limited(request.inn, section, self._mode, self._clock())
             pending = []
 
+        # Units a later page may not take: the retries still owed to the other sections of
+        # this round. The pages arrive while those sections are in flight, and a card's 20
+        # went to fifteen EFRSB pages before a timed-out company section could be retried
+        # (review G5). The paging section itself already answered — it is never retried.
+        reserve = 0
+
         def next_request() -> float | None:
             # A later page is a request like any other: one unit of the budget, and its
             # timeout ends with the budget's deadline (review G5: a card charged one unit
             # for twenty EFRSB pages and ran past its minute page by page).
             now = self._clock()
+            if reserve and budget.max_requests - budget.used <= reserve:
+                return None  # not spent yet: the rest is held for those retries
             if budget.take(1, now) == 0:
                 return None
             return min(self._policy.timeout_seconds, (budget.deadline - now).total_seconds())
@@ -191,6 +201,7 @@ class GuardedCompanyDataProvider:
             if left < limits.timeout_seconds:
                 # No request outlives the budget's deadline.
                 limits = replace(limits, timeout_seconds=left)
+            reserve = (self._policy.max_retries - attempt) * (len(pending) - 1)
             inner_request = CompanyDataRequest(
                 inn=request.inn,
                 sections=tuple(pending),

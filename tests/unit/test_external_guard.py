@@ -366,6 +366,48 @@ async def test_a_later_page_gets_only_the_time_the_budget_has_left(clock, sleeps
     assert snapshot.interrupted.code == BUDGET_EXHAUSTED and budget.used == 3
 
 
+class FlakyCompany:
+    """Checko's company section: times out on the first ask, answers on the next."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def request(self, key, inn, timeout):
+        self.calls += 1
+        if self.calls == 1:
+            raise TimeoutError
+        data = {
+            "ИНН": inn,
+            "ОГРН": "0000000000000",
+            "НаимСокр": "ДЕМО ТЕСТ",
+            "ДатаВып": "2026-09-01",
+            "Статус": {"Код": "001", "Наим": "Действует"},
+        }
+        return 200, {"meta": {"status": "ok"}, "data": data}
+
+
+async def test_later_pages_leave_the_other_sections_their_retries(clock, sleeps):
+    """Review G5: on a card the EFRSB pages came while the company section was in flight
+    and took all 20 units, so its timeout was never retried. Pages now stop where the
+    retries still owed to the other sections begin; the sample says it was cut."""
+    pages, company = EfrsbPages(clock, total=50), FlakyCompany()
+    provider = guard(
+        CheckoCompanyDataProvider(
+            "synthetic-key", company, clock=clock, bankruptcy_transport=pages
+        ),
+        clock,
+        sleeps,
+    )
+    card, bankruptcy = await provider.fetch(
+        CompanyDataRequest(INN, (Section.COMPANY, Section.BANKRUPTCY))
+    )
+    assert company.calls == 2 and card.status is FetchStatus.OK
+    # 20 units: two first asks, sixteen later pages, the company's two retries held back
+    # (one of them spent).
+    assert len(pages.timeouts) == 1 + 16
+    assert bankruptcy.interrupted.code == BUDGET_EXHAUSTED
+
+
 def test_a_card_waits_a_minute_at_most():
     assert GuardPolicy().single_check_seconds == 60
 
