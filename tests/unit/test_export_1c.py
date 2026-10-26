@@ -253,6 +253,54 @@ def test_the_same_document_printed_twice_is_still_one_payment():
     assert [issue.code for issue in result.issues] == ["duplicate_payment"]
 
 
+def test_one_document_split_into_lines_keeps_every_amount():
+    """Review: one receipt printed as several lines — one per «Назначение платежа» — shares
+    the document; with one id the second line was refused as a conflict and 2500 lost."""
+    document = "Поступление на расчетный счет 00БП-000777 от 10.09.2026 10:00:00"
+    deposit = ("10.09.2026", document, "", "Обеспечительный платеж", "", 1000, None)
+    monthly = ("10.09.2026", document, "", "Оплата ежемесячного платежа", "", 2500, None)
+    result, _ = run(export_rows([deposit, monthly]), analysis_date=date(2026, 10, 26))
+    assert [(row.payment_id, row.amount) for row in result.rows] == [
+        ("00БП-000777 от 10.09.2026", Decimal("1000")),
+        ("00БП-000777 от 10.09.2026 #2", Decimal("2500")),
+    ]
+    assert result.issues == ()
+
+
+def test_lines_of_one_document_differing_only_in_purpose_are_two_payments():
+    document = "Поступление 00БП-5 от 10.09.2024"
+    first = ("10.09.2024", document, "", "Договор 1", "", 1000, None)
+    second = ("10.09.2024", document, "", "Договор 2", "", 1000, None)
+    result, _ = run(export_rows([first, second]))
+    assert [row.payment_id for row in result.rows] == [
+        "00БП-5 от 10.09.2024",
+        "00БП-5 от 10.09.2024 #2",
+    ]
+    assert result.issues == ()
+
+
+def test_a_reprinted_line_of_a_split_document_is_still_a_duplicate():
+    """The ordinal follows the line, not the row: a reprint of the second line gets «#2»
+    again and is reported as a duplicate, not taken as a third payment."""
+    document = "Поступление 00БП-5 от 10.09.2024"
+    first = ("10.09.2024", document, "", "Договор 1", "", 1000, None)
+    second = ("10.09.2024", document, "", "Договор 2", "", 2500, None)
+    result, _ = run(export_rows([first, second, second]))
+    assert [row.amount for row in result.rows] == [Decimal("1000"), Decimal("2500")]
+    assert [issue.code for issue in result.issues] == ["duplicate_payment"]
+    assert result.issues[0].row == 10
+
+
+def test_a_numbered_line_id_stays_within_the_contract_length():
+    document = "Без номера " + "х" * 120  # no number: the id is the line cut to 100
+    first = ("10.09.2024", document, "", "", "", 1000, None)
+    second = ("10.09.2024", document, "", "", "", 2500, None)
+    result, _ = run(export_rows([first, second]))
+    ids = [row.payment_id for row in result.rows]
+    assert len(ids) == 2 and ids[1].endswith(" #2") and len(ids[1]) == 100
+    assert result.issues == ()
+
+
 def test_the_table_is_found_below_the_block_and_nowhere_else():
     rows = export_rows()
     assert find_table(rows) == 6

@@ -9,6 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import pytest
+import xlrd
 
 from claims_assistant.application.imports import CorruptWorkbook, SheetMissing, WorkbookTooLarge
 from claims_assistant.domain.counterparties import FormulaCell, ImportLimits
@@ -106,3 +107,79 @@ def test_the_indent_is_read_from_both_formats(tmp_path):
 def test_an_oversized_legacy_outline_is_refused(data):
     with pytest.raises(WorkbookTooLarge):
         OpenpyxlSheetReader().read_outline(data, ImportLimits(max_unpacked_bytes=16))
+
+
+# --- blank rows and the row window (review g1) ---
+
+
+class _FakeCell:
+    def __init__(self, value):
+        self.ctype = xlrd.XL_CELL_EMPTY if value is None else xlrd.XL_CELL_TEXT
+        self.value = "" if value is None else value
+
+
+class _FakeSheet:
+    def __init__(self, rows):
+        self._rows = rows
+        self.nrows, self.ncols = len(rows), max(len(row) for row in rows)
+
+    def cell(self, row, column):
+        return _FakeCell(self._rows[row][column])
+
+
+class _FakeBook:
+    """xlrd's book as far as the reader uses it; xlwt is not installed to write one."""
+
+    datemode = 0
+
+    def __init__(self, name, rows):
+        self._name, self._sheet = name, _FakeSheet(rows)
+
+    def sheet_names(self):
+        return [self._name]
+
+    def sheet_by_name(self, name):
+        return self._sheet
+
+    def sheet_by_index(self, index):
+        return self._sheet
+
+    def release_resources(self):
+        pass
+
+
+@pytest.fixture
+def gap_book(monkeypatch):
+    """«Контрагенты»: one INN, a blank gap of 30 rows, then a second INN."""
+    rows = [("ИНН",), ("7707083893",), *[(None,)] * 30, ("1234567894",)]
+    monkeypatch.setattr(
+        "claims_assistant.infrastructure.excel.reader.xlrd.open_workbook",
+        lambda **_kwargs: _FakeBook("Контрагенты", rows),
+    )
+
+
+def test_a_blank_gap_in_an_xls_does_not_use_up_the_row_window(gap_book, data):
+    """Review: the .xls path counted blank rows in the window while the .xlsx path and
+    the parsers no longer did, so a gap longer than the cap lost the rows after it
+    without a word (on main the same file at least gave a row_limit error)."""
+    header, body = OpenpyxlSheetReader().read(data, "Контрагенты", ImportLimits(max_rows=3))
+    assert header == ("ИНН",)
+    assert body == [(2, ("7707083893",)), (33, ("1234567894",))]  # Excel row numbers
+
+
+def test_both_inns_after_a_blank_gap_are_imported_from_an_xls(gap_book, data):
+    from claims_assistant.application.imports import import_counterparties
+
+    result = import_counterparties(OpenpyxlSheetReader(), data, ImportLimits(max_rows=3))
+    assert [row.inn for row in result.rows] == ["7707083893", "1234567894"]
+    assert [issue.code for issue in result.issues] == []
+
+
+def test_the_xls_window_still_stops_one_row_past_the_limit(monkeypatch, data):
+    rows = [("ИНН",), *[(str(n),) for n in range(10)]]
+    monkeypatch.setattr(
+        "claims_assistant.infrastructure.excel.reader.xlrd.open_workbook",
+        lambda **_kwargs: _FakeBook("Контрагенты", rows),
+    )
+    _, body = OpenpyxlSheetReader().read(data, "Контрагенты", ImportLimits(max_rows=3))
+    assert [number for number, _ in body] == [2, 3, 4, 5]  # the extra one shows the overflow

@@ -12,6 +12,8 @@ be stale. Callers tell the formats apart with ``is_legacy_xls`` and warn the use
 
 import io
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, time
 
 import xlrd
@@ -36,15 +38,17 @@ def is_legacy_xls(source: bytes) -> bool:
     return source[:8] == _OLE2_MAGIC
 
 
+def _is_blank(cells: tuple[Cell, ...]) -> bool:
+    return all(cell is None or (isinstance(cell, str) and not cell.strip()) for cell in cells)
+
+
 class OpenpyxlSheetReader:
     """Read a named sheet from an .xlsx given as bytes, a path or a binary stream."""
 
     def read(self, source: object, sheet: str, limits: ImportLimits) -> Sheet:
         data = self._as_bytes(source)
         if is_legacy_xls(data):
-            rows = self._legacy_rows(data, limits, sheet)
-            header = rows[0] if rows else ()
-            return header, [(index + 2, cells) for index, cells in enumerate(rows[1:])]
+            return self._legacy_table(data, limits, sheet)
         self._guard_unpacked_size(data, limits)
         try:
             workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
@@ -188,7 +192,7 @@ class OpenpyxlSheetReader:
             # An empty row — a formatted range below the table gives thousands — is not
             # data: it is left out and does not use up the window, or a short sheet would
             # be cut at the limit and data after a long gap lost.
-            if all(cell is None or (isinstance(cell, str) and not cell.strip()) for cell in cells):
+            if _is_blank(cells):
                 continue
             rows.append((offset + 1, cells))
             # One extra row past the limit lets the parser report the overflow.
@@ -197,10 +201,11 @@ class OpenpyxlSheetReader:
         return header, rows
 
     @staticmethod
-    def _legacy_rows(
+    @contextmanager
+    def _legacy_sheet(
         data: bytes, limits: ImportLimits, sheet: str | None
-    ) -> tuple[tuple[Cell, ...], ...]:
-        """Rows of an old-format .xls; the sheet by name, or the first one."""
+    ) -> Iterator[tuple[object, object]]:
+        """An old-format .xls opened at one sheet — by name, or the first one."""
         if len(data) > limits.max_unpacked_bytes:
             raise WorkbookTooLarge()
         try:
@@ -211,21 +216,53 @@ class OpenpyxlSheetReader:
             if sheet is not None and sheet not in book.sheet_names():
                 raise SheetMissing(sheet)
             worksheet = book.sheet_by_name(sheet) if sheet is not None else book.sheet_by_index(0)
+            yield book, worksheet
+        finally:
+            book.release_resources()
+
+    @staticmethod
+    def _legacy_row(book: object, worksheet: object, index: int) -> tuple[Cell, ...]:
+        return tuple(
+            OpenpyxlSheetReader._legacy_cell(worksheet.cell(index, column), book.datemode)
+            for column in range(worksheet.ncols)
+        )
+
+    @staticmethod
+    def _legacy_rows(
+        data: bytes, limits: ImportLimits, sheet: str | None
+    ) -> tuple[tuple[Cell, ...], ...]:
+        """Every row of an old-format .xls, header block included."""
+        with OpenpyxlSheetReader._legacy_sheet(data, limits, sheet) as (book, worksheet):
             rows = []
             for index in range(worksheet.nrows):
-                rows.append(
-                    tuple(
-                        OpenpyxlSheetReader._legacy_cell(
-                            worksheet.cell(index, column), book.datemode
-                        )
-                        for column in range(worksheet.ncols)
-                    )
-                )
+                rows.append(OpenpyxlSheetReader._legacy_row(book, worksheet, index))
                 if len(rows) > limits.max_rows + MAX_EXPORT_HEADER_ROWS:
                     break
             return tuple(rows)
-        finally:
-            book.release_resources()
+
+    @staticmethod
+    def _legacy_table(data: bytes, limits: ImportLimits, sheet: str | None) -> Sheet:
+        """The header and data rows of an .xls, windowed as ``_extract`` windows an .xlsx.
+
+        Blank rows are skipped before the window, not counted in it: counted, a long gap
+        cut the sheet short and the rows after it were lost without a word, while the
+        parsers — which no longer count blank rows — saw no overflow to report.
+        """
+        with OpenpyxlSheetReader._legacy_sheet(data, limits, sheet) as (book, worksheet):
+            header: tuple[Cell, ...] = ()
+            rows: list[tuple[int, tuple[Cell, ...]]] = []
+            for index in range(worksheet.nrows):
+                cells = OpenpyxlSheetReader._legacy_row(book, worksheet, index)
+                if index == 0:
+                    header = cells
+                    continue
+                if _is_blank(cells):
+                    continue
+                rows.append((index + 1, cells))  # the Excel row number
+                # One extra row past the limit lets the parser report the overflow.
+                if len(rows) > limits.max_rows:
+                    break
+            return header, rows
 
     @staticmethod
     def _legacy_cell(cell: object, datemode: int) -> Cell:
