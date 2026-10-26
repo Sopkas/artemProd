@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
-from claims_assistant.domain.ai_context import RecommendationContext
+from claims_assistant.domain.ai_context import CommentLine, RecommendationContext
 
 ANSWER_SCHEMA_VERSION = "1"
 MAX_EXPLANATION_CHARS = 1200
@@ -40,6 +40,8 @@ _PROMISE_FIELDS = {"interaction_id", "due_on", "quote"}
 _NUMBER = re.compile(r"-?\d[\d  ]*(?:[.,]\d+)?")
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _RU_DATE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b")
+# «оплатить 15.09.» in a comment: a date without its year, never a part of «15.09.2026».
+_SHORT_DATE = re.compile(r"(?<![\d.,])(\d{1,2})\.(\d{2})(?!\.?\d)")
 _MONTHS = (
     "января", "февраля", "марта", "апреля", "мая", "июня",
     "июля", "августа", "сентября", "октября", "ноября", "декабря",
@@ -63,8 +65,23 @@ _SCALE = re.compile(
 _SCALES = (Decimal(1000), Decimal(1_000_000), Decimal(1_000_000_000))
 
 # The priority is the rules' answer; naming another one or asking to change it is a reason
-# to reject, whatever the wording around it.
-_PRIORITY_WORDS = {"critical": "критичн", "high": "высок", "medium": "средн", "low": "низк"}
+# to reject, whatever the wording around it. A level is a word of its own and the priority
+# levels it agrees with: «невысокий» is not «высокий». «Критический» and «критичный» name
+# the top level wherever they stand (the adverb «критически важно» does not); the other
+# words do so only next to «приоритет» or «риск» — «выручка низкая», «нагрузка высокая»
+# and «в среднем» are about the debtor, not about the rules' answer.
+_LEVEL_WORDS = (
+    (re.compile(r"критич(?:н|еск(?!и$))"), {"critical"}),
+    (re.compile(r"высок"), {"high"}),
+    (re.compile(r"невысок"), {"medium", "low"}),
+    (re.compile(r"средн"), {"medium"}),
+    (re.compile(r"низк"), {"low"}),
+)
+_LEVEL_ANCHOR = re.compile(r"приоритет|риск")
+# Words apart: «риск остаётся высоким» names a level, «приоритет средний: выручка низкая»
+# does not.
+_LEVEL_WINDOW = 2
+_CLAUSE = re.compile(r"[.,;!?()]")
 _PRIORITY_CLAIMS = (
     "приоритет должен",
     "снизить приоритет",
@@ -152,6 +169,32 @@ def _dates(text: str) -> set[date]:
             found.add(date(year, month, day))
         except ValueError:
             continue
+    return found
+
+
+def _ahead(day: int, month: int, year: int | None, written_on: date) -> date | None:
+    """A date as a comment means it: without a year, the first one on or after the day
+    the comment was written — «оплатят 15.01.» in December is January of the next year."""
+    try:
+        if year is not None:
+            return date(year, month, day)
+        found = date(written_on.year, month, day)
+        return found if found >= written_on else date(written_on.year + 1, month, day)
+    except ValueError:
+        return None
+
+
+def _comment_dates(comment: CommentLine) -> set[date]:
+    """Every date of a comment, as people write them: «15.09.2026», «15 сентября 2026
+    года», «15 сентября» and «15.09.» — a promise is checked against these."""
+    found = _dates(comment.text)
+    written = [
+        *_word_dates(comment.text),
+        *((int(day), int(month), None) for day, month in _SHORT_DATE.findall(comment.text)),
+    ]
+    for day, month, year in written:
+        if (known := _ahead(day, month, year, comment.happened_on)) is not None:
+            found.add(known)
     return found
 
 
@@ -257,28 +300,45 @@ def _rounds_to(known: Decimal, value: Decimal) -> bool:
 
 
 def _context_text(context: RecommendationContext) -> str:
-    """Everything the model was given, as one text: what may be quoted back."""
+    """Everything the model was given, as one text: what may be quoted back.
+
+    Each field is a line of its own: a number may have spaces inside («1 234»), so a
+    comment ending in «50000» joined by a space to the ОГРН after it read as one number,
+    and «2025 2025» of two record IDs as 20252025. The years of a period go apart, as
+    the period itself is cut out as dates: «выручка за 2025 год» retells it.
+    """
     parts = [
         context.next_step,
         context.analysis_date.isoformat(),
-        *(f"{value.title} {value.value} {value.observed_on or ''}" for value in context.values),
+        *(f for value in context.values for f in (value.title, value.value, value.observed_on)),
         *(
-            f"{fact.title} {fact.value} {fact.observed_on or ''} "
-            f"{fact.period or ''} {fact.unit or ''}"
+            f
             for fact in context.facts
+            for f in (
+                fact.title,
+                fact.value,
+                fact.observed_on,
+                fact.period,
+                *(year for year, _, _ in _ISO_DATE.findall(fact.period or "")),
+                fact.unit,
+                fact.record_id,
+            )
         ),
         *(
-            f"{signal.reason} {signal.value or ''} {signal.observed_on or ''}"
+            f
             for signal in context.signals
+            for f in (signal.reason, signal.value, signal.observed_on)
         ),
         *(
-            f"{comment.interaction_id} {comment.happened_on.isoformat()} {comment.text}"
+            f
             for comment in context.comments
+            for f in (comment.interaction_id, comment.happened_on, comment.text)
         ),
-        *(fact.record_id or "" for fact in context.facts),
         *context.missing_data,
+        # Told to the model so that it can say what is missing (instruction, rule 7).
+        context.comments_omitted or None,
     ]
-    return " ".join(str(part) for part in parts)
+    return "\n".join(str(part) for part in parts if part is not None)
 
 
 def _field(data: dict[str, Any], key: str, kind: type, required: bool = True) -> Any:
@@ -336,11 +396,13 @@ def _promises(raw: list[Any], context: RecommendationContext) -> tuple[Promise, 
         except ValueError:
             return _reject(RejectionCode.PROMISE_WITHOUT_DATE, interaction_id)
         # The date must be in the comment the promise points at, not invented next to it.
-        if day not in _dates(comment.text):
+        if day not in _comment_dates(comment):
             return _reject(RejectionCode.PROMISE_NOT_IN_COMMENT, interaction_id)
         if quote is not None and quote not in comment.text:
             return _reject(RejectionCode.PROMISE_NOT_IN_COMMENT, interaction_id)
-        promises.append(Promise(interaction_id=interaction_id, due_on=day, quote=quote))
+        # The report names the customer's own record, not the masked one the model saw.
+        record = comment.unmasked_id or interaction_id
+        promises.append(Promise(interaction_id=record, due_on=day, quote=quote))
     return tuple(promises)
 
 
@@ -353,7 +415,16 @@ def _priority_conflict(text: str, priority: str) -> bool:
     lowered = text.lower()
     if any(claim in lowered for claim in _PRIORITY_CLAIMS):
         return True
-    return any(word in lowered for name, word in _PRIORITY_WORDS.items() if name != priority)
+    for clause in _CLAUSE.split(lowered):
+        words = re.findall(r"\w+", clause)
+        anchors = [i for i, word in enumerate(words) if _LEVEL_ANCHOR.match(word)]
+        for i, word in enumerate(words):
+            agrees = next((levels for root, levels in _LEVEL_WORDS if root.match(word)), None)
+            if agrees is None or priority in agrees:
+                continue
+            if "critical" in agrees or any(abs(i - a) <= _LEVEL_WINDOW for a in anchors):
+                return True
+    return False
 
 
 def review_answer(payload: object, context: RecommendationContext) -> Explanation | Rejected:
@@ -403,7 +474,7 @@ def review_answer(payload: object, context: RecommendationContext) -> Explanatio
     ids = _id_pattern(internal | {comment.interaction_id for comment in context.comments})
     source = _strip_ids(_context_text(context), ids)
     text_only = _strip_ids(text, ids)
-    known_dates = _dates(source)
+    known_dates = _dates(source).union(*(_comment_dates(c) for c in context.comments))
     for day in _dates(text_only) - known_dates:
         return _reject(RejectionCode.NEW_DATE, day.isoformat())
     for day, month, year in _word_dates(text_only):

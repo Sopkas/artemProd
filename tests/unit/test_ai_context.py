@@ -12,6 +12,7 @@ import pytest
 
 from claims_assistant.domain.ai_context import (
     CONTEXT_VERSION,
+    FACT_CAPS,
     INSTRUCTION,
     INSTRUCTION_VERSION,
     ContextLimits,
@@ -21,7 +22,7 @@ from claims_assistant.domain.ai_context import (
 )
 from claims_assistant.domain.counterparties import CounterpartyRow
 from claims_assistant.domain.debt_history import DebtSnapshot
-from claims_assistant.domain.external import Period
+from claims_assistant.domain.external import FactKind, Period
 from claims_assistant.domain.indicators import internal_indicators
 from claims_assistant.domain.interactions import InteractionRow
 from claims_assistant.domain.payments import PaymentRow
@@ -141,6 +142,46 @@ def test_the_inn_never_rides_along_inside_an_identifier():
     assert {line.id for line in kept.facts} == {f.id for f in snaps[0].facts} | {
         f.id for f in snaps[1].facts
     } | {f.id for f in snaps[2].facts}
+
+
+def test_the_inn_in_a_comment_or_its_record_id_is_masked_too():
+    """Review G2: a comment is free text, and an employee may write the debtor's INN into
+    it or into the record ID; with the INN kept back neither carries it out."""
+    note = talk(DAY, f"Претензия направлена должнику (ИНН {INN}).", interaction_id=f"{INN}-1")
+    context = context_for(interactions=[note], ref="row-7")
+    assert INN not in json.dumps(build_request(context).context, ensure_ascii=False)
+    (comment,) = context.comments
+    assert comment.interaction_id == "row-7-1" and "(ИНН row-7)" in comment.text
+    assert comment.unmasked_id == f"{INN}-1"  # kept here, never sent
+    assert "unmasked_id" not in context.as_dict()["comments"][0]
+    # Sent on purpose, the INN stays where the employee wrote it.
+    limits = ContextLimits(include_inn=True, include_comments=True)
+    (kept,) = context_for(interactions=[note], limits=limits).comments
+    assert kept.interaction_id == f"{INN}-1" and INN in kept.text and kept.unmasked_id is None
+
+
+def test_efrsb_messages_are_capped_though_one_signal_cites_them_all():
+    """Review G2: the rules' one signal for EFRSB cites every message, so the cap of 10
+    never applied — 150 messages of a big creditor made 31 276 characters of 24 000."""
+    events = [
+        {
+            "Дата": (date(2026, 1, 1) + timedelta(days=n)).isoformat(),
+            "GUID": f"g-{n}",
+            "Тип": "ArbitralDecree",
+            "ТипНаим": "Решение",
+        }
+        for n in range(150)
+    ]
+    context = context_for(snaps=snapshots(events=events))
+    sent = [fact for fact in context.facts if fact.title == "Сообщение ЕФРСБ"]
+    assert len(sent) == FACT_CAPS[FactKind.BANKRUPTCY_EVENT]
+    assert max(fact.observed_on for fact in sent) == date(2026, 1, 1) + timedelta(days=149)
+    assert any("в запросе 10 новейших из 150" in note for note in context.missing_data)
+    (signal,) = [s for s in context.signals if s.code == "unresolved_bankruptcy_event"]
+    # The signal keeps its count, and cites only what went: a cut ID is no ground.
+    assert signal.value == "150"
+    assert set(signal.fact_ids) == {fact.id for fact in sent}
+    assert len(json.dumps(build_request(context).context, ensure_ascii=False)) < 12_000
 
 
 def test_record_ids_of_the_sources_can_be_dropped():
@@ -269,6 +310,13 @@ def test_request_is_json_ready_and_carries_both_versions():
     assert versions() == f"контекст {CONTEXT_VERSION}, инструкция {INSTRUCTION_VERSION}"
     # Nothing about the package, the user, the run or the files travels with it.
     assert not {"run_id", "owner_id", "files", "package", "stored_path"} & set(request.context)
+
+
+def test_instruction_keeps_signal_codes_out_of_grounds_as_the_review_does():
+    """Review G2: v2 said «коды сигналов пиши только в grounds», and the review rejects a
+    signal code there (unknown_ground) — a model without the schema's enum followed it."""
+    assert "Коды сигналов не пиши нигде — ни в explanation,\n   ни в grounds." in INSTRUCTION
+    assert "коды сигналов пиши только в grounds" not in INSTRUCTION
 
 
 def test_instruction_forbids_changing_the_priority_and_inventing_facts():
