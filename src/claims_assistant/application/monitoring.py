@@ -30,6 +30,7 @@ from claims_assistant.domain.external import DataMode, ExternalSnapshot, FactKin
 from claims_assistant.domain.monitoring import MONITORED, Comparison, SectionState, compare
 from claims_assistant.domain.watchlist import (
     WATCH_LIMIT,
+    WATCH_OVERDUE_DAYS,
     AddResult,
     Candidate,
     RemoveResult,
@@ -150,10 +151,14 @@ class MonitoringPolicy:
     # Sent messages hold names and cases; they are kept no longer than the checks are.
     keep_messages_days: int = 30
     limit: int = WATCH_LIMIT
+    # A 1C report sent for monitoring brings only those overdue more than this (S8-14).
+    overdue_days: int = WATCH_OVERDUE_DAYS
 
     def __post_init__(self) -> None:
         if self.max_requests <= 0 or self.max_seconds <= 0 or self.limit <= 0:
             raise ValueError("Monitoring limits must be positive")
+        if self.overdue_days < 0:
+            raise ValueError("Monitoring overdue days must not be negative")
 
 
 @dataclass(frozen=True, slots=True)

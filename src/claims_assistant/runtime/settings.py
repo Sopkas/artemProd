@@ -8,6 +8,7 @@ from pathlib import Path
 from aiogram.utils.token import TokenValidationError, validate_token
 from dotenv import dotenv_values
 
+from claims_assistant.domain.watchlist import WATCH_OVERDUE_DAYS
 from claims_assistant.infrastructure.demo.company_data import DemoScenario
 
 
@@ -51,6 +52,9 @@ class MonitoringSettings:
     run_at: time = time(9, 0)
     quiet_summary: bool = True
     request_limit: int = 1000
+    # From a 1C report only companies overdue more than this go on the list (S8-14): «Всех
+    # с просрочкой больше 60 дней», the customer's answer of 17.10.2026.
+    overdue_days: int = WATCH_OVERDUE_DAYS
 
 
 def _clock_time(values: dict[str, str | None], key: str, default: time) -> time:
@@ -239,6 +243,9 @@ class Settings:
             quiet_summary=_switch(values, "MONITORING_QUIET_SUMMARY", "true"),
             request_limit=_number(
                 values, "MONITORING_REQUEST_LIMIT", 1000, integer=True, minimum=1
+            ),
+            overdue_days=_number(
+                values, "MONITORING_OVERDUE_DAYS", WATCH_OVERDUE_DAYS, integer=True, minimum=0
             ),
         )
         return cls(

@@ -341,7 +341,9 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
         buffer = BytesIO()
         await bot.download(document, destination=buffer)
         try:
-            listed = read_watch_file(buffer.getvalue(), reader)
+            listed = read_watch_file(
+                buffer.getvalue(), reader, overdue_days=service.policy.overdue_days
+            )
         except WorkbookError as error:
             await message.answer(
                 f"{error.reason} {texts.WATCH_FILE_UNREADABLE}", reply_markup=cancel_menu()
@@ -358,6 +360,7 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
             repeats=listed.repeats,
             without_inn=listed.without_inn,
             from_file=True,
+            cut=listed.cut,
         )
 
     @router.message(MonitorDialog.removing, _ours)
