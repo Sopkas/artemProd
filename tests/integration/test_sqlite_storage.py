@@ -107,7 +107,7 @@ def _interloper(repository, path, trigger: str, sql: str, params=()):
     return outcome
 
 
-async def test_a_run_revived_during_its_purge_keeps_its_files(tmp_path):
+async def test_a_run_cannot_be_revived_while_its_records_are_purged(tmp_path):
     path = tmp_path / "claims.sqlite3"
     old = datetime(2026, 1, 1, tzinfo=UTC)
     repository = open_sqlite_repository(path, clock=lambda: old)
@@ -125,6 +125,7 @@ async def test_a_run_revived_during_its_purge_keeps_its_files(tmp_path):
         )
         deleted = await repository.delete_run(run.id, datetime(2026, 8, 1, tzinfo=UTC))
         # The revival has to wait for the purge: the run and its records go together.
+        # Only the records are guarded; the files on disk were removed before this lock.
         assert revival == ["locked"] and deleted is True
         with pytest.raises(RunNotFound):
             await repository.get_run(OWNER, run.id)
