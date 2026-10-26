@@ -277,3 +277,131 @@ async def test_the_card_does_not_show_a_namesakes_contracts(deps):
     )
     assert context.contracts == ()
     assert _replace  # the import is used by the helper above
+
+
+async def test_a_resumed_check_leaves_the_card_the_link_its_report_was_built_with(deps):
+    """The link was saved before the report and written once: a pass cut short with
+    «Василёк» unnamed (a transient failure) left the card without its contracts, while the
+    resumed pass named it and gave them to it in the report."""
+    from tests.unit.test_analysis_pipeline import CountingProvider
+
+    report = debt_report([("АО «Василёк»", [("Дог-B", 300, 300_000.0, "Кран")])])
+    run = (await package(deps, report)).run
+    provider = CountingProvider(NamingProvider(), failing={INN_2})
+    cut_short = pipeline(deps["files"], deps["repository"], guard(provider))
+
+    def died(_report):
+        raise RuntimeError("the process died while the report was being built")
+
+    cut_short._build_report = died
+    with pytest.raises(RuntimeError):
+        await cut_short.process(run)
+
+    provider.failing.clear()
+    resumed = await pipeline(deps["files"], deps["repository"], guard(provider)).process(run)
+    assert resumed.status in (RunStatus.COMPLETED, RunStatus.PARTIAL)
+    data = deps["files"].read((await deps["repository"].get_report(OWNER, run.id)).stored_path)
+    assert [(row[0], row[2]) for row in sheet_rows(data, "Договоры") if row[0]] == [
+        (INN_2, "Дог-B")
+    ]
+    await finish(deps, run)
+    context = await internal_context(
+        OWNER, INN_2, deps["repository"], deps["files"], deps["reader"], steps=deps["repository"]
+    )
+    assert [contract.name for contract in context.contracts] == ["Дог-B"]
+
+
+async def test_a_company_the_source_does_not_name_is_linked_by_the_owners_own_name(deps):
+    """S7-02: the source names no ИП, so their contracts were never linked. The name of the
+    «Контрагенты» row stands in, and the match is put up for a glance."""
+    from dataclasses import replace as _replace
+
+    from claims_assistant.domain.external import FactKind
+
+    class Silent(NamingProvider):
+        async def fetch(self, request):
+            snapshots = await super().fetch(request)
+            if request.inn != INN_2:
+                return snapshots
+            return tuple(
+                _replace(s, facts=tuple(f for f in s.facts if f.kind is not FactKind.COMPANY_NAME))
+                for s in snapshots
+            )
+
+    # The sample row of INN_2 is called «ООО «Синтетический контрагент»» in «Контрагенты».
+    report = debt_report([("Синтетический контрагент, ООО", [("Дог-S", 45, 1.0, "Станок")])])
+    run = (await package(deps, report)).run
+    await pipeline(deps["files"], deps["repository"], guard(Silent())).process(run)
+    data = deps["files"].read((await deps["repository"].get_report(OWNER, run.id)).stored_path)
+    assert [(row[0], row[2]) for row in sheet_rows(data, "Договоры") if row[0]] == [
+        (INN_2, "Дог-S")
+    ]
+    quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
+    assert "по названию из файла «Контрагенты»" in quality
+
+
+INN_ELSEWHERE = "7736050003"  # a valid INN that is not in the check
+
+
+def debt_report_with_inn(counterparties) -> bytes:
+    """The other variant of the print: an «ИНН» column next to the name."""
+    book = Workbook()
+    sheet = book.active
+    rows: list[tuple[int, list]] = [
+        (0, ["Отчет по просроченным лизинговым платежам на дату"]),
+        (0, ["Точка продаж", "ИНН", "Предмет лизинга", "Сумма", "Дней"]),
+        (0, ["Контрагент"]),
+        (0, ["Договор лизинга"]),
+        (0, ["Департамент регионального развития"]),
+    ]
+    for name, inn, contracts in counterparties:
+        rows.append((2, [name, inn]))
+        for contract, days, amount, subject in contracts:
+            rows.append((4, [contract, None, subject, amount, days]))
+    for indent, values in rows:
+        sheet.append(values)
+        sheet.cell(row=sheet.max_row, column=1).alignment = Alignment(indent=indent)
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
+async def test_an_inn_printed_in_the_report_keeps_a_namesakes_contracts_off_the_check(deps):
+    """The report prints another INN under the name of a company of the check: the
+    contracts went to that company, silently, because only the name was looked at."""
+    report = debt_report_with_inn(
+        [(DEMO_NAME, INN_ELSEWHERE, [("Дог-Ч", 400, 900_000.0, "Тягач")])]
+    )
+    run = (await package(deps, report)).run
+    await pipeline(deps["files"], deps["repository"], guard(NamingProvider())).process(run)
+    data = deps["files"].read((await deps["repository"].get_report(OWNER, run.id)).stored_path)
+    assert not any(row[0] == INN_1 for row in sheet_rows(data, "Договоры"))
+    quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
+    assert "не отнесены ни к одной организации" in quality
+
+
+async def test_two_reports_naming_two_inns_alike_are_not_one_client_printed_twice(deps):
+    """A name taken by the first report was dropped from the second as «the same client»,
+    although the two reports print two different INNs for it."""
+    run = (
+        await package(
+            deps,
+            debt_report_with_inn([(DEMO_NAME, INN_ELSEWHERE, [("Дог-Ч", 400, 1.0, "Тягач")])]),
+        )
+    ).run
+    await accept_debt_report(
+        OWNER,
+        run.id,
+        debt_report_with_inn([(DEMO_NAME, INN_1, [("Дог-1", 307, 1.0, "Экскаватор")])]),
+        repository=deps["repository"],
+        files=deps["files"],
+        reader=deps["reader"],
+    )
+    run = await deps["repository"].get_run(OWNER, run.id)
+    await pipeline(deps["files"], deps["repository"], guard(NamingProvider())).process(run)
+    data = deps["files"].read((await deps["repository"].get_report(OWNER, run.id)).stored_path)
+    assert [(row[0], row[2]) for row in sheet_rows(data, "Договоры") if row[0]] == [
+        (INN_1, "Дог-1")
+    ]
+    quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
+    assert "двух отчётах" not in quality

@@ -55,6 +55,9 @@ class PurgeSummary:
     removed: int  # runs whose records were deleted
     failed: int  # runs left in place because their files could not be removed
     dry_run: bool = False
+    # Runs that came back to life (a draft launched) while their files were being removed:
+    # the records stay, the files are gone, and the check will fail asking for a new upload.
+    revived: int = 0
 
 
 async def purge_expired(
@@ -70,7 +73,7 @@ async def purge_expired(
         raise ValueError("Retention must be a positive period")
     before = now - retention
     expired = await repository.list_expired(before)
-    removed = failed = 0
+    removed = failed = revived = 0
     for run in expired:
         if dry_run:
             continue
@@ -88,7 +91,16 @@ async def purge_expired(
         if await repository.delete_run(run.id, before):
             removed += 1
             logger.info("run_purged run_id=%s status=%s", run.id, run.status)
-    return PurgeSummary(expired=len(expired), removed=removed, failed=failed, dry_run=dry_run)
+        else:
+            # Launched between the re-check and here: the records are kept (the condition
+            # travels with the delete), but the files are already gone, so the check will
+            # fail with «загрузите заново». Closing this window needs the store to hold the
+            # run while its files go; until then it is at least never silent.
+            revived += 1
+            logger.error("purge_run_revived_without_files run_id=%s", run.id)
+    return PurgeSummary(
+        expired=len(expired), removed=removed, failed=failed, dry_run=dry_run, revived=revived
+    )
 
 
 class RetentionSweeper:
@@ -115,10 +127,11 @@ class RetentionSweeper:
             self._repository, self._files, retention=self._retention, now=self._clock()
         )
         logger.info(
-            "retention_sweep expired=%s removed=%s failed=%s",
+            "retention_sweep expired=%s removed=%s failed=%s revived=%s",
             summary.expired,
             summary.removed,
             summary.failed,
+            summary.revived,
         )
         return summary
 

@@ -114,6 +114,18 @@ async def test_context_comes_from_the_newest_finished_check_that_names_the_inn(t
     assert other.indicators.debt.trend is DebtTrend.NO_BASE
 
 
+async def test_an_older_check_behind_several_newer_ones_still_feeds_the_card(tmp_path):
+    """Only the five newest checks were searched: a portfolio check followed by five small
+    ones took the portfolio's companies off the card, still inside the retention period."""
+    deps = deps_for(tmp_path)
+    portfolio = await finished_check(deps, with_files=False)
+    small = (CounterpartyRow(inn="1234567894", cutoff_date=DAY, debt=Decimal("1.00")),)
+    for _ in range(6):
+        await finished_check(deps, small, with_files=False)
+    context = await internal_context(OWNER, INN, **deps)
+    assert context is not None and context.run.id == portfolio
+
+
 async def test_no_context_without_a_finished_check_or_for_another_owner(tmp_path):
     deps = deps_for(tmp_path)
     assert await internal_context(OWNER, INN, **deps) is None

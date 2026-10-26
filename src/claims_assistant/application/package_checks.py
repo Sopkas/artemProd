@@ -42,7 +42,7 @@ from claims_assistant.domain.payments import PaymentRow
 from claims_assistant.domain.plural import of_companies as _companies
 
 from .check_package import FileStorage, StorageError
-from .contract_link import merge_repeats, normalize_name
+from .contract_link import merge_repeats, normalize_name, same_company
 from .imports import OutlineReader, SheetReader, import_counterparties
 from .ledger_imports import import_debt_history, import_interactions, import_payments
 
@@ -65,7 +65,8 @@ class PackageReview:
     interactions: tuple[InteractionRow, ...]
     issues: tuple[ImportIssue, ...]  # every file's issues plus the cross-file ones
     # S7-01: the counterparties of the customer's overdue report with their contracts.
-    # They carry no INN: linking to the rows above happens by name, later (contract_link).
+    # Linked to the rows above later (contract_link): by the INN where the report prints
+    # one, by name where it does not.
     contracts: tuple[CounterpartyDebt, ...] = ()
     # INN → {DEBT_HISTORY_CONFLICT, LAST_PAYMENT_CONFLICT}: which indicator is unknown
     # for which company because the files contradict each other.
@@ -337,7 +338,8 @@ async def _read_debt_reports(
 
     Inside one report, the entries of one name are one company (``merge_repeats``). A
     counterparty named in two reports keeps the contracts of the first one: two prints of
-    the same client are two views of one debt, and adding them up would double it.
+    the same client are two views of one debt, and adding them up would double it. Two
+    INNs under one name are two clients, not two prints of one.
     """
     attached = [file for file in run.files if file.kind is FileKind.DEBT_REPORT]
     if not attached:
@@ -347,7 +349,9 @@ async def _read_debt_reports(
     issues: list[ImportIssue] = []
     counterparties: list[CounterpartyDebt] = []
     counts: dict[str, int] = {}
-    seen: dict[str, str] = {}  # normalised name → the file that brought it first
+    # Normalised name → (file, INN) of the companies already taken; inside one file the
+    # entries were already joined or kept apart by ``merge_repeats``.
+    seen: dict[str, list[tuple[str, str | None]]] = {}
     for file in attached:
         data = await asyncio.to_thread(files.read, file.stored_path)
         rows = await asyncio.to_thread(reader.read_outline, data, limits)
@@ -357,7 +361,8 @@ async def _read_debt_reports(
         counts[file.id] = sum(len(counterparty.contracts) for counterparty in merged)
         for counterparty in merged:
             key = normalize_name(counterparty.name)
-            if key in seen:
+            taken = seen.get(key, ())
+            if any(f != file.id and same_company(inn, counterparty.inn) for f, inn in taken):
                 issues.append(
                     _package_issue(
                         "debt_report_duplicate_across_files",
@@ -367,7 +372,7 @@ async def _read_debt_reports(
                     )
                 )
                 continue
-            seen[key] = file.id
+            seen.setdefault(key, []).append((file.id, counterparty.inn))
             counterparties.append(counterparty)
     return tuple(counterparties), issues, counts
 
