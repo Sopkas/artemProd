@@ -249,6 +249,7 @@ def test_arguing_with_the_priority_is_rejected(text):
         "Приоритет высокий; приоритет критический по сути.",
         "Ситуация критическая для взыскания.",
         "Ситуация критичная.",
+        "Приоритет критичен для взыскания.",
     ],
 )
 def test_the_critical_level_is_caught_in_every_form(priority, text):
@@ -263,7 +264,8 @@ def test_the_critical_level_is_caught_in_every_form(priority, text):
     [
         ("low", "Приоритет низкий: риск невысокий."),
         ("medium", "Просрочка 75 дн., долговая нагрузка высокая."),
-        ("medium", "Приоритет средний: выручка низкая."),
+        ("medium", "Приоритет средний. Выручка низкая."),
+        ("medium", "Приоритет по просрочке 75 дн. средний."),
         ("high", "Просрочка 75 дн., в среднем платежи редкие."),
         ("high", "Просрочка 75 дн., выручка низкая."),
         ("high", "Критически важно проверить сообщения ЕФРСБ."),
@@ -283,9 +285,25 @@ def test_a_level_word_about_the_debtor_is_not_a_priority(priority, text):
         ("high", "Риск банкротства низкий."),
         ("high", "Риск остаётся невысоким."),
         ("critical", "Высокий риск банкротства."),
+        # The fix's review: the whole sentence counts, not two words inside a clause.
+        ("high", "Долг погашен, поэтому приоритет на самом деле низкий."),
+        ("low", "Приоритет у дела высокий."),
+        ("low", "Приоритет, на наш взгляд, высокий."),
+        ("low", "Приоритет (по правилам низкий) фактически высокий."),
+        ("low", "Приоритет взыскания с этого должника — высокий."),
+        ("low", "Риск невозврата долга высокий."),
+        ("medium", "Приоритет следует считать высоким."),
+        ("medium", "Уровень приоритета на деле — высокий."),
+        ("medium", "Риски для взыскания высокие."),
+        ("medium", "Высокоприоритетный должник."),
+        ("high", "Ситуация средней тяжести, приоритет можно считать низким"),
+        # Safe side: a level word in a sentence about the priority is a level.
+        ("medium", "Приоритет средний: выручка низкая."),
     ],
 )
 def test_a_level_next_to_the_priority_or_the_risk_is_still_one(priority, text):
+    """Review G2 of the fix: a window of two words inside comma clauses let through
+    every sentence the plain substring check had caught, the injection wording too."""
     ctx = replace(context(), priority=priority)
     assert code(review_answer(answer(explanation=text), ctx)) == RejectionCode.PRIORITY_CHANGED
 
@@ -347,6 +365,24 @@ def test_a_promise_dated_as_people_write_it_is_found_in_the_comment(comment):
     # Another day is still not in the comment.
     other = {"interaction_id": "INT-8", "due_on": "2026-09-16"}
     assert code(review_answer(answer(promises=[other]), ctx)) == "promise_not_in_comment"
+
+
+@pytest.mark.parametrize(
+    "comment,due_on",
+    [
+        ("Оплатили частично 3.06 млн ₽, остаток без срока.", "2027-06-03"),
+        ("Созвон в 12.05, клиент обещал перезвонить.", "2027-05-12"),
+    ],
+)
+def test_a_decimal_or_a_time_in_a_comment_is_no_date(comment, due_on):
+    """Review G2 of the fix: «d.dd» without its closing dot read as a date, so an amount
+    or a clock time legitimised an invented promise and the same date in the text."""
+    ctx = context(interactions=[talk(text=comment)])
+    promise = {"interaction_id": "INT-8", "due_on": due_on}
+    assert code(review_answer(answer(promises=[promise]), ctx)) == "promise_not_in_comment"
+    day = date.fromisoformat(due_on).strftime("%d.%m.%Y")
+    retold = answer(explanation=f"Клиент обещал оплатить до {day}.")
+    assert code(review_answer(retold, ctx)) == "new_date"
 
 
 def test_a_date_without_a_year_is_the_next_such_day_after_the_comment():

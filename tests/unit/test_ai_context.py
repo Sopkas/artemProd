@@ -176,7 +176,9 @@ def test_efrsb_messages_are_capped_though_one_signal_cites_them_all():
     sent = [fact for fact in context.facts if fact.title == "Сообщение ЕФРСБ"]
     assert len(sent) == FACT_CAPS[FactKind.BANKRUPTCY_EVENT]
     assert max(fact.observed_on for fact in sent) == date(2026, 1, 1) + timedelta(days=149)
-    assert any("в запросе 10 новейших из 150" in note for note in context.missing_data)
+    (note,) = [note for note in context.missing_data if "новейших" in note]
+    # No totals of the section go for EFRSB: the note promises none.
+    assert note.endswith("в запросе 10 новейших из 150.")
     (signal,) = [s for s in context.signals if s.code == "unresolved_bankruptcy_event"]
     # The signal keeps its count, and cites only what went: a cut ID is no ground.
     assert signal.value == "150"

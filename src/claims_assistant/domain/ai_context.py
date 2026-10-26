@@ -492,6 +492,10 @@ FACT_CAPS = {
     FactKind.BANKRUPTCY_EVENT: 10,
     FactKind.BANKRUPTCY_CLOSED: 3,
 }
+# Kinds whose section sends its totals (number of cases, claims, debt left) next to the
+# records. EFRSB has none: «итоги раздела — по всем» told the model of totals that were
+# not there — of all the messages only their count goes, in the note itself.
+_TOTALED = frozenset({FactKind.COURT_CASE, FactKind.ENFORCEMENT})
 
 
 def _newest_first(fact: Fact) -> tuple[bool, date]:
@@ -518,9 +522,10 @@ def _kept(
             dropped |= cut
             section = _SECTION_TITLES.get(snapshot.section, snapshot.section.value)
             title = _FACT_TITLES.get(kind, kind.value)
+            totals = "; итоги раздела — по всем" if kind in _TOTALED else ""
             notes.append(
                 f"{section}: «{title}» — в запросе {len(facts) - len(cut)} новейших из "
-                f"{len(facts)}; итоги раздела — по всем."
+                f"{len(facts)}{totals}."
             )
     return [fact for fact in snapshot.facts if fact.id not in dropped], notes, dropped
 

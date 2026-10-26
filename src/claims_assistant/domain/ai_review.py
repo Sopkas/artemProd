@@ -41,7 +41,9 @@ _NUMBER = re.compile(r"-?\d[\d  ]*(?:[.,]\d+)?")
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _RU_DATE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b")
 # «оплатить 15.09.» in a comment: a date without its year, never a part of «15.09.2026».
-_SHORT_DATE = re.compile(r"(?<![\d.,])(\d{1,2})\.(\d{2})(?!\.?\d)")
+# The closing dot is required: without it «3.06 млн ₽» and «созвон в 12.05» were dates,
+# and a promise of 3 June or 12 May found itself in the comment (review G2 of the fix).
+_SHORT_DATE = re.compile(r"(?<![\d.,])(\d{1,2})\.(\d{2})\.(?!\d)")
 _MONTHS = (
     "января", "февраля", "марта", "апреля", "мая", "июня",
     "июля", "августа", "сентября", "октября", "ноября", "декабря",
@@ -66,22 +68,26 @@ _SCALES = (Decimal(1000), Decimal(1_000_000), Decimal(1_000_000_000))
 
 # The priority is the rules' answer; naming another one or asking to change it is a reason
 # to reject, whatever the wording around it. A level is a word of its own and the priority
-# levels it agrees with: «невысокий» is not «высокий». «Критический» and «критичный» name
-# the top level wherever they stand (the adverb «критически важно» does not); the other
-# words do so only next to «приоритет» or «риск» — «выручка низкая», «нагрузка высокая»
-# and «в среднем» are about the debtor, not about the rules' answer.
+# levels it agrees with: «невысокий» is not «высокий». «Критический», «критичный» and
+# «критичен» name the top level wherever they stand (the adverb «критически важно» does
+# not); the other words do so in a sentence that speaks of «приоритет» or «риск» —
+# «выручка низкая», «нагрузка высокая» and «в среднем» elsewhere are about the debtor.
+# The whole sentence, not the words next to the anchor: a window of two words inside
+# comma clauses let «приоритет, на наш взгляд, высокий» and «поэтому приоритет на самом
+# деле низкий» through (review G2 of the fix). «Приоритет средний: выручка низкая» is
+# rejected with them — the safe side, as for numbers.
 _LEVEL_WORDS = (
-    (re.compile(r"критич(?:н|еск(?!и$))"), {"critical"}),
+    (re.compile(r"критич(?:н|ен|еск(?!и$))"), {"critical"}),
     (re.compile(r"высок"), {"high"}),
     (re.compile(r"невысок"), {"medium", "low"}),
     (re.compile(r"средн"), {"medium"}),
     (re.compile(r"низк"), {"low"}),
 )
+# Inside a word too: «высокоприоритетный», «рисков».
 _LEVEL_ANCHOR = re.compile(r"приоритет|риск")
-# Words apart: «риск остаётся высоким» names a level, «приоритет средний: выручка низкая»
-# does not.
-_LEVEL_WINDOW = 2
-_CLAUSE = re.compile(r"[.,;!?()]")
+# A sentence ends at «;», «!», «?» or at a dot before a capital letter or the end: «75 дн.
+# высокий» goes on, «3.5» is no end at all.
+_SENTENCE = re.compile(r"[;!?]|\.(?=\s+[A-ZА-ЯЁ«]|\s*$)")
 _PRIORITY_CLAIMS = (
     "приоритет должен",
     "снизить приоритет",
@@ -415,14 +421,14 @@ def _priority_conflict(text: str, priority: str) -> bool:
     lowered = text.lower()
     if any(claim in lowered for claim in _PRIORITY_CLAIMS):
         return True
-    for clause in _CLAUSE.split(lowered):
-        words = re.findall(r"\w+", clause)
-        anchors = [i for i, word in enumerate(words) if _LEVEL_ANCHOR.match(word)]
-        for i, word in enumerate(words):
+    for sentence in _SENTENCE.split(text):
+        words = re.findall(r"\w+", sentence.lower())
+        anchored = any(_LEVEL_ANCHOR.search(word) for word in words)
+        for word in words:
             agrees = next((levels for root, levels in _LEVEL_WORDS if root.match(word)), None)
             if agrees is None or priority in agrees:
                 continue
-            if "critical" in agrees or any(abs(i - a) <= _LEVEL_WINDOW for a in anchors):
+            if "critical" in agrees or anchored:
                 return True
     return False
 
