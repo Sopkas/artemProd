@@ -16,7 +16,7 @@ Two kinds of file come, and both are read as they are:
 Wrong values are named by their row; the value itself is never repeated.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from claims_assistant.domain.debt_report import CounterpartyDebt, read_debt_report
 from claims_assistant.domain.inn import LOST_ZERO_LENGTHS, InnProblem, InvalidInn, validate_inn
@@ -99,31 +99,46 @@ def _name(cell: Cell) -> str | None:
 
 
 def _merged(counterparties: tuple[CounterpartyDebt, ...]) -> list[CounterpartyDebt]:
-    """``merge_repeats`` within one INN, in the report's order.
+    """The companies of a report, each once, in the order they first come.
 
     ``merge_repeats`` joins entries by the printed name and keeps the first INN: two
     different companies of one name (two «ИП Иванов …» under different sales points) would
     become one, carrying the first INN but judged by the other's days — a debtor of 10
     days taken as one of 90, and the real one of 90 lost uncounted. Since the cut decides
-    by the merged days (S8-14), entries whose INNs differ are never joined; those without
-    an INN are still joined by name, as before.
+    by the merged days (S8-14), a company here is its INN:
+
+    - all entries of one INN are one company, whatever names they are printed under (a
+      duplicate catalog entry in 1C), named by its first entry;
+    - an entry without an INN joins the INN its name is printed with — when exactly one
+      INN carries that name in the report (its INN cell blank under one sales point only);
+      under two or more INNs its owner is unknown and it stays apart;
+    - the rest without an INN are joined by name, as ``merge_repeats`` does.
     """
-    groups: dict[str, list[CounterpartyDebt]] = {}
-    first: dict[tuple[str, str], int] = {}
-    for index, counterparty in enumerate(counterparties):
-        groups.setdefault(counterparty.inn or "", []).append(counterparty)
-        first.setdefault((counterparty.inn or "", normalize_name(counterparty.name)), index)
-    merged = [joined for group in groups.values() for joined in merge_repeats(group)[0]]
-    return sorted(merged, key=lambda c: first[(c.inn or "", normalize_name(c.name))])
+    inns_of: dict[str, set[str]] = {}
+    for counterparty in counterparties:
+        if counterparty.inn:
+            inns_of.setdefault(normalize_name(counterparty.name), set()).add(counterparty.inn)
+    groups: dict[tuple[str, str], list[CounterpartyDebt]] = {}
+    for counterparty in counterparties:
+        name = normalize_name(counterparty.name)
+        owners = inns_of.get(name, set())
+        inn = counterparty.inn or (next(iter(owners)) if len(owners) == 1 else None)
+        key = ("inn", inn) if inn else ("name", name)
+        groups.setdefault(key, []).append(counterparty)
+    merged = []
+    for entries in groups.values():
+        named = [replace(entry, name=entries[0].name) for entry in entries]
+        merged.extend(merge_repeats(named)[0])  # one entry: the names are now one
+    return merged
 
 
 def _from_report(rows, overdue_days: int) -> FileList | None:
     """The 1C report, if this is one; None when the file is something else.
 
     A company is judged once, after its entries under every sales point are merged, by its
-    worst contract: 30 days on one and 90 on another is a debtor of 90 days (two INNs under
-    one name are two companies, see ``_merged``). A report that prints no INN at all is
-    said so first — cutting it would only hide the real reason.
+    worst contract: 30 days on one and 90 on another is a debtor of 90 days (a company is
+    its INN, two INNs under one name are two companies, see ``_merged``). A report that
+    prints no INN at all is said so first — cutting it would only hide the real reason.
     """
     report = read_debt_report(list(rows))
     if not report.counterparties:

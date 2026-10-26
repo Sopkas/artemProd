@@ -339,6 +339,42 @@ def test_two_companies_of_one_name_with_different_inns_are_not_merged():
     assert result.cut == OverdueCut(days=60, total=3, taken=2, not_overdue=1, no_days=0)
 
 
+@pytest.mark.parametrize("inn_first", [True, False])
+def test_an_entry_without_an_inn_joins_the_one_inn_printed_with_its_name(inn_first):
+    """The INN cell blank under one sales point only: the same company, judged by its worst
+    contract across both, not a debtor «без ИНН» beside one cut out by its 30 days."""
+    entries = [("ООО «Ромашка»", ONE, [30]), ("ООО «Ромашка»", None, [90])]
+    result = read(overdue_report(*(entries if inn_first else entries[::-1])))
+    assert result.candidates == (Candidate(ONE, "ООО «Ромашка»"),)
+    assert result.cut == OverdueCut(days=60, total=1, taken=1, not_overdue=0, no_days=0)
+    assert result.without_inn == 0
+
+
+def test_an_entry_without_an_inn_under_a_name_of_two_inns_stays_apart():
+    """Two INNs print the name: whose the entry without one is cannot be told — it is not
+    given to either, and is counted on its own."""
+    data = overdue_report(
+        ("ООО «Тёзка»", ONE, [30]),
+        ("ООО «Тёзка»", TWO, [30]),
+        ("ООО «Тёзка»", None, [90]),
+    )
+    result = read(data)
+    assert result.candidates == ()
+    assert result.cut == OverdueCut(days=60, total=3, taken=1, not_overdue=2, no_days=0)
+    assert result.without_inn == 1
+
+
+@pytest.mark.parametrize("days", [[30, 90], [90, 90]])
+def test_one_inn_under_two_names_is_one_company_named_by_its_first_entry(days):
+    """A duplicate catalog entry in 1C: one INN printed under two names is still one company,
+    judged once by its worst contract — never both «добавлена» and «не взята»."""
+    data = overdue_report(("ООО «Ромашка»", ONE, [days[0]]), ("ООО «Ромашка Плюс»", ONE, [days[1]]))
+    result = read(data)
+    assert result.candidates == (Candidate(ONE, "ООО «Ромашка»"),)
+    assert result.cut == OverdueCut(days=60, total=1, taken=1, not_overdue=0, no_days=0)
+    assert result.repeats == 0
+
+
 def test_a_company_with_days_only_on_some_contracts_is_judged_by_them():
     result = read(overdue_report(("ООО «Часть дней»", ONE, [None, 75])))
     assert result.candidates == (Candidate(ONE, "ООО «Часть дней»"),)
