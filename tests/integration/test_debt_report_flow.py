@@ -405,3 +405,60 @@ async def test_two_reports_naming_two_inns_alike_are_not_one_client_printed_twic
     ]
     quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
     assert "двух отчётах" not in quality
+
+
+async def two_reports(deps, first: bytes, second: bytes) -> bytes:
+    """A package with two overdue reports, attached in this order, checked to the end."""
+    run = (await package(deps, first)).run
+    await accept_debt_report(
+        OWNER,
+        run.id,
+        second,
+        repository=deps["repository"],
+        files=deps["files"],
+        reader=deps["reader"],
+    )
+    run = await deps["repository"].get_run(OWNER, run.id)
+    await pipeline(deps["files"], deps["repository"], guard(NamingProvider())).process(run)
+    return deps["files"].read((await deps["repository"].get_report(OWNER, run.id)).stored_path)
+
+
+@pytest.mark.parametrize("without_inn_first", [True, False])
+async def test_a_report_without_inns_does_not_hand_a_namesake_the_contracts_another_report_ties(
+    deps, without_inn_first
+):
+    """The same client in two variants of the print, one without the «ИНН» column and one
+    with an INN that is not in the check. Attached in this order, the entry without an INN
+    was kept, the INN one dropped as its repeat — and the name alone gave the contract to
+    the namesake of the check. One file holding both entries never did."""
+    plain = debt_report([(DEMO_NAME, [("Дог-Ч", 400, 900_000.0, "Тягач")])])
+    with_inn = debt_report_with_inn(
+        [(DEMO_NAME, INN_ELSEWHERE, [("Дог-Ч", 400, 900_000.0, "Тягач")])]
+    )
+    first, second = (plain, with_inn) if without_inn_first else (with_inn, plain)
+    data = await two_reports(deps, first, second)
+    assert not any(row[0] == INN_1 for row in sheet_rows(data, "Договоры"))
+    quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
+    assert "не отнесены ни к одной организации" in quality
+
+
+async def test_an_entry_without_an_inn_of_a_name_two_reports_print_with_two_inns_is_ambiguous(
+    deps,
+):
+    """Another report prints the name under two INNs: the entry without one could be either
+    of them, so it goes to nobody — neither silently dropped nor given to the namesake."""
+    data = await two_reports(
+        deps,
+        debt_report([(DEMO_NAME, [("Дог-Х", 90, 1.0, "Кран")])]),
+        debt_report_with_inn(
+            [
+                (DEMO_NAME, INN_1, [("Дог-1", 307, 1.0, "Экскаватор")]),
+                (DEMO_NAME, INN_ELSEWHERE, [("Дог-Ч", 400, 1.0, "Тягач")]),
+            ]
+        ),
+    )
+    assert [(row[0], row[2]) for row in sheet_rows(data, "Договоры") if row[0]] == [
+        (INN_1, "Дог-1")
+    ]
+    quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
+    assert "такое название носят несколько организаций" in quality
