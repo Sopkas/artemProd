@@ -20,7 +20,10 @@ Three things it does not have and one it gives for free:
 
 - **no ИНН** — the file is per counterparty, named in the header only; the INN comes from
   the dialog, where the user already said whose file this is;
-- **no payment id** — the number inside «Документ» («00БП-036835») serves as one;
+- **no payment id** — the number inside «Документ» with its date («00БП-036835 от
+  02.09.2024») serves as one: 1C starts the numbering anew every year, so the number alone
+  repeats across a file of several years; a document split into several lines numbers
+  them («… #2»);
 - **no single amount** — receipts are in «Поступление», and a row with «Списание» is an
   outgoing payment, which the contract does not accept yet: it is skipped and reported;
 - **the covered period is in the header** («Дата начала»/«Дата окончания»), so the user
@@ -39,7 +42,7 @@ from claims_assistant.domain.sheet_rules import Cell, FormulaCell, issue
 
 MAX_HEADER_ROWS = 20  # the header block of a 1C print is short; beyond that we give up
 TOTALS_WORD = "итого"
-_DOCUMENT_NUMBER = re.compile(r"[0-9A-ZА-ЯЁ]+-[0-9]+")
+_DOCUMENT_NUMBER = re.compile(r"([0-9A-ZА-ЯЁ]+-[0-9]+)(?:\s+от\s+(\d{2}\.\d{2}\.\d{4}))?")
 _HEADER_VALUE = re.compile(r"^\s*([^:]{2,40}):\s*(.+?)\s*$")
 _DATE_TEXT = re.compile(r"^\s*(\d{2})\.(\d{2})\.(\d{4})")
 
@@ -129,14 +132,35 @@ def find_table(rows: list[tuple[Cell, ...]]) -> int | None:
 
 
 def payment_id(document: Cell) -> Cell:
-    """The document's own number («00БП-036835»), or the whole line if there is none."""
+    """The document's number with its date («00БП-036835 от 02.09.2024»), or the whole
+    line if there is no number.
+
+    The date is part of the id because 1C restarts the numbering every year: «00БП-000123»
+    of 2025 and of 2026 are two receipts, and by the number alone the later one was refused
+    as a conflict, so the payment age came from the older date. The time is left out — the
+    same document printed twice is still one payment. A line with a number and no date
+    gives the number alone. One document split into several lines is told apart in
+    ``convert_payments``, not here: this sees one line only.
+    """
     text = _text(document)
     if text is None:
         return None
     match = _DOCUMENT_NUMBER.search(text)
     if match is not None:
-        return match.group()
+        number, day = match.groups()
+        return number if day is None else f"{number} от {day}"
     return text[:100]
+
+
+def _line_id(base: Cell, ordinal: int) -> Cell:
+    """The id of the ``ordinal``-th line of one document: «… от 10.09.2026 #2».
+
+    The base is cut so the id stays within the contract's 100 characters.
+    """
+    if ordinal == 1 or not isinstance(base, str):
+        return base
+    suffix = f" #{ordinal}"
+    return base[: 100 - len(suffix)] + suffix
 
 
 def _is_totals(cells: tuple[Cell, ...]) -> bool:
@@ -176,6 +200,16 @@ def convert_payments(rows: list[tuple[Cell, ...]], inn: str) -> ConvertedSheet:
     def cell_of(cells: tuple[Cell, ...], index: int | None) -> Cell:
         return cells[index] if index is not None and index < len(cells) else None
 
+    # One receipt may be printed as several lines — one per contract or per «Назначение
+    # платежа» — under the same document. Those are separate amounts: with one id the
+    # second line was refused as a conflict and its money lost. Every line of a document
+    # gets its ordinal by position. Telling a reprint apart by (date, amount, purpose)
+    # failed on the common case: one order paying two contracts with the same monthly
+    # payment prints two identical lines — the print has no contract column, and the
+    # purpose belongs to the whole document — and the second amount was dropped as a
+    # duplicate. 1C does not print one line twice, and two overlapping prints list a
+    # document's lines in the same order, so the ids still match across files.
+    lines: dict[str, int] = {}
     converted: list[tuple[int, tuple[Cell, ...]]] = []
     for offset, cells in enumerate(rows[header_index + 1 :]):
         row_number = header_index + 2 + offset
@@ -198,15 +232,14 @@ def convert_payments(rows: list[tuple[Cell, ...]], inn: str) -> ConvertedSheet:
             continue
         raw_date = cell_of(cells, date_at)
         day = _day(raw_date)
+        document = payment_id(cell_of(cells, document_at))
+        if isinstance(document, str):
+            lines[document] = lines.get(document, 0) + 1
+            document = _line_id(document, lines[document])
         converted.append(
             (
                 row_number,
-                (
-                    inn,
-                    payment_id(cell_of(cells, document_at)),
-                    day if day is not None else raw_date,
-                    incoming,
-                ),
+                (inn, document, day if day is not None else raw_date, incoming),
             )
         )
     return ConvertedSheet(PAYMENT_TITLES, tuple(converted), export, tuple(issues))

@@ -822,7 +822,10 @@ async def test_the_stored_file_is_the_export_translated_into_our_sheet(
     result = import_payments(
         OpenpyxlSheetReader(), data, known_inns={INN_1, INN_2}, analysis_date=date(2026, 9, 1)
     )
-    assert [row.payment_id for row in result.rows] == ["00БП-036835", "00БП-036902"]
+    assert [row.payment_id for row in result.rows] == [
+        "00БП-036835 от 15.07.2026",
+        "00БП-036902 от 01.08.2026",
+    ]
     assert all(row.inn == INN_1 for row in result.rows)  # whose file it was is remembered
 
 

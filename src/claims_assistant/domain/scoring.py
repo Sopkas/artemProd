@@ -127,7 +127,15 @@ class Assessment:
     def next_step(self) -> str:
         """Base recommendation by rule; never a legal instruction or deadline."""
         codes = {signal.code for signal in self.signals}
-        if codes & {"confirmed_procedure", "unresolved_bankruptcy_event"}:
+        # Every bankruptcy signal comes first, the S8-01 ones included: a filing in court
+        # with nothing in EFRSB yet is exactly the case they exist for, and it outranks
+        # an overdue on the same company.
+        if codes & {
+            "confirmed_procedure",
+            "unresolved_bankruptcy_event",
+            "bankruptcy_filed",
+            "bankruptcy_intent",
+        }:
             return "Проверить событие и документы по указанному источнику."
         if "liquidation_status" in codes:
             return "Проверить статус организации и документы по указанному источнику."

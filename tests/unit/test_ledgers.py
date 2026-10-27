@@ -7,7 +7,7 @@ import pytest
 
 from claims_assistant.application.ledger_imports import import_debt_history, import_payments
 from claims_assistant.domain.imports import IssueSeverity
-from claims_assistant.domain.sheet_rules import parse_amount
+from claims_assistant.domain.sheet_rules import CellError, data_rows, parse_amount
 from claims_assistant.infrastructure.excel.ledgers import (
     build_debt_history_workbook,
     build_payments_workbook,
@@ -197,3 +197,42 @@ def test_history_outside_the_package_or_after_the_analysis_date():
 def test_amounts_accept_every_group_separator(separator):
     text = f"150{separator}000,00"
     assert parse_amount(text, prefix="debt", label="Сумма долга") == Decimal("150000.00")
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (100.1 * 3, Decimal("300.3")),  # 300.29999999999995 in the cell, «300,30» on screen
+        (0.1 + 0.2, Decimal("0.3")),
+        (10.10 + 20.20, Decimal("30.3")),
+        (1234.5600000000002, Decimal("1234.56")),
+        (517325.82, Decimal("517325.82")),
+        (12345678901234.56, Decimal("12345678901234.56")),  # exact form kept when it fits
+    ],
+)
+def test_a_float_artifact_of_excel_is_an_amount_to_the_kopeck(value, expected):
+    """Review: a computed sum pasted as a value was refused as finer than a kopeck."""
+    assert parse_amount(value, prefix="debt", label="Сумма долга") == expected
+
+
+@pytest.mark.parametrize("value", [1.005, 0.001, "300.299", Decimal("300.299")])
+def test_a_real_third_decimal_is_still_refused(value):
+    with pytest.raises(CellError) as error:
+        parse_amount(value, prefix="debt", label="Сумма долга")
+    assert error.value.code == "debt_precision"
+
+
+def test_blank_rows_do_not_use_up_the_row_limit():
+    """Review: the counter ran before the blank-row skip, so a formatted empty range
+    refused a short sheet as too long."""
+    blank = (None, None, None, None)
+    rows = [(2, (INN, "P-1", DAY, 1.0)), *[(n, blank) for n in range(3, 20)]]
+    rows.append((20, (INN, "P-2", DAY, 2.0)))
+    issues = []
+    kept = list(data_rows(rows, 2, "Платежи", issues))
+    assert [number for number, _ in kept] == [2, 20] and issues == []
+    rows.append((21, (INN, "P-3", DAY, 3.0)))
+    issues = []
+    kept = list(data_rows(rows, 2, "Платежи", issues))
+    assert [number for number, _ in kept] == [2, 20]
+    assert [(i.code, i.row) for i in issues] == [("row_limit", 21)]

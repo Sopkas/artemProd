@@ -48,7 +48,11 @@ from claims_assistant.domain.sheet_rules import (
 
 SHEET_NAME = "Отчет по ТПЗ"
 MAX_HEADER_ROWS = 20
-_SKIP_PREFIXES = ("отбор", "итого", "отчет")
+# The print's own service rows, in the forms 1C gives them. A bare prefix is not enough:
+# «Итоговые решения, ООО» is a client, and skipping it handed its contracts to the client
+# printed above — someone else's debt in a claim, with nothing said.
+_SKIP_TITLES = {"итого"}
+_SKIP_PREFIXES = ("итого:", "итого по ", "отбор:", "отчет по просроченным", "отчёт по просроченным")
 # Titles of the legend rows themselves: they name the levels, they are not data.
 _LEVEL_TITLES = {"точка продаж", "контрагент", "договор лизинга"}
 
@@ -114,8 +118,8 @@ def _text(cell: Cell, limit: int = 500) -> str | None:
 
 
 def _skip(title: str) -> bool:
-    lowered = title.lower()
-    return lowered in _LEVEL_TITLES or lowered.startswith(_SKIP_PREFIXES)
+    lowered = " ".join(title.lower().split())
+    return lowered in _LEVEL_TITLES or lowered in _SKIP_TITLES or lowered.startswith(_SKIP_PREFIXES)
 
 
 def map_columns(rows: list[tuple[int, tuple[Cell, ...]]]) -> dict[str, int]:

@@ -98,7 +98,10 @@ def run(rows=None, inn=INN, analysis_date=DAY):
 
 def test_the_export_is_read_as_the_payments_sheet():
     result, export = run()
-    assert [row.payment_id for row in result.rows] == ["00БП-036835", "00БП-036902"]
+    assert [row.payment_id for row in result.rows] == [
+        "00БП-036835 от 02.09.2024",
+        "00БП-036902 от 12.09.2024",
+    ]
     assert [row.paid_on for row in result.rows] == [date(2024, 9, 2), date(2024, 9, 12)]
     assert [row.amount for row in result.rows] == [Decimal("2258000"), Decimal("517325.82")]
     assert all(row.inn == INN for row in result.rows)  # the dialog said whose file it is
@@ -130,7 +133,7 @@ def test_a_table_that_starts_on_the_first_row_has_no_header_block():
         ),
     ]
     result, export = run(rows)
-    assert [row.payment_id for row in result.rows] == ["00БП-1"]
+    assert [row.payment_id for row in result.rows] == ["00БП-1 от 02.09.2024"]
     assert export.period is None and export.counterparty is None
 
 
@@ -164,7 +167,7 @@ def test_an_outgoing_payment_is_skipped_and_reported():
         ]
     )
     result, _ = run(rows)
-    assert [row.payment_id for row in result.rows] == ["00БП-1"]
+    assert [row.payment_id for row in result.rows] == ["00БП-1 от 02.09.2024"]
     assert [issue.code for issue in result.issues] == ["payment_is_outgoing"]
     assert result.issues[0].row == 9 and "только поступления" in result.issues[0].reason
 
@@ -191,19 +194,122 @@ def test_the_contract_rules_still_apply_to_the_rows():
     assert "date_invalid" in codes  # a broken date is reported, not guessed
     assert "payment_amount_negative" in codes
     assert "payment_after_analysis_date" in codes  # later than the analysis date
-    assert [row.payment_id for row in result.rows] == ["00БП-1"]
+    assert [row.payment_id for row in result.rows] == ["00БП-1 от 02.09.2024"]
 
 
 @pytest.mark.parametrize(
     "document,expected",
     [
-        ("Поступление на расчетный счет 00БП-036835 от 02.09.2024 17:00:38", "00БП-036835"),
+        (
+            "Поступление на расчетный счет 00БП-036835 от 02.09.2024 17:00:38",
+            "00БП-036835 от 02.09.2024",
+        ),
+        # No date in the line: the number alone, as before.
+        ("Поступление на расчетный счет 00БП-036835", "00БП-036835"),
         ("Платёжное поручение №12 от 01.01.2026", "Платёжное поручение №12 от 01.01.2026"),
         (None, None),
     ],
 )
 def test_the_document_line_gives_the_payment_id(document, expected):
     assert payment_id(document) == expected
+
+
+def test_a_number_repeated_in_another_year_is_another_payment():
+    """Review: 1C restarts document numbers every year, so «00БП-000123» of 2025 and of
+    2026 are two receipts; keyed by the number alone the later one was refused as a
+    conflict and the payment age was counted from the older date."""
+    rows = export_rows(
+        [
+            (
+                "15.01.2025",
+                "Поступление на расчетный счет 00БП-000123 от 15.01.2025 10:00:00",
+                "",
+                "",
+                "",
+                1000,
+                None,
+            ),
+            (
+                "10.09.2026",
+                "Поступление на расчетный счет 00БП-000123 от 10.09.2026 10:00:00",
+                "",
+                "",
+                "",
+                1000,
+                None,
+            ),
+        ]
+    )
+    result, _ = run(rows)
+    assert [row.paid_on for row in result.rows] == [date(2025, 1, 15), date(2026, 9, 10)]
+    assert len({row.payment_id for row in result.rows}) == 2
+    assert result.issues == ()
+
+
+def test_identical_lines_of_one_document_are_two_contracts_not_a_repeat():
+    """Verifier on the review fix: one order paying two contracts with the same monthly
+    payment prints two identical lines — no contract column, one purpose per document.
+    Taken for a reprint, the second 1000 was dropped as «повторяет платёж»."""
+    document = "Поступление 00БП-1 от 02.09.2024 17:00:38"
+    line = ("02.09.2024", document, "", "Оплата по договорам лизинга", "", 1000, None)
+    result, _ = run(export_rows([line, line]))
+    assert [(row.payment_id, row.amount) for row in result.rows] == [
+        ("00БП-1 от 02.09.2024", Decimal("1000")),
+        ("00БП-1 от 02.09.2024 #2", Decimal("1000")),
+    ]
+    assert result.issues == ()
+
+
+def test_one_document_split_into_lines_keeps_every_amount():
+    """Review: one receipt printed as several lines — one per «Назначение платежа» — shares
+    the document; with one id the second line was refused as a conflict and 2500 lost."""
+    document = "Поступление на расчетный счет 00БП-000777 от 10.09.2026 10:00:00"
+    deposit = ("10.09.2026", document, "", "Обеспечительный платеж", "", 1000, None)
+    monthly = ("10.09.2026", document, "", "Оплата ежемесячного платежа", "", 2500, None)
+    result, _ = run(export_rows([deposit, monthly]), analysis_date=date(2026, 10, 26))
+    assert [(row.payment_id, row.amount) for row in result.rows] == [
+        ("00БП-000777 от 10.09.2026", Decimal("1000")),
+        ("00БП-000777 от 10.09.2026 #2", Decimal("2500")),
+    ]
+    assert result.issues == ()
+
+
+def test_lines_of_one_document_differing_only_in_purpose_are_two_payments():
+    document = "Поступление 00БП-5 от 10.09.2024"
+    first = ("10.09.2024", document, "", "Договор 1", "", 1000, None)
+    second = ("10.09.2024", document, "", "Договор 2", "", 1000, None)
+    result, _ = run(export_rows([first, second]))
+    assert [row.payment_id for row in result.rows] == [
+        "00БП-5 от 10.09.2024",
+        "00БП-5 от 10.09.2024 #2",
+    ]
+    assert result.issues == ()
+
+
+def test_lines_of_one_document_are_numbered_by_position_wherever_they_stand():
+    """The ordinal counts the document's own lines: another document between them does
+    not shift it, so two overlapping prints give each line the same id."""
+    document = "Поступление 00БП-5 от 10.09.2024"
+    other = ("10.09.2024", "Поступление 00БП-6 от 10.09.2024", "", "", "", 700, None)
+    first = ("10.09.2024", document, "", "Договор 1", "", 1000, None)
+    second = ("10.09.2024", document, "", "Договор 2", "", 1000, None)
+    result, _ = run(export_rows([first, other, second]))
+    assert [row.payment_id for row in result.rows] == [
+        "00БП-5 от 10.09.2024",
+        "00БП-6 от 10.09.2024",
+        "00БП-5 от 10.09.2024 #2",
+    ]
+    assert result.issues == ()
+
+
+def test_a_numbered_line_id_stays_within_the_contract_length():
+    document = "Без номера " + "х" * 120  # no number: the id is the line cut to 100
+    first = ("10.09.2024", document, "", "", "", 1000, None)
+    second = ("10.09.2024", document, "", "", "", 2500, None)
+    result, _ = run(export_rows([first, second]))
+    ids = [row.payment_id for row in result.rows]
+    assert len(ids) == 2 and ids[1].endswith(" #2") and len(ids[1]) == 100
+    assert result.issues == ()
 
 
 def test_the_table_is_found_below_the_block_and_nowhere_else():
