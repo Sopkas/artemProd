@@ -604,6 +604,33 @@ async def test_a_resume_or_an_addition_during_the_run_is_checked_the_same_day(wo
     assert await service.next_run(OTHER) == date(2026, 10, 17)
 
 
+async def test_a_pause_and_a_resume_during_the_run_leave_nothing_for_tomorrow(world):
+    """Review of g3: the companies passed over while their owner was paused counted as
+    reached by the run, so after «Возобновить» in the same run they were neither checked
+    nor named as waiting, though the screen promised «сегодня, в ближайшие минуты»."""
+    service = world.service()
+    d = inn10("770000003")
+    await service.add(OWNER, [Candidate(A), Candidate(B)])
+    await service.add(OTHER, [Candidate(C), Candidate(d)])
+    fetched: list[str] = []
+
+    async def pause_then_resume(inn):
+        fetched.append(inn)
+        if len(fetched) == 1:
+            await service.pause(OTHER)
+        elif len(fetched) == 2:
+            await service.resume(OTHER)
+
+    world.source.before_fetch = pause_then_resume
+    world.clock.now = at(16)
+    outcome = await run(world, service, 16)
+    assert sorted(world.source.calls) == sorted([A, B, C, d])
+    assert outcome.checked == 4 and outcome.waiting == 0
+    assert checked_today(await service.entries(OTHER), 16) == {C, d}
+    summary = next(m for m in await messages(world, 16) if m.owner_id == OTHER)
+    assert "Организаций проверено: 2" in summary.text
+
+
 async def test_weekdays_leave_the_weekend_out(world):
     service = world.service()
     await service.add(OWNER, [Candidate(A)])

@@ -454,9 +454,12 @@ class MonitoringService:
         # the run went on — owner by owner, each list was read when its turn came.
         while queue := shared_queue(await self._due_lists(day, tried)):
             for owner_id, entry in queue:
-                tried.add((owner_id, entry.inn))
                 if (await self._store.settings(owner_id)).paused:
-                    continue  # paused during the run
+                    # Paused during the run: not marked as reached, so a resume within
+                    # the same run brings these back in the next pass (a list that stays
+                    # paused is left out by _due_lists, so this does not spin).
+                    continue
+                tried.add((owner_id, entry.inn))
                 done = await self._check(owner_id, entry, day, source)
                 if budget.used != spent:
                     spent = budget.used
