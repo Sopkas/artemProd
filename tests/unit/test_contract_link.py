@@ -304,6 +304,20 @@ def test_an_entry_without_an_inn_stays_apart_when_its_name_has_two():
     ]
 
 
+def test_an_entry_without_an_inn_stays_apart_when_another_report_gives_its_name_a_second():
+    """The package passes the INNs of every report: one INN in this file is not enough to
+    join an entry without one while another file prints the name under a second INN."""
+    report = (
+        CounterpartyDebt("ООО Ромашка", inn=INN_A, contracts=(contract("Д1"),)),
+        CounterpartyDebt("ООО Ромашка", contracts=(contract("Д2"),)),
+    )
+    merged, _ = merge_repeats(report, {normalize_name("ООО Ромашка"): {INN_A, INN_C}})
+    assert [(c.inn, [k.name for k in c.contracts]) for c in merged] == [
+        (INN_A, ["Д1"]),
+        (None, ["Д2"]),
+    ]
+
+
 def test_a_report_without_repeats_is_left_as_it_is():
     report = (
         counterparty("Ромашка", contract("Дог-1")),

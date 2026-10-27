@@ -28,7 +28,7 @@ from typing import TypeVar
 from claims_assistant.domain.analysis import AnalysisRun, FileKind, UploadedFile
 from claims_assistant.domain.counterparties import CounterpartyRow, ImportLimits
 from claims_assistant.domain.debt_history import DebtSnapshot
-from claims_assistant.domain.debt_report import CounterpartyDebt, read_debt_report
+from claims_assistant.domain.debt_report import CounterpartyDebt, DebtReport, read_debt_report
 from claims_assistant.domain.external import Period
 from claims_assistant.domain.imports import ImportIssue, IssueSeverity
 from claims_assistant.domain.indicators import (
@@ -42,7 +42,7 @@ from claims_assistant.domain.payments import PaymentRow
 from claims_assistant.domain.plural import of_companies as _companies
 
 from .check_package import FileStorage, StorageError
-from .contract_link import merge_repeats, normalize_name
+from .contract_link import merge_repeats, names_to_inns, normalize_name
 from .imports import OutlineReader, SheetReader, import_counterparties
 from .ledger_imports import import_debt_history, import_interactions, import_payments
 
@@ -351,23 +351,25 @@ async def _read_debt_reports(
         raise TypeError("A debt report needs a reader that returns row indents")
     issues: list[ImportIssue] = []
     counts: dict[str, int] = {}
-    reports: list[tuple[str, tuple[CounterpartyDebt, ...]]] = []
+    read: list[tuple[str, DebtReport]] = []
     for file in attached:
         data = await asyncio.to_thread(files.read, file.stored_path)
         rows = await asyncio.to_thread(reader.read_outline, data, limits)
-        result = await asyncio.to_thread(read_debt_report, list(rows))
-        merged, repeats = merge_repeats(result.counterparties)
-        issues.extend(_tag(result.issues + repeats, file.id))
-        counts[file.id] = sum(len(counterparty.contracts) for counterparty in merged)
-        reports.append((file.id, merged))
-    # The INNs every report prints for a name. Without this, an entry without an INN
-    # attached first took the name, the INN entry of another report was dropped as its
-    # repeat, and the name alone then gave the contracts to a namesake of the check.
-    inns_of: dict[str, set[str]] = {}
-    for _, merged in reports:
-        for counterparty in merged:
-            if counterparty.inn:
-                inns_of.setdefault(normalize_name(counterparty.name), set()).add(counterparty.inn)
+        read.append((file.id, await asyncio.to_thread(read_debt_report, list(rows))))
+    # The INNs every report prints for a name, taken before any file is merged. Without
+    # this, an entry without an INN attached first took the name, the INN entry of another
+    # report was dropped as its repeat, and the name alone then gave the contracts to a
+    # namesake of the check; and ``merge_repeats`` of one file joined an entry without an
+    # INN to the one INN of that file while another file printed the name with a second.
+    inns_of = names_to_inns(
+        counterparty for _, result in read for counterparty in result.counterparties
+    )
+    reports: list[tuple[str, tuple[CounterpartyDebt, ...]]] = []
+    for file_id, result in read:
+        merged, repeats = merge_repeats(result.counterparties, inns_of)
+        issues.extend(_tag(result.issues + repeats, file_id))
+        counts[file_id] = sum(len(counterparty.contracts) for counterparty in merged)
+        reports.append((file_id, merged))
     counterparties: list[CounterpartyDebt] = []
     # Normalised name → (file, INN) of the companies already taken; inside one file the
     # entries were already joined or kept apart by ``merge_repeats``.

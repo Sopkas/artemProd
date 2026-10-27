@@ -462,3 +462,27 @@ async def test_an_entry_without_an_inn_of_a_name_two_reports_print_with_two_inns
     ]
     quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
     assert "такое название носят несколько организаций" in quality
+
+
+@pytest.mark.parametrize("own_report_first", [True, False])
+async def test_an_entry_without_an_inn_is_ambiguous_however_the_reports_split_its_inns(
+    deps, own_report_first
+):
+    """The entry without an INN shares its report with one INN of its name, and another
+    report prints that name under a second INN. Split over two files it was joined to the
+    INN of its own file before the other file was looked at; in one file the same three
+    entries were ambiguous. How the entries lie across files must not pick the owner."""
+    own = debt_report_with_inn(
+        [
+            (DEMO_NAME, INN_1, [("Дог-1", 307, 1.0, "Экскаватор")]),
+            (DEMO_NAME, None, [("Дог-?", 90, 1.0, "Кран")]),
+        ]
+    )
+    other = debt_report_with_inn([(DEMO_NAME, INN_ELSEWHERE, [("Дог-Ч", 400, 1.0, "Тягач")])])
+    first, second = (own, other) if own_report_first else (other, own)
+    data = await two_reports(deps, first, second)
+    assert [(row[0], row[2]) for row in sheet_rows(data, "Договоры") if row[0]] == [
+        (INN_1, "Дог-1")
+    ]
+    quality = " ".join(str(c) for row in sheet_rows(data, "Качество данных") for c in row if c)
+    assert "такое название носят несколько организаций" in quality

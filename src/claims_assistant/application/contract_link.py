@@ -31,7 +31,7 @@ would put someone else's debt into a claim letter.
 """
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from claims_assistant.domain.debt_report import SHEET_NAME as DEBT_REPORT_SHEET
@@ -213,8 +213,19 @@ def link_contracts(
     )
 
 
+def names_to_inns(report: Iterable[CounterpartyDebt]) -> dict[str, set[str]]:
+    """Normalised name → the INNs the entries of that name print (names without one are
+    left out)."""
+    inns_of: dict[str, set[str]] = {}
+    for counterparty in report:
+        if counterparty.inn:
+            inns_of.setdefault(normalize_name(counterparty.name), set()).add(counterparty.inn)
+    return inns_of
+
+
 def merge_repeats(
     report: Sequence[CounterpartyDebt],
+    inns_of: Mapping[str, set[str]] | None = None,
 ) -> tuple[tuple[CounterpartyDebt, ...], tuple[ImportIssue, ...]]:
     """One report, one debtor: entries of one name in one file are one company.
 
@@ -227,12 +238,13 @@ def merge_repeats(
     companies can share a printed name. Where the report prints INNs, two of them under
     one name are two companies and stay apart; an entry without one joins its name only
     when the report gives that name a single INN (or none).
-    Repeats across *different* reports are another matter, handled by the package review.
+    Repeats across *different* reports are another matter, handled by the package review;
+    it passes ``inns_of`` (normalised name → the INNs *every* report prints for it), so an
+    entry without an INN is not joined to the one INN of its own file while another file
+    prints its name with a second one.
     """
-    inns_of: dict[str, set[str]] = {}
-    for counterparty in report:
-        if counterparty.inn:
-            inns_of.setdefault(normalize_name(counterparty.name), set()).add(counterparty.inn)
+    if inns_of is None:
+        inns_of = names_to_inns(report)
     order: list[int] = []
     joined: dict[int, CounterpartyDebt] = {}
     slots: dict[str, list[int]] = {}  # normalised name → its companies, in order
