@@ -271,11 +271,22 @@ def test_the_critical_level_is_caught_in_every_form(priority, text):
         ("high", "Просрочка 75 дн., в среднем платежи редкие."),
         ("high", "Просрочка 75 дн., выручка низкая."),
         ("high", "Критически важно проверить сообщения ЕФРСБ."),
+        # Round 4: a level attached to a metric of the debtor, in any case and number.
+        ("medium", "Приоритет средний: выручка низкая."),
+        ("high", "Приоритет высокий. Это связано с просрочкой 75 дн. и низкой выручкой."),
+        ("medium", "Приоритет средний. Это объясняется тем, что выручка низкая."),
+        ("high", "Приоритет высокий. Средняя выручка снизилась."),
+        ("medium", "Долговая нагрузка — высокая."),
+        ("low", "Рентабельность низкая, ликвидность высока."),
+        ("high", "При низкой платёжеспособности и средних ставках долг растёт."),
+        ("low", "Высокий оборот, высокая доля выручки от лизинга."),
+        ("medium", "Прибыль низкая, высокая стоимость обслуживания долга."),
     ],
 )
 def test_a_level_word_about_the_debtor_is_not_a_priority(priority, text):
     """Review G2: «высок», «средн», «низк» anywhere were a priority — «нагрузка высокая»
-    or «в среднем» cost the whole answer as priority_changed."""
+    or «в среднем» cost the whole answer as priority_changed. Every level word counts
+    now; these are the narrow cases that do not."""
     ctx = replace(context(), priority=priority)
     assert isinstance(review_answer(answer(explanation=text), ctx), Explanation)
 
@@ -299,8 +310,6 @@ def test_a_level_word_about_the_debtor_is_not_a_priority(priority, text):
         ("medium", "Риски для взыскания высокие."),
         ("medium", "Высокоприоритетный должник."),
         ("high", "Ситуация средней тяжести, приоритет можно считать низким"),
-        # Safe side: a level word in a sentence about the priority is a level.
-        ("medium", "Приоритет средний: выручка низкая."),
         # Round 3: the next sentence pointing back, and the nouns that mean the same.
         ("low", "Приоритет по правилам низкий. На наш взгляд, он высокий."),
         ("low", "Приоритет низкий. Но на деле он должен быть высоким."),
@@ -310,11 +319,33 @@ def test_a_level_word_about_the_debtor_is_not_a_priority(priority, text):
         ("low", "Уровень угрозы высокий."),
         ("low", "Важность дела высокая, работать в первую очередь."),
         ("low", "Опасность невозврата высокая."),
+        # Round 4: any level that disagrees counts, no anchor or pronoun needed.
+        ("low", "Приоритет низкий. На деле — высокий."),
+        ("low", "Приоритет низкий. На самом деле высокий."),
+        ("low", "Приоритет по правилам низкий. Фактически высокий."),
+        ("low", "Приоритет низкий. Мы бы поставили высокий."),
+        ("low", "Правила дали низкий приоритет. Однако правильнее считать высоким."),
+        ("medium", "Приоритет средний. Реально же — высокий."),
+        ("high", "Приоритет высокий. Мы считаем, что достаточно низкого."),
+        ("low", "Приоритет низкий. Им стоит заняться как высоким."),
+        ("low", "Приоритет низкий. Но высокий по сути."),
+        ("low", "Приоритет низкий. Скорее высокий."),
+        ("low", "Значимость дела высокая."),
+        ("low", "Ставим высокую очерёдность взыскания."),
+        ("high", "Оцениваем дело низко, приоритет низок."),
+        ("low", "Приоритет в среднем высокий."),
+        # A metric next to the level, not agreeing with it: the level is of something else.
+        ("low", "Важность из-за нагрузки высокая."),
+        ("low", "Приоритет из-за выручки высокий."),
+        ("medium", "Приоритет высокий, выручка низкая."),
+        # Safe side: a level of a metric off the list, or not next to it, is a level.
+        ("medium", "Уровень долговой нагрузки высокий."),
+        ("high", "Безопасность сделки низкая."),
     ],
 )
-def test_a_level_next_to_the_priority_or_the_risk_is_still_one(priority, text):
-    """Review G2 of the fix: a window of two words inside comma clauses let through
-    every sentence the plain substring check had caught, the injection wording too."""
+def test_a_level_that_disagrees_with_the_priority_is_rejected(priority, text):
+    """Review G2 of the fix: a level counted only near «приоритет», «риск» or a pronoun,
+    and every round found a wording without one. Any level that disagrees counts now."""
     ctx = replace(context(), priority=priority)
     assert code(review_answer(answer(explanation=text), ctx)) == RejectionCode.PRIORITY_CHANGED
 

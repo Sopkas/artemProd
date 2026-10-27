@@ -67,34 +67,79 @@ _SCALE = re.compile(
 _SCALES = (Decimal(1000), Decimal(1_000_000), Decimal(1_000_000_000))
 
 # The priority is the rules' answer; naming another one or asking to change it is a reason
-# to reject, whatever the wording around it. A level is a word of its own and the priority
-# levels it agrees with: «невысокий» is not «высокий». «Критический», «критичный» and
-# «критичен» name the top level wherever they stand (the adverb «критически важно» does
-# not); the other words do so in a sentence that speaks of «приоритет» or «риск» —
-# «выручка низкая», «нагрузка высокая» and «в среднем» elsewhere are about the debtor.
-# The whole sentence, not the words next to the anchor: a window of two words inside
-# comma clauses let «приоритет, на наш взгляд, высокий» and «поэтому приоритет на самом
-# деле низкий» through (review G2 of the fix). «Приоритет средний: выручка низкая» is
-# rejected with them — the safe side, as for numbers.
+# to reject, whatever the wording around it. Any form of «высокий», «средний», «низкий» or
+# «критический» that disagrees with the given priority is a level, wherever it stands and
+# inside a word too («высокоприоритетный», «высоко», «низок»). Three rounds of review G2
+# taught a word only near «приоритет», «риск» or a pronoun to count, and each round found a
+# wording without one: «Приоритет низкий. На деле — высокий.», «Значимость дела высокая».
+# So every level counts, and only the narrow cases below do not; a legit phrase missed by
+# them costs an answer, a missed level misleads the specialist.
 _LEVEL_WORDS = (
-    (re.compile(r"критич(?:н|ен|еск(?!и$))"), {"critical"}),
-    (re.compile(r"высок"), {"high"}),
-    (re.compile(r"невысок"), {"medium", "low"}),
-    (re.compile(r"средн"), {"medium"}),
-    (re.compile(r"низк"), {"low"}),
+    (re.compile(r"критич"), frozenset({"critical"})),
+    # «невысокий» is a level too, the one it agrees with: «риск невысокий» at medium or low.
+    (re.compile(r"^невысок"), frozenset({"medium", "low"})),
+    (re.compile(r"высок"), frozenset({"high"})),
+    (re.compile(r"средн"), frozenset({"medium"})),
+    (re.compile(r"низк|^низок$"), frozenset({"low"})),
 )
-# Inside a word too: «высокоприоритетный», «рисков». The nouns that say the same of the
-# case count as well — «срочность взыскания высокая», «уровень угрозы высокий» (review G2,
-# round 3); «срочно» and «важно» alone are advice, not a level, and do not.
-_LEVEL_ANCHOR = re.compile(r"приоритет|риск|уров(?:ень|н)|срочност|важност|угроз|опасност")
-# The next sentence keeps talking of the priority when it points back at it: «Приоритет
-# низкий. На наш взгляд, он высокий.», or opens with the level itself: «Приоритет низкий.
-# Высокий — по сути.». «Приоритет средний. Выручка низкая.» names its own subject and is
-# free. A pronoun about something else is rejected with them — the safe side again.
-_BACK_REFERENCE = frozenset({"он", "она", "оно", "его", "это", "этот", "эта", "такой", "таков"})
-# A sentence ends at «;», «!», «?» or at a dot before a capital letter or the end: «75 дн.
-# высокий» goes on, «3.5» is no end at all.
-_SENTENCE = re.compile(r"[;!?]|\.(?=\s+[A-ZА-ЯЁ«]|\s*$)")
+# Not a level: the adverb in «критически важно» and the phrase «в среднем».
+_NOT_A_LEVEL = frozenset({"критически"})
+_ON_AVERAGE = ("в", "среднем")
+# Nor a level adjective attached to a metric of the debtor: «нагрузка высокая», «низкой
+# выручкой», «средняя выручка». Attached is next to the noun, nothing but a space or a dash
+# between, and agreeing with it in gender, number and case: «Важность из-за нагрузки
+# высокая» names the importance, not the load. A closed list — extend it with evidence.
+# Cases as «case.number»; an ending stands for every case it may be.
+_ADJECTIVE_ENDINGS = {
+    "f": {
+        "ая": {"nom.sg"}, "яя": {"nom.sg"}, "а": {"nom.sg"}, "ую": {"acc.sg"}, "юю": {"acc.sg"},
+        "ой": {"gen.sg", "dat.sg", "ins.sg", "prep.sg"}, "ою": {"ins.sg"},
+        "ей": {"gen.sg", "dat.sg", "ins.sg", "prep.sg"}, "ею": {"ins.sg"},
+    },
+    "m": {
+        "ий": {"nom.sg", "acc.sg"}, "": {"nom.sg"}, "ого": {"gen.sg"}, "его": {"gen.sg"},
+        "ому": {"dat.sg"}, "ему": {"dat.sg"}, "им": {"ins.sg"}, "ом": {"prep.sg"},
+        "ем": {"prep.sg"},
+    },
+}  # fmt: skip
+_PLURAL_ENDINGS = {
+    "ие": {"nom.pl", "acc.pl"}, "и": {"nom.pl"}, "их": {"gen.pl", "prep.pl", "acc.pl"},
+    "им": {"dat.pl"}, "ими": {"ins.pl"},
+}  # fmt: skip
+_ADJECTIVE = re.compile(r"(?:не)?(?:высок|низк|средн)(\w*)")
+_FIRST = {
+    "а": {"nom.sg"}, "и": {"gen.sg", "nom.pl", "acc.pl"}, "е": {"dat.sg", "prep.sg"},
+    "у": {"acc.sg"}, "ой": {"ins.sg"}, "ою": {"ins.sg"},
+    "ам": {"dat.pl"}, "ами": {"ins.pl"}, "ах": {"prep.pl"},
+}  # fmt: skip
+_SOFT_FIRST = {
+    "я": {"nom.sg"}, "и": {"gen.sg", "nom.pl", "acc.pl"}, "е": {"dat.sg", "prep.sg"},
+    "ю": {"acc.sg"}, "ей": {"ins.sg", "gen.pl"}, "ею": {"ins.sg"},
+    "ям": {"dat.pl"}, "ями": {"ins.pl"}, "ях": {"prep.pl"},
+}  # fmt: skip
+_THIRD = {
+    "ь": {"nom.sg", "acc.sg"}, "и": {"gen.sg", "dat.sg", "prep.sg", "nom.pl", "acc.pl"},
+    "ью": {"ins.sg"}, "ей": {"gen.pl"}, "ям": {"dat.pl"}, "ями": {"ins.pl"}, "ях": {"prep.pl"},
+}  # fmt: skip
+_SECOND = {
+    "": {"nom.sg", "acc.sg"}, "а": {"gen.sg"}, "у": {"dat.sg"}, "ом": {"ins.sg"},
+    "е": {"prep.sg"}, "ы": {"nom.pl", "acc.pl"}, "ов": {"gen.pl"},
+    "ам": {"dat.pl"}, "ами": {"ins.pl"}, "ах": {"prep.pl"},
+}  # fmt: skip
+_METRICS = {  # stem: gender, endings, the genitive plural with its fleeting vowel
+    "нагрузк": ("f", _FIRST, "нагрузок"),
+    "выручк": ("f", _FIRST, "выручек"),
+    "ставк": ("f", _FIRST, "ставок"),
+    "дол": ("f", _SOFT_FIRST, None),
+    "прибыл": ("f", _THIRD, None),
+    "стоимост": ("f", _THIRD, None),
+    "активност": ("f", _THIRD, None),
+    "рентабельност": ("f", _THIRD, None),
+    "ликвидност": ("f", _THIRD, None),
+    "платежеспособност": ("f", _THIRD, None),
+    "оборот": ("m", _SECOND, None),
+}
+_ATTACHED = re.compile(r"\s*[—–-]?\s*")
 _PRIORITY_CLAIMS = (
     "приоритет должен",
     "снизить приоритет",
@@ -428,23 +473,49 @@ def _priority_conflict(text: str, priority: str) -> bool:
     lowered = text.lower()
     if any(claim in lowered for claim in _PRIORITY_CLAIMS):
         return True
-    anchored = False
-    for sentence in _SENTENCE.split(text):
-        words = re.findall(r"\w+", sentence.lower())
-        levels = [
-            next((agrees for root, agrees in _LEVEL_WORDS if root.match(word)), None)
-            for word in words
-        ]
-        anchored = any(_LEVEL_ANCHOR.search(word) for word in words) or (
-            anchored
-            and bool(words)
-            and (levels[0] is not None or bool(_BACK_REFERENCE & set(words)))
-        )
-        for agrees in levels:
-            if agrees is None or priority in agrees:
-                continue
-            if "critical" in agrees or anchored:
-                return True
+    lowered = lowered.replace("ё", "е")
+    words = list(re.finditer(r"\w+", lowered))
+    for i, word in enumerate(words):
+        agrees = _level(word[0])
+        if agrees is None or priority in agrees:
+            continue
+        before = words[i - 1] if i else None
+        after = words[i + 1] if i + 1 < len(words) else None
+        if before is not None and (before[0], word[0]) == _ON_AVERAGE:
+            continue
+        if not any(_attached(lowered, word, other) for other in (before, after) if other):
+            return True
+    return False
+
+
+def _level(word: str) -> frozenset[str] | None:
+    """The priorities a word agrees with when it names a level, None when it names none."""
+    if word in _NOT_A_LEVEL:
+        return None
+    return next((agrees for root, agrees in _LEVEL_WORDS if root.search(word)), None)
+
+
+def _attached(text: str, level: re.Match[str], other: re.Match[str]) -> bool:
+    """The level adjective is attached to a metric noun next to it: nothing but a space
+    or a dash between, agreeing in gender, number and case («нагрузка высокая»)."""
+    left, right = sorted((level, other), key=lambda word: word.start())
+    if not _ATTACHED.fullmatch(text, left.end(), right.start()):
+        return False
+    found = _ADJECTIVE.fullmatch("низк" if level[0] == "низок" else level[0])
+    if found is None:
+        return False
+    noun, ending = other[0], found[1]
+    for stem, (gender, endings, plural_genitive) in _METRICS.items():
+        if noun == plural_genitive:
+            cases = {"gen.pl"}
+        elif noun.startswith(stem):
+            cases = endings.get(noun[len(stem) :], set())
+        else:
+            continue
+        if cases & (
+            _ADJECTIVE_ENDINGS[gender].get(ending, set()) | _PLURAL_ENDINGS.get(ending, set())
+        ):
+            return True
     return False
 
 
