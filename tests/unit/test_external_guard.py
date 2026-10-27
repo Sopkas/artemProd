@@ -1,5 +1,6 @@
 """Limits, retries and cache around CompanyDataProvider (S3-02)."""
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -404,6 +405,64 @@ async def test_later_pages_leave_the_other_sections_their_retries(clock, sleeps)
     assert company.calls == 2 and card.status is FetchStatus.OK
     # 20 units: two first asks, sixteen later pages, the company's two retries held back
     # (one of them spent).
+    assert len(pages.timeouts) == 1 + 16
+    assert bankruptcy.interrupted.code == BUDGET_EXHAUSTED
+
+
+class SlowCompany(FlakyCompany):
+    """Checko's company section still in flight while the EFRSB pages come: it answers
+    only after the paging section lets the loop run (``fails`` — with a timeout)."""
+
+    def __init__(self, *, fails: bool = False) -> None:
+        super().__init__()
+        self.calls = 0 if fails else 1  # FlakyCompany times out on its first call
+
+    async def request(self, key, inn, timeout):
+        await asyncio.sleep(0)
+        return await super().request(key, inn, timeout)
+
+
+@pytest.mark.parametrize("max_retries", [2, 3])
+async def test_pages_take_what_no_retry_is_owed_for(clock, sleeps, max_retries):
+    """Review G5, round 3: the units held for the other sections' retries stayed held when
+    those sections answered, so a card read five EFRSB pages and left half its 20 unspent
+    (with three retries — one page). Only a section still in flight or failed holds units:
+    a page that would take them waits for it, and an answer releases them."""
+    pages = EfrsbPages(clock, total=19)
+    company = SlowCompany()
+    provider = guard(
+        CheckoCompanyDataProvider(
+            "synthetic-key", company, clock=clock, bankruptcy_transport=pages
+        ),
+        clock,
+        sleeps,
+        max_retries=max_retries,
+    )
+    card, bankruptcy = await provider.fetch(
+        CompanyDataRequest(INN, (Section.COMPANY, Section.BANKRUPTCY))
+    )
+    assert card.status is FetchStatus.OK and company.calls == 2
+    # 20 units: two first asks and eighteen later pages, the whole register.
+    assert len(pages.timeouts) == 19
+    assert bankruptcy.interrupted is None
+    assert not any("неполная" in reason for reason in bankruptcy.missing)
+
+
+async def test_a_section_failing_after_the_wait_keeps_its_retries(clock, sleeps):
+    """The other side of the wait: the section in flight times out, so its retries are owed
+    and the pages stop short of them."""
+    pages, company = EfrsbPages(clock, total=50), SlowCompany(fails=True)
+    provider = guard(
+        CheckoCompanyDataProvider(
+            "synthetic-key", company, clock=clock, bankruptcy_transport=pages
+        ),
+        clock,
+        sleeps,
+    )
+    card, bankruptcy = await provider.fetch(
+        CompanyDataRequest(INN, (Section.COMPANY, Section.BANKRUPTCY))
+    )
+    assert company.calls == 2 and card.status is FetchStatus.OK
     assert len(pages.timeouts) == 1 + 16
     assert bankruptcy.interrupted.code == BUDGET_EXHAUSTED
 

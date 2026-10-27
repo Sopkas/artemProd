@@ -216,11 +216,45 @@ async def test_bankruptcy_asks_the_caller_before_each_later_page():
     transport.timeouts = []
     grants = iter([3.0, None])
     request = CompanyDataRequest(
-        INN, (Section.BANKRUPTCY,), RequestLimits(timeout_seconds=5), lambda: next(grants)
+        INN, (Section.BANKRUPTCY,), RequestLimits(timeout_seconds=5), lambda siblings: next(grants)
     )
     (snapshot,) = await provider(bankruptcy_transport=transport).fetch(request)
     assert transport.calls == [1, 2] and transport.timeouts == [5, 3.0]
     assert snapshot.coverage == Coverage.PARTIAL and len(snapshot.facts) == 2
+    assert snapshot.interrupted.code == "budget_exhausted"
+
+
+async def test_a_later_page_refused_waits_for_a_section_in_flight():
+    """Review G5, round 3: the budget is told how the other sections stand — None while in
+    flight, the snapshot once answered — and a refusal while one is in flight waits for its
+    answer and asks again; a refusal with none in flight is final."""
+
+    class SlowFailure:
+        async def request(self, *args):
+            await asyncio.sleep(0)
+            return 404, None
+
+    pages = [
+        efrsb_page([{"Дата": "2026-01-01", "Номер": str(i)}], total_pages=3, current=i)
+        for i in range(1, 4)
+    ]
+    transport = PagedBankruptcy(pages)
+    seen: list[tuple] = []
+
+    def next_request(siblings):
+        seen.append(tuple(s and s.status for s in siblings))
+        return None if siblings[0] is None or len(seen) > 2 else 5.0
+
+    request = CompanyDataRequest(
+        INN, (Section.COMPANY, Section.BANKRUPTCY), RequestLimits(), next_request
+    )
+    checko = CheckoCompanyDataProvider(
+        KEY, SlowFailure(), lambda: NOW, bankruptcy_transport=transport
+    )
+    company, snapshot = await checko.fetch(request)
+    assert company.status is FetchStatus.UNAVAILABLE
+    assert seen == [(None,), (FetchStatus.UNAVAILABLE,), (FetchStatus.UNAVAILABLE,)]
+    assert transport.calls == [1, 2]
     assert snapshot.interrupted.code == "budget_exhausted"
 
 

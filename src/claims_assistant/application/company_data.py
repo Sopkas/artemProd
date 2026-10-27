@@ -1,6 +1,6 @@
 """Provider boundary: caller validates INN using the shared S1-01 validator."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from typing import Protocol
@@ -28,11 +28,14 @@ class CompanyDataRequest:
     sections: tuple[Section, ...] = tuple(Section)
     limits: RequestLimits = RequestLimits()
     # Asked before every request a section makes beyond its first (a later EFRSB page): the
-    # caller's run budget pays for it. Returns the timeout that request may take, never past
-    # the budget's deadline, or None when the budget has nothing left; the section then
-    # stops with what it has. Without it only ``limits`` apply (review G5: twenty pages were
-    # charged to the run as one request, and each got a fresh timeout past the deadline).
-    next_request: Callable[[], float | None] | None = None
+    # caller's run budget pays for it. Given the other sections of this request as they
+    # stand — a snapshot once answered, None while in flight — so units held for their
+    # retries are held only while one may still be owed. Returns the timeout that request
+    # may take, never past the budget's deadline, or None when it may not be made: the
+    # section then stops with what it has, once no sibling is left in flight. Without it
+    # only ``limits`` apply (review G5: twenty pages were charged to the run as one request,
+    # and each got a fresh timeout past the deadline).
+    next_request: Callable[[Sequence[ExternalSnapshot | None]], float | None] | None = None
 
     def __post_init__(self) -> None:
         # This is a type guard, not a second INN/checksum validator.

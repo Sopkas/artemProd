@@ -199,6 +199,29 @@ def normalize_company(payload: object, inn: str, fetched_at: datetime) -> Extern
     )
 
 
+class _Siblings:
+    """The other sections of one fetch, as a later EFRSB page sees them (review G5)."""
+
+    def __init__(self) -> None:
+        self.tasks: list[asyncio.Future[ExternalSnapshot]] = []
+
+    def states(self) -> tuple[ExternalSnapshot | None, ...]:
+        # A snapshot once answered, None while in flight. A task that raised is None too:
+        # gather propagates it and cancels the paging section anyway.
+        return tuple(
+            task.result() if task.done() and not task.cancelled() and not task.exception() else None
+            for task in self.tasks
+        )
+
+    async def settle_one(self) -> bool:
+        """Wait until one more section answers; False when none is left in flight."""
+        in_flight = [task for task in self.tasks if not task.done()]
+        if not in_flight:
+            return False
+        await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+        return True
+
+
 class CheckoCompanyDataProvider:
     def __init__(
         self,
@@ -239,9 +262,20 @@ class CheckoCompanyDataProvider:
         }
         # All at once (18.10.2026: one after another, six sections at a 20 s timeout took two
         # minutes on a bad link). A bug in one cancels the rest and propagates, as before.
+        siblings = _Siblings()
         tasks = [
-            asyncio.ensure_future(handlers[section](request, fetched_at))
+            asyncio.ensure_future(
+                self._bankruptcy(request, fetched_at, siblings)
+                if section is Section.BANKRUPTCY
+                else handlers[section](request, fetched_at)
+            )
             for section in request.sections
+        ]
+        # Before any task runs: the paging section sees the others, never itself.
+        siblings.tasks = [
+            task
+            for section, task in zip(request.sections, tasks, strict=True)
+            if section is not Section.BANKRUPTCY
         ]
         try:
             return tuple(await asyncio.gather(*tasks))
@@ -294,7 +328,10 @@ class CheckoCompanyDataProvider:
         return _failure(request.inn, Section.COMPANY, fetched_at, status, code, message)
 
     async def _bankruptcy(
-        self, request: CompanyDataRequest, fetched_at: datetime
+        self,
+        request: CompanyDataRequest,
+        fetched_at: datetime,
+        siblings: _Siblings | None = None,
     ) -> ExternalSnapshot:
         status, code, message = (
             FetchStatus.UNAVAILABLE,
@@ -333,7 +370,13 @@ class CheckoCompanyDataProvider:
                     # Each later page is paid from the caller's run budget and gets only the
                     # time it has left. When it has none, the pages that came are kept and
                     # the cut is not final: a later run with a fresh budget may finish it.
-                    granted = request.next_request()
+                    # A refusal may be the units held for a section still in flight: its
+                    # answer is awaited (bounded by its own timeout) and the budget asked
+                    # again (review G5, round 3).
+                    others = siblings or _Siblings()
+                    granted = request.next_request(others.states())
+                    while granted is None and await others.settle_one():
+                        granted = request.next_request(others.states())
                     if granted is None:
                         return bankruptcy.project_bankruptcy(
                             request.inn,
