@@ -153,7 +153,7 @@ def payment_id(document: Cell) -> Cell:
 
 
 def _line_id(base: Cell, ordinal: int) -> Cell:
-    """The id of the ``ordinal``-th distinct line of one document: «… от 10.09.2026 #2».
+    """The id of the ``ordinal``-th line of one document: «… от 10.09.2026 #2».
 
     The base is cut so the id stays within the contract's 100 characters.
     """
@@ -196,17 +196,20 @@ def convert_payments(rows: list[tuple[Cell, ...]], inn: str) -> ConvertedSheet:
     incoming_at = titles[INCOMING_TITLE]
     document_at = titles.get(DOCUMENT_TITLE)
     outgoing_at = titles.get(OUTGOING_TITLE)
-    purpose_at = titles.get(PURPOSE_TITLE)
 
     def cell_of(cells: tuple[Cell, ...], index: int | None) -> Cell:
         return cells[index] if index is not None and index < len(cells) else None
 
     # One receipt may be printed as several lines — one per contract or per «Назначение
     # платежа» — under the same document. Those are separate amounts: with one id the
-    # second line was refused as a conflict and its money lost. Each distinct line (date,
-    # amount, purpose) of a document gets its ordinal; a line repeated exactly keeps the
-    # id it had, so a reprint is still reported as a duplicate.
-    lines: dict[str, list[tuple[Cell, ...]]] = {}
+    # second line was refused as a conflict and its money lost. Every line of a document
+    # gets its ordinal by position. Telling a reprint apart by (date, amount, purpose)
+    # failed on the common case: one order paying two contracts with the same monthly
+    # payment prints two identical lines — the print has no contract column, and the
+    # purpose belongs to the whole document — and the second amount was dropped as a
+    # duplicate. 1C does not print one line twice, and two overlapping prints list a
+    # document's lines in the same order, so the ids still match across files.
+    lines: dict[str, int] = {}
     converted: list[tuple[int, tuple[Cell, ...]]] = []
     for offset, cells in enumerate(rows[header_index + 1 :]):
         row_number = header_index + 2 + offset
@@ -231,11 +234,8 @@ def convert_payments(rows: list[tuple[Cell, ...]], inn: str) -> ConvertedSheet:
         day = _day(raw_date)
         document = payment_id(cell_of(cells, document_at))
         if isinstance(document, str):
-            line = (raw_date, incoming, cell_of(cells, purpose_at))
-            seen = lines.setdefault(document, [])
-            if line not in seen:
-                seen.append(line)
-            document = _line_id(document, seen.index(line) + 1)
+            lines[document] = lines.get(document, 0) + 1
+            document = _line_id(document, lines[document])
         converted.append(
             (
                 row_number,

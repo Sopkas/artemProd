@@ -246,11 +246,18 @@ def test_a_number_repeated_in_another_year_is_another_payment():
     assert result.issues == ()
 
 
-def test_the_same_document_printed_twice_is_still_one_payment():
-    line = ("02.09.2024", "Поступление 00БП-1 от 02.09.2024 17:00:38", "", "", "", 1000, None)
+def test_identical_lines_of_one_document_are_two_contracts_not_a_repeat():
+    """Verifier on the review fix: one order paying two contracts with the same monthly
+    payment prints two identical lines — no contract column, one purpose per document.
+    Taken for a reprint, the second 1000 was dropped as «повторяет платёж»."""
+    document = "Поступление 00БП-1 от 02.09.2024 17:00:38"
+    line = ("02.09.2024", document, "", "Оплата по договорам лизинга", "", 1000, None)
     result, _ = run(export_rows([line, line]))
-    assert [row.payment_id for row in result.rows] == ["00БП-1 от 02.09.2024"]
-    assert [issue.code for issue in result.issues] == ["duplicate_payment"]
+    assert [(row.payment_id, row.amount) for row in result.rows] == [
+        ("00БП-1 от 02.09.2024", Decimal("1000")),
+        ("00БП-1 от 02.09.2024 #2", Decimal("1000")),
+    ]
+    assert result.issues == ()
 
 
 def test_one_document_split_into_lines_keeps_every_amount():
@@ -279,16 +286,20 @@ def test_lines_of_one_document_differing_only_in_purpose_are_two_payments():
     assert result.issues == ()
 
 
-def test_a_reprinted_line_of_a_split_document_is_still_a_duplicate():
-    """The ordinal follows the line, not the row: a reprint of the second line gets «#2»
-    again and is reported as a duplicate, not taken as a third payment."""
+def test_lines_of_one_document_are_numbered_by_position_wherever_they_stand():
+    """The ordinal counts the document's own lines: another document between them does
+    not shift it, so two overlapping prints give each line the same id."""
     document = "Поступление 00БП-5 от 10.09.2024"
+    other = ("10.09.2024", "Поступление 00БП-6 от 10.09.2024", "", "", "", 700, None)
     first = ("10.09.2024", document, "", "Договор 1", "", 1000, None)
-    second = ("10.09.2024", document, "", "Договор 2", "", 2500, None)
-    result, _ = run(export_rows([first, second, second]))
-    assert [row.amount for row in result.rows] == [Decimal("1000"), Decimal("2500")]
-    assert [issue.code for issue in result.issues] == ["duplicate_payment"]
-    assert result.issues[0].row == 10
+    second = ("10.09.2024", document, "", "Договор 2", "", 1000, None)
+    result, _ = run(export_rows([first, other, second]))
+    assert [row.payment_id for row in result.rows] == [
+        "00БП-5 от 10.09.2024",
+        "00БП-6 от 10.09.2024",
+        "00БП-5 от 10.09.2024 #2",
+    ]
+    assert result.issues == ()
 
 
 def test_a_numbered_line_id_stays_within_the_contract_length():
