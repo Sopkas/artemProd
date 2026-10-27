@@ -82,13 +82,26 @@ _LEVEL_WORDS = (
     (re.compile(r"средн"), frozenset({"medium"})),
     (re.compile(r"низк|^низок$"), frozenset({"low"})),
 )
-# Not a level: the adverb in «критически важно» and the phrase «в среднем».
+# Not a level: the adverb in «критически важно» and the adverb «в среднем» («в среднем
+# платежи редкие»). «В среднем» followed by a noun in the prepositional — «в среднем
+# диапазоне», «в среднем положении» — is the adjective, and a level; a comparative after
+# it («в среднем более 90 дней») ends in «-е» too and is still the adverb. Right after
+# «приоритет» or «риск» it is the level once more: «Приоритет в среднем.»
 _NOT_A_LEVEL = frozenset({"критически"})
 _ON_AVERAGE = ("в", "среднем")
-# Nor a level adjective attached to a metric of the debtor: «нагрузка высокая», «низкой
-# выручкой», «средняя выручка». Attached is next to the noun, nothing but a space or a dash
-# between, and agreeing with it in gender, number and case: «Важность из-за нагрузки
-# высокая» names the importance, not the load. A closed list — extend it with evidence.
+_PREPOSITIONAL = re.compile(r"(?:е|ии)$")
+_COMPARATIVE = re.compile(r"(?:ее|ше|же|че|ще)$|^вдвое$|^втрое$")
+_AVERAGED = re.compile(r"приоритет|риск")
+# Nor a level adjective of a metric of the debtor: «средняя выручка», «при низкой
+# выручке», «нагрузка высокая», «нагрузка — высокая». A word right after the adjective,
+# a space between, is the one it describes, and only it: «из-за выручки высокие риски» is
+# of the risks. Before the noun the adjective stands next to it, a space or a dash
+# between, closes the clause («нагрузка высокая.», not «оборот — высокий приоритет»), and
+# the noun is a nominative that cannot be a genitive or follow a preposition: «Важность
+# из-за нагрузки высокая», «Риски из-за нагрузки высокие» name the importance and the
+# risks; «Ставки высокие.» is cut as well, the safe side. Nor after «как» or «и», where
+# the adjective is shared: «Важность, как и выручка — высокая». Both agree in gender,
+# number and case. A closed list of metrics — extend it with evidence.
 # Cases as «case.number»; an ending stands for every case it may be.
 _ADJECTIVE_ENDINGS = {
     "f": {
@@ -139,7 +152,14 @@ _METRICS = {  # stem: gender, endings, the genitive plural with its fleeting vow
     "платежеспособност": ("f", _THIRD, None),
     "оборот": ("m", _SECOND, None),
 }
-_ATTACHED = re.compile(r"\s*[—–-]?\s*")
+_ATTRIBUTIVE = re.compile(r"[ \t\u00a0]+")
+_PREDICATIVE = re.compile(r"[ \t\u00a0]*[—–-]?[ \t\u00a0]*")
+_CLAUSE_END = re.compile(r"[ \t\u00a0]*(?:[.,;:!?)…]|$)")
+_NOMINATIVE = frozenset({"nom.sg", "nom.pl"})
+# A noun after one of these is not nominative; «как», «и» share the adjective.
+_NOT_A_SUBJECT = frozenset(
+    {"в", "во", "на", "за", "про", "через", "под", "над", "о", "об", "сквозь", "как", "и"}
+)
 _PRIORITY_CLAIMS = (
     "приоритет должен",
     "снизить приоритет",
@@ -479,12 +499,9 @@ def _priority_conflict(text: str, priority: str) -> bool:
         agrees = _level(word[0])
         if agrees is None or priority in agrees:
             continue
-        before = words[i - 1] if i else None
-        after = words[i + 1] if i + 1 < len(words) else None
-        if before is not None and (before[0], word[0]) == _ON_AVERAGE:
+        if _on_average(lowered, words, i) or _of_a_metric(lowered, words, i):
             continue
-        if not any(_attached(lowered, word, other) for other in (before, after) if other):
-            return True
+        return True
     return False
 
 
@@ -495,28 +512,61 @@ def _level(word: str) -> frozenset[str] | None:
     return next((agrees for root, agrees in _LEVEL_WORDS if root.search(word)), None)
 
 
-def _attached(text: str, level: re.Match[str], other: re.Match[str]) -> bool:
-    """The level adjective is attached to a metric noun next to it: nothing but a space
-    or a dash between, agreeing in gender, number and case («нагрузка высокая»)."""
-    left, right = sorted((level, other), key=lambda word: word.start())
-    if not _ATTACHED.fullmatch(text, left.end(), right.start()):
+def _on_average(text: str, words: list[re.Match[str]], i: int) -> bool:
+    """«среднем» is the adverb «в среднем», not the adjective «в среднем диапазоне»."""
+    if i == 0 or (words[i - 1][0], words[i][0]) != _ON_AVERAGE:
         return False
+    if i >= 2 and _AVERAGED.match(words[i - 2][0]):
+        return False
+    after = _next(text, words, i)
+    if after is None:
+        return True
+    return not _PREPOSITIONAL.search(after) or bool(_COMPARATIVE.search(after))
+
+
+def _of_a_metric(text: str, words: list[re.Match[str]], i: int) -> bool:
+    """The level adjective describes a metric noun: the word right after it, or the
+    nominative right before it when the adjective closes the clause («нагрузка высокая»)."""
+    level = words[i]
     found = _ADJECTIVE.fullmatch("низк" if level[0] == "низок" else level[0])
     if found is None:
         return False
-    noun, ending = other[0], found[1]
+    after = _next(text, words, i)
+    if after is not None:
+        gender, cases = _cases(after)
+        return bool(cases & _agreeing(gender, found[1]))
+    if i == 0 or not _PREDICATIVE.fullmatch(text, words[i - 1].end(), level.start()):
+        return False
+    if not _CLAUSE_END.match(text, level.end()):
+        return False
+    if i >= 2 and words[i - 2][0] in _NOT_A_SUBJECT:
+        return False
+    gender, cases = _cases(words[i - 1][0])
+    return "gen.sg" not in cases and bool(cases & _agreeing(gender, found[1]) & _NOMINATIVE)
+
+
+def _next(text: str, words: list[re.Match[str]], i: int) -> str | None:
+    """The word right after word ``i`` when only a space stands between, else None."""
+    if i + 1 < len(words) and _ATTRIBUTIVE.fullmatch(text, words[i].end(), words[i + 1].start()):
+        return words[i + 1][0]
+    return None
+
+
+def _cases(noun: str) -> tuple[str, set[str]]:
+    """The gender of a metric noun and the cases its form may be in; empty if no metric."""
     for stem, (gender, endings, plural_genitive) in _METRICS.items():
         if noun == plural_genitive:
-            cases = {"gen.pl"}
-        elif noun.startswith(stem):
-            cases = endings.get(noun[len(stem) :], set())
-        else:
-            continue
-        if cases & (
-            _ADJECTIVE_ENDINGS[gender].get(ending, set()) | _PLURAL_ENDINGS.get(ending, set())
-        ):
-            return True
-    return False
+            return gender, {"gen.pl"}
+        if noun.startswith(stem):
+            return gender, endings.get(noun[len(stem) :], set())
+    return "", set()
+
+
+def _agreeing(gender: str, ending: str) -> set[str]:
+    """The cases an adjective ending may be in for a noun of that gender."""
+    return _ADJECTIVE_ENDINGS.get(gender, {}).get(ending, set()) | _PLURAL_ENDINGS.get(
+        ending, set()
+    )
 
 
 def review_answer(payload: object, context: RecommendationContext) -> Explanation | Rejected:

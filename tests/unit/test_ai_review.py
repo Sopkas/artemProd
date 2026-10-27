@@ -281,6 +281,12 @@ def test_the_critical_level_is_caught_in_every_form(priority, text):
         ("high", "При низкой платёжеспособности и средних ставках долг растёт."),
         ("low", "Высокий оборот, высокая доля выручки от лизинга."),
         ("medium", "Прибыль низкая, высокая стоимость обслуживания долга."),
+        # Round 5: the adverb «в среднем» before a comparative or a number, and a metric
+        # in a plural that cannot be a genitive.
+        ("high", "Просрочка в среднем более 75 дн."),
+        ("high", "Платежи приходят в среднем на 75 дн. позже срока."),
+        ("high", "Обороты низкие."),
+        ("low", "Выручка — высокая, нагрузка — высокая."),
     ],
 )
 def test_a_level_word_about_the_debtor_is_not_a_priority(priority, text):
@@ -341,6 +347,33 @@ def test_a_level_word_about_the_debtor_is_not_a_priority(priority, text):
         # Safe side: a level of a metric off the list, or not next to it, is a level.
         ("medium", "Уровень долговой нагрузки высокий."),
         ("high", "Безопасность сделки низкая."),
+        # Round 5: a dash between clauses does not attach a level to the metric beyond it.
+        ("low", "Приоритет высокий — оборот упал."),
+        ("low", "Снизился оборот — высокий приоритет."),
+        ("high", "Приоритет низкий — оборот растёт."),
+        ("high", "Приоритет средний — оборот стабилен."),
+        ("low", "Риск высокий — оборот снизился."),
+        ("low", "Значимость дела высокая — выручка упала на 40 %."),
+        ("low", "Приоритет низкий, однако срочность высокая — выручка упала на 40 %."),
+        ("low", "Упала выручка — высокая срочность взыскания."),
+        ("low", "Растёт нагрузка — высокая очерёдность."),
+        # A plural after a metric's genitive is of another noun, not of the metric.
+        ("low", "Риски из-за нагрузки высокие."),
+        ("low", "Из-за падения выручки высокие риски невозврата."),
+        ("high", "Риски из-за прибыли низкие."),
+        ("low", "Приоритет низкий, но из-за выручки высокие риски."),
+        ("low", "Ставки высокие."),
+        ("low", "Важность, как и выручка — высокая."),
+        ("high", "Риск за оборот низкий."),
+        # «в среднем» with a noun after it, or right after «приоритет», is a level.
+        ("high", "Дело в среднем приоритете."),
+        ("high", "Дело скорее в среднем приоритете."),
+        ("high", "Риск находится в среднем диапазоне."),
+        ("high", "Приоритет в среднем сегменте."),
+        ("high", "Приоритет высокий, хотя риск в среднем диапазоне."),
+        ("high", "Должник в среднем сегменте риска."),
+        ("high", "Приоритет в среднем."),
+        ("high", "Должник в среднем положении."),
     ],
 )
 def test_a_level_that_disagrees_with_the_priority_is_rejected(priority, text):
