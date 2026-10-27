@@ -77,7 +77,7 @@ data/backups/20260919T160035Z/
 
 ### Понижение схемы
 
-`alembic` работает с той же базой, что и бот: `DATABASE_PATH` из окружения, затем из `.env` в текущем каталоге; `sqlalchemy.url` из `alembic.ini` (`data/claims.sqlite3`) — только если ни то ни другое его не задаёт. Запускать из корня репозитория — там `alembic.ini`.
+`alembic` работает с той же базой, что и бот: `DATABASE_PATH` из окружения, затем из `.env` в текущем каталоге; `sqlalchemy.url` из `alembic.ini` (`data/claims.sqlite3`) — только если ни то ни другое его не задаёт. Запускать из корня репозитория — там `alembic.ini`. Так ведёт себя код, в чьём `alembic.ini` упомянут `DATABASE_PATH` (`grep -c DATABASE_PATH alembic.ini` — не 0); в более раннем, в том числе в выпусках 0.2.0 и 0.1.0, — см. «Код без `DATABASE_PATH` в `alembic.ini`» ниже.
 
 - **Ревизия предыдущего выпуска** — последний файл миграций в его теге: `git ls-tree --name-only <предыдущий тег> src/claims_assistant/infrastructure/persistence/migrations/versions/`. 0.2.0 заканчивается на `0007`, 0.1.0 (27.09.2026) — на `0004`. Где база сейчас — `python -m alembic current`.
 - **Локально:** `python -m alembic downgrade <ревизия>` (настройки — из `.env`).
@@ -91,8 +91,21 @@ data/backups/20260919T160035Z/
   ```
 
   Ту же команду с `current` вместо `downgrade <ревизия>` выполнить до и после — ревизия должна смениться.
+- **Код без `DATABASE_PATH` в `alembic.ini`** (выпуски 0.2.0 и 0.1.0; значит, и откат 0.2.0 → 0.1.0) берёт только `sqlalchemy.url`: команды выше откроют `data/claims.sqlite3` под каталогом приложения и упадут с `unable to open database file` (локально — понизят не ту базу), а рабочая останется на прежней ревизии. Для него — копия `alembic.ini` с абсолютным путём к базе (`DATABASE_PATH` из `/etc/claims-assistant/env` или `.env`; после `sqlite+pysqlite:///` — путь от корня, отсюда четыре косые черты), переданная через `-c`; каталог запуска — тот же корень репозитория, остальные пути в ней относительны:
 
-Если код откатили, а схему нет, бот не запустится. Версии после 0.2.0 пишут в `--check` и журнал «Схема базы данных новее этой версии бота»; 0.2.0 и 0.1.0 этого текста не знают и падают с `alembic.util.exc.CommandError: Can't locate revision identified by '<ревизия>'` — это та же ситуация. Тогда — вернуть новый тег (`install.sh <новый тег>` поднимет бота как был) и понизить схему, как выше, или восстановить снимок, снятый перед обновлением.
+  ```bash
+  sed 's|^sqlalchemy.url = .*|sqlalchemy.url = sqlite+pysqlite:////var/lib/claims-assistant/claims.sqlite3|' \
+    /opt/claims-assistant/app/alembic.ini > /tmp/claims-rollback.ini
+  sudo systemd-run --wait --pipe --quiet --collect \
+    -p User=claims -p Group=claims -p EnvironmentFile=/etc/claims-assistant/env \
+    -p WorkingDirectory=/opt/claims-assistant/app \
+    /opt/claims-assistant/venv/bin/python -m alembic -c /tmp/claims-rollback.ini downgrade <ревизия>
+  rm /tmp/claims-rollback.ini
+  ```
+
+  `current` до и после — так же, через `-c /tmp/claims-rollback.ini`.
+
+Если код откатили, а схему нет, бот не запустится. Код с `DATABASE_PATH` в `alembic.ini` пишет в `--check` и журнал «Схема базы данных новее этой версии бота»; более ранний (0.2.0, 0.1.0) этого текста не знает и падает с `alembic.util.exc.CommandError: Can't locate revision identified by '<ревизия>'` — это та же ситуация. Тогда — вернуть новый тег (`install.sh <новый тег>` поднимет бота как был) и понизить схему, как выше, или восстановить снимок, снятый перед обновлением.
 
 ## Что записывать
 

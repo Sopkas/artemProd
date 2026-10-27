@@ -48,13 +48,32 @@ def _live_database(directory: Path) -> Path:
     return path
 
 
+def _ini_outside_the_checkout(directory: Path) -> Path:
+    """The shipped alembic.ini with its two cwd-relative paths made absolute.
+
+    The command-line run below starts in tmp_path, not in the repository root: if env.py
+    ever stopped honouring DATABASE_PATH, alembic would fall back to the ini's relative
+    data/claims.sqlite3, and from the root that is the developer's working database — a
+    regression (or a mutation run) would downgrade it instead of failing the test.
+    """
+    shipped = (ROOT / "alembic.ini").read_text(encoding="utf-8")
+    patched = shipped.replace(
+        "script_location = src/", f"script_location = {ROOT.as_posix()}/src/"
+    ).replace("prepend_sys_path = src", f"prepend_sys_path = {(ROOT / 'src').as_posix()}")
+    assert patched.count(ROOT.as_posix()) == 2, "alembic.ini paths changed; update this copy"
+    path = directory / "alembic.ini"
+    path.write_text(patched, encoding="utf-8")
+    return path
+
+
 def test_the_documented_downgrade_reaches_database_path(tmp_path):
     live = _live_database(tmp_path)
     head = _revision(live)
-    # The documented command, run from the repository root with the shipped alembic.ini.
+    ini = _ini_outside_the_checkout(tmp_path)
+    # The documented command with the shipped settings, run away from any real database.
     result = subprocess.run(
-        [sys.executable, "-m", "alembic", "downgrade", "-1"],
-        cwd=ROOT,
+        [sys.executable, "-m", "alembic", "-c", str(ini), "downgrade", "-1"],
+        cwd=tmp_path,
         env={**os.environ, "DATABASE_PATH": str(live)},
         capture_output=True,
         text=True,
@@ -62,6 +81,7 @@ def test_the_documented_downgrade_reaches_database_path(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert _revision(live) != head
+    assert not (tmp_path / "data").exists()  # alembic.ini's own file was not touched
 
 
 def test_the_cli_takes_database_path_from_env_file_when_the_environment_has_none(
