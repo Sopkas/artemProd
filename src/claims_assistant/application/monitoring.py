@@ -445,43 +445,39 @@ class MonitoringService:
         budget = RunBudget.for_run(self.policy.max_requests, self.policy.max_seconds, self._clock())
         budget.used = spent
         source = self._provider.scoped(budget)
-        owners = await self._store.owners()
         checked = changed = unchecked = failed = 0
-        lists: list[tuple[int, list[WatchEntry], frozenset[str]]] = []
-        schedules: dict[int, WatchSettings] = {}
+        waits: dict[int, int] = {}
+        tried: set[tuple[int, str]] = set()
+        # The queue spreads an owner's companies over the whole run (up to 3 hours), so his
+        # state is read again as it goes: a pause stops the rest of his list at once, and a
+        # pass over the lists read afresh takes what a resume or an addition made due while
+        # the run went on — owner by owner, each list was read when its turn came.
+        while queue := shared_queue(await self._due_lists(day, tried)):
+            for owner_id, entry in queue:
+                tried.add((owner_id, entry.inn))
+                if (await self._store.settings(owner_id)).paused:
+                    continue  # paused during the run
+                done = await self._check(owner_id, entry, day, source)
+                if budget.used != spent:
+                    spent = budget.used
+                    await self._store.spend(day, spent)
+                if done is None:
+                    continue  # taken off the list while it was being checked
+                if done is _WAITS:
+                    waits[owner_id] = waits.get(owner_id, 0) + 1
+                    continue
+                comparison, broke = done
+                checked += 1
+                changed += bool(comparison.to_notify)
+                unchecked += bool(comparison.unchecked)
+                failed += broke
+        # Each summary after the whole queue: an owner's companies are spread over it. The
+        # settings are read again — one who paused during the run gets none, as on a pause.
+        owners = await self._store.owners()
         for owner_id in owners:
             settings = await self._store.settings(owner_id)
-            if settings.paused:
-                continue  # not a request on a pause, and no summary to say so
-            limited = await self._store.limited(owner_id)
-            due = [
-                entry
-                for entry in await self._store.entries(owner_id)
-                # Not the ones done before a restart.
-                if entry.last_checked_on != day
-                and is_due(entry, day, settings, entry.inn in limited)
-            ]
-            lists.append((owner_id, due, limited))
-            schedules[owner_id] = settings
-        waits = dict.fromkeys(schedules, 0)
-        for owner_id, entry in shared_queue(lists):
-            done = await self._check(owner_id, entry, day, source)
-            if budget.used != spent:
-                spent = budget.used
-                await self._store.spend(day, spent)
-            if done is None:
-                continue  # taken off the list while it was being checked
-            if done is _WAITS:
-                waits[owner_id] += 1
-                continue
-            comparison, broke = done
-            checked += 1
-            changed += bool(comparison.to_notify)
-            unchecked += bool(comparison.unchecked)
-            failed += broke
-        # Each summary after the whole queue: an owner's companies are spread over it.
-        for owner_id, settings in schedules.items():
-            await self._summary(owner_id, day, settings, waits[owner_id])
+            if not settings.paused:
+                await self._summary(owner_id, day, settings, waits.get(owner_id, 0))
         waiting = sum(waits.values())
         await self._store.finish_day(day)
         keep = timedelta(days=self.policy.keep_messages_days)
@@ -500,6 +496,27 @@ class MonitoringService:
             budget.used,
         )
         return outcome
+
+    async def _due_lists(
+        self, day: date, tried: set[tuple[int, str]]
+    ) -> list[tuple[int, list[WatchEntry], frozenset[str]]]:
+        """Every owner's companies due today and not yet tried in this run, read afresh."""
+        lists: list[tuple[int, list[WatchEntry], frozenset[str]]] = []
+        for owner_id in await self._store.owners():
+            settings = await self._store.settings(owner_id)
+            if settings.paused:
+                continue  # not a request on a pause, and no summary to say so
+            limited = await self._store.limited(owner_id)
+            due = [
+                entry
+                for entry in await self._store.entries(owner_id)
+                # Not the ones done before a restart, nor those this run reached already.
+                if entry.last_checked_on != day
+                and (owner_id, entry.inn) not in tried
+                and is_due(entry, day, settings, entry.inn in limited)
+            ]
+            lists.append((owner_id, due, limited))
+        return lists
 
     async def _check(
         self, owner_id: int, entry: WatchEntry, day: date, source: CompanyDataProvider

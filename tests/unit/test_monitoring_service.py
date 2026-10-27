@@ -560,6 +560,50 @@ async def test_a_paused_list_asks_nothing_and_goes_on_from_where_it_stopped(worl
     assert notice.inn == A and "Новое арбитражное дело" in notice.text
 
 
+async def test_a_pause_during_the_run_stops_the_rest_of_the_list_at_once(world):
+    """Review of S8-09: the one queue read every owner's settings before the first check,
+    so «Пауза» pressed while another owner's companies were checked was ignored — the
+    paused list was still asked about and still got a summary."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A)])
+    await service.add(OTHER, [Candidate(C)])
+
+    async def paused(inn):
+        if inn == A:
+            await service.pause(OTHER)
+
+    world.source.before_fetch = paused
+    outcome = await run(world, service, 16)
+    assert world.source.calls == [A]
+    assert outcome.checked == 1
+    assert [m.owner_id for m in await messages(world, 16)] == [OWNER]
+
+
+async def test_a_resume_or_an_addition_during_the_run_is_checked_the_same_day(world):
+    """Review of S8-09: after «Возобновить» the screen says «сегодня, в ближайшие минуты»,
+    and a company sent while the run goes on is due today — the queue read before the
+    first check left both for tomorrow."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A)])
+    await service.add(OTHER, [Candidate(C)])
+    await service.pause(OTHER)
+
+    async def meanwhile(inn):
+        if inn == A:
+            await service.resume(OTHER)
+            await service.add(OWNER, [Candidate(B)])
+
+    world.source.before_fetch = meanwhile
+    world.clock.now = at(16)
+    assert await service.next_run(OTHER) is None
+    outcome = await run(world, service, 16)
+    assert sorted(world.source.calls) == sorted([A, B, C])
+    assert outcome.checked == 3
+    assert checked_today(await service.entries(OTHER), 16) == {C}
+    assert {m.owner_id for m in await messages(world, 16)} == {OWNER, OTHER}
+    assert await service.next_run(OTHER) == date(2026, 10, 17)
+
+
 async def test_weekdays_leave_the_weekend_out(world):
     service = world.service()
     await service.add(OWNER, [Candidate(A)])
