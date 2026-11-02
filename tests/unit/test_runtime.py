@@ -303,7 +303,40 @@ def test_deploy_files_are_consistent():
     assert "OnCalendar=" in timer and "Persistent=true" in timer
     assert "useradd --system" in installer and "claims-assistant-backup.timer" in installer
     # Review B on #47: the code stays root's and the check runs the way systemd does.
-    assert "chown -R root:root" in installer and "systemd-run --wait" in installer
+    assert "chown -R root:" in installer and "systemd-run --wait" in installer
     assert "su -s" not in installer
     assert "DATABASE_PATH=/var/lib/claims-assistant/claims.sqlite3" in env
     assert "TELEGRAM_BOT_TOKEN=\n" in env  # the template never carries a token
+
+
+@pytest.mark.parametrize(
+    ("credentials", "expected"),
+    [
+        ({}, 1),
+        ({"TELEGRAM_BOT_TOKEN": TOKEN, "ALLOWED_TELEGRAM_IDS": "invalid"}, 1),
+        ({"TELEGRAM_BOT_TOKEN": TOKEN, "ALLOWED_TELEGRAM_IDS": "1"}, 0),
+    ],
+    ids=["missing_configuration", "invalid_configuration", "ready"],
+)
+def test_deploy_readiness_skips_unconfigured_service(tmp_path, credentials, expected):
+    import os
+    import subprocess
+
+    env = os.environ.copy()
+    for name in ("TELEGRAM_BOT_TOKEN", "ALLOWED_TELEGRAM_IDS"):
+        env.pop(name, None)
+    env.update(DATA_PROVIDER="demo", AI_PROVIDER="off", LOG_LEVEL="INFO")
+    env.update(credentials)
+    helper = Path(__file__).resolve().parents[2] / "deploy" / "check_config.py"
+    result = subprocess.run(
+        [sys.executable, str(helper)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == expected
+    assert TOKEN not in result.stdout + result.stderr
+    if expected:
+        assert "configuration_pending" in result.stderr

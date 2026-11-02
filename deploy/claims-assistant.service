@@ -15,6 +15,7 @@ User=claims
 Group=claims
 WorkingDirectory=/opt/claims-assistant/app
 EnvironmentFile=/etc/claims-assistant/env
+ExecCondition=/opt/claims-assistant/venv/bin/python /opt/claims-assistant/app/deploy/check_config.py
 # Настройки читаются из окружения; .env в каталоге приложения не нужен.
 ExecStartPre=/opt/claims-assistant/venv/bin/python -m claims_assistant --check
 ExecStart=/opt/claims-assistant/venv/bin/python -m claims_assistant

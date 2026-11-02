@@ -31,6 +31,8 @@ done
 # 1. Отдельный пользователь без входа и каталоги с правами только для него.
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --home "$BASE" --shell /usr/sbin/nologin "$APP_USER"
 mkdir -p "$APP" "$DATA/uploads" "$DATA/backups" "$CONF"
+chown root:"$APP_USER" "$BASE" "$CONF"
+chmod 750 "$BASE" "$CONF"
 chown -R "$APP_USER:$APP_USER" "$DATA"
 chmod 750 "$DATA" "$DATA/uploads" "$DATA/backups"
 
@@ -45,17 +47,19 @@ if git -C "$APP" show-ref --verify --quiet "refs/remotes/origin/$REF"; then
   git -C "$APP" merge --ff-only "origin/$REF"
 fi
 # Код и окружение остаются за root: служба их только читает (наименьшие права).
-chown -R root:root "$APP"
-chmod -R o+rX "$APP"
+chown -R root:"$APP_USER" "$APP"
+chmod -R u=rwX,g=rX,o= "$APP"
+chmod -R go-rwx "$APP/.git"
 
 # 3. Отдельное окружение и зависимости из зафиксированных версий.
 [[ -x "$VENV/bin/python" ]] || "$PYTHON" -m venv "$VENV"
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
 "$VENV/bin/python" -m pip install --quiet -r "$APP/requirements.txt"
+"$VENV/bin/python" -m pip install --quiet -r "$APP/requirements-build.txt"
 "$VENV/bin/python" -m pip install --quiet --no-build-isolation --no-deps -e "$APP"
 "$VENV/bin/python" -m pip check
-chown -R root:root "$VENV"
-chmod -R o+rX "$VENV"
+chown -R root:"$APP_USER" "$VENV"
+chmod -R u=rwX,g=rX,o= "$VENV"
 
 # 4. Настройки: шаблон кладётся один раз, значения заполняет администратор.
 if [[ ! -f "$CONF/env" ]]; then
