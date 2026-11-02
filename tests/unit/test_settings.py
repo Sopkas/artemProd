@@ -14,6 +14,7 @@ TOKEN = "123456789:synthetic_token_for_offline_tests_only"
 def clean_environment(monkeypatch):
     for key in (
         "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_PROXY_URL",
         "ALLOWED_TELEGRAM_IDS",
         "LOG_LEVEL",
         "DEMO_SCENARIO",
@@ -59,6 +60,43 @@ def test_environment_overrides_file_including_empty_values(tmp_path, monkeypatch
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     with pytest.raises(ConfigurationError, match="TELEGRAM_BOT_TOKEN"):
         Settings.load(env_file)
+
+
+@pytest.mark.parametrize("scheme", ["socks5", "http"])
+def test_telegram_proxy_is_optional_and_hidden(tmp_path, monkeypatch, scheme):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    path = tmp_path / "missing.env"
+    assert Settings.load(path).telegram_proxy_url == ""
+    proxy = f"{scheme}://private-login:private-password@proxy.example:1080"
+    monkeypatch.setenv("TELEGRAM_PROXY_URL", proxy)
+    settings = Settings.load(path)
+    assert settings.telegram_proxy_url == proxy
+    assert "private-login" not in repr(settings)
+    assert "private-password" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        "https://private:password@proxy.example:1080",
+        "socks5://private:password@proxy.example",
+        "socks5://private:password@proxy.example:70000",
+        "socks5://private:password@proxy.example:0",
+        "http://private:password@proxy.example:1080/path",
+        "http://private:password@proxy.example:1080?query",
+        "http://private:password@[broken:1080",
+        "socks5://private:password@proxy.example:10\n80",
+    ],
+)
+def test_telegram_proxy_validation_never_echoes_credentials(tmp_path, monkeypatch, proxy):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv("TELEGRAM_PROXY_URL", proxy)
+    with pytest.raises(ConfigurationError, match="TELEGRAM_PROXY_URL") as error:
+        Settings.load(tmp_path / "missing.env")
+    assert "private" not in str(error.value)
+    assert "password" not in str(error.value)
 
 
 @pytest.mark.parametrize("raw", ["", " ", "0", "-1", "42,", "42,,43", "x", "1.5", "４２", "9" * 16])

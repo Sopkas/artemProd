@@ -41,6 +41,17 @@ def test_framework_error_body_is_not_logged():
     assert record.msg == "response: %s"
 
 
+def test_proxy_url_and_decoded_credentials_are_redacted():
+    proxy = "socks5://private-login:private%3Apassword@proxy.example:1080"
+    record = logging.LogRecord(
+        "test", logging.WARNING, "", 0, "%s private-login private:password", (proxy,), None
+    )
+    output = app.SafeFormatter(TOKEN, proxy_url=proxy).format(record)
+    assert proxy not in output
+    assert "private-login" not in output
+    assert "private:password" not in output
+
+
 @pytest.mark.parametrize("failure", [None, "polling", "startup", "webhook"])
 async def test_startup_commands_and_session_cleanup(monkeypatch, failure):
     bot = SimpleNamespace(

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiogram.utils.token import TokenValidationError, validate_token
 from dotenv import dotenv_values
@@ -145,6 +146,8 @@ class Settings:
     ai_card_review: bool = False
     ai: AiSettings = AiSettings()
     monitoring: MonitoringSettings = MonitoringSettings()
+    # Applied only to the Telegram session; Checko and AI keep their own direct sessions.
+    telegram_proxy_url: str = field(default="", repr=False)
 
     @classmethod
     def load(cls, env_file: Path = Path(".env")) -> "Settings":
@@ -172,6 +175,28 @@ class Settings:
         allowed_ids = frozenset(int(part) for part in parts)
         if any(value >= 2**52 for value in allowed_ids):
             raise ConfigurationError("ALLOWED_TELEGRAM_IDS: ID вне допустимого диапазона.")
+
+        proxy = (values.get("TELEGRAM_PROXY_URL") or "").strip()
+        if proxy:
+            try:
+                parsed = urlsplit(proxy)
+                valid = (
+                    parsed.scheme in {"http", "socks5"}
+                    and bool(parsed.hostname)
+                    and parsed.port is not None
+                    and 1 <= parsed.port <= 65535
+                    and parsed.path in {"", "/"}
+                    and not parsed.query
+                    and not parsed.fragment
+                    and not any(char.isspace() or ord(char) < 32 for char in proxy)
+                )
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ConfigurationError(
+                    "TELEGRAM_PROXY_URL: нужен адрес socks5://host:port или http://host:port "
+                    "с необязательными логином и паролем."
+                ) from None
 
         level = (values.get("LOG_LEVEL") or "INFO").strip().upper()
         if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
@@ -255,6 +280,7 @@ class Settings:
         return cls(
             token=token,
             allowed_ids=allowed_ids,
+            telegram_proxy_url=proxy,
             log_level=level,
             demo_scenario=scenario,
             demo_package=demo_package,
