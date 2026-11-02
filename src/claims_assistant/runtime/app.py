@@ -2,8 +2,10 @@ import asyncio
 import logging
 import sys
 from datetime import timedelta
+from urllib.parse import unquote, urlsplit
 
 from aiogram import Bot
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommandScopeAllPrivateChats
 
@@ -45,10 +47,16 @@ logger = logging.getLogger(__name__)
 
 
 class SafeFormatter(logging.Formatter):
-    def __init__(self, token: str, checko_key: str = "") -> None:
+    def __init__(self, token: str, checko_key: str = "", proxy_url: str = "") -> None:
         super().__init__("%(asctime)s %(levelname)s %(name)s %(message)s")
         self.token = token
         self.checko_key = checko_key
+        proxy = urlsplit(proxy_url)
+        self.proxy_secrets = tuple(
+            value
+            for value in (proxy_url, unquote(proxy.username or ""), unquote(proxy.password or ""))
+            if value
+        )
 
     def formatException(self, exc_info: tuple) -> str:
         return f"error_type={exc_info[0].__name__}"
@@ -62,12 +70,18 @@ class SafeFormatter(logging.Formatter):
         # Avoid reusing exception text formatted by another logging handler.
         record.exc_text = None
         text = super().format(record).replace(self.token, "[REDACTED]")
-        return text.replace(self.checko_key, "[REDACTED]") if self.checko_key else text
+        if self.checko_key:
+            text = text.replace(self.checko_key, "[REDACTED]")
+        for secret in self.proxy_secrets:
+            text = text.replace(secret, "[REDACTED]")
+        return text
 
 
 def configure_logging(settings: Settings) -> None:
     handler = logging.StreamHandler()
-    handler.setFormatter(SafeFormatter(settings.token, settings.checko_api_key))
+    handler.setFormatter(
+        SafeFormatter(settings.token, settings.checko_api_key, settings.telegram_proxy_url)
+    )
     logging.basicConfig(level=settings.log_level, handlers=[handler], force=True)
     # Keep transport failure signals, with their content sanitized by SafeFormatter.
     logging.getLogger("aiogram").setLevel(logging.WARNING)
@@ -85,8 +99,13 @@ def company_source(settings: Settings) -> CheckoCompanyDataProvider | DemoCompan
     )
 
 
+def create_bot(settings: Settings) -> Bot:
+    session = AiohttpSession(proxy=settings.telegram_proxy_url or None)
+    return Bot(token=settings.token, session=session)
+
+
 async def run(settings: Settings) -> None:
-    bot = Bot(token=settings.token)
+    bot = create_bot(settings)
     try:
         await bot.get_me()
         webhook = await bot.get_webhook_info()
