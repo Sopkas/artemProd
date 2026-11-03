@@ -255,7 +255,9 @@ class OpenpyxlSheetReader:
                 if len(rows) > limits.max_rows:
                     break
             header, *padded = _rectangular([header, *(cells for _number, cells in rows)])
-            return header, [(number, cells) for (number, _), cells in zip(rows, padded, strict=True)]
+            return header, [
+                (number, cells) for (number, _), cells in zip(rows, padded, strict=True)
+            ]
 
     @staticmethod
     def _legacy_rows(

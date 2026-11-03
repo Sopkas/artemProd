@@ -124,6 +124,9 @@ class _FakeSheet:
         self._rows = rows
         self.nrows, self.ncols = len(rows), max(len(row) for row in rows)
 
+    def row_len(self, row):
+        return len(self._rows[row])
+
     def cell(self, row, column):
         return _FakeCell(self._rows[row][column])
 
