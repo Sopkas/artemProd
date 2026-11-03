@@ -98,6 +98,17 @@ def out_of_requests(snapshot: ExternalSnapshot) -> ExternalSnapshot:
     )
 
 
+def pages_out_of_requests(snapshot: ExternalSnapshot) -> ExternalSnapshot:
+    """The adapter's sample cut between pages by the day's requests (review G5): an answer,
+    but a partial one with the budget as the reason it stopped."""
+    return replace(
+        snapshot,
+        coverage=Coverage.PARTIAL,
+        missing=("Выборка сообщений ЕФРСБ неполная; проверьте реестр вручную.",),
+        interrupted=ProviderError(BUDGET_EXHAUSTED, BUDGET_MESSAGE),
+    )
+
+
 class Source:
     """The guarded provider as the service sees it: ``scoped(budget)`` and ``fetch``."""
 
@@ -107,6 +118,7 @@ class Source:
         self.broken: set[str] = set()
         self.spent: set[str] = set()  # companies the day's requests do not reach
         self.cut: set[tuple[str, Section]] = set()  # sections the requests ran out on
+        self.pages_cut: set[str] = set()  # EFRSB samples the requests ran out on mid-pages
         self.mode = DataMode.DEMO
         self.calls: list[str] = []
         self.budgets: list = []
@@ -129,6 +141,8 @@ class Source:
                 snapshot = down(snapshot)
             if snapshot.inn in self.spent or (snapshot.inn, snapshot.section) in self.cut:
                 snapshot = out_of_requests(snapshot)
+            if snapshot.inn in self.pages_cut and snapshot.section is Section.BANKRUPTCY:
+                snapshot = pages_out_of_requests(snapshot)
             answers.append(replace(snapshot, mode=self.mode))
         return tuple(answers)
 
@@ -138,19 +152,20 @@ def world(tmp_path):
     repository = open_sqlite_repository(tmp_path / "claims.sqlite3")
     clock = Clock(at(16))
     store = SqliteWatchStore(repository.engine, clock)
-    source = Source()
+    world = SimpleNamespace(store=store, source=Source(), clock=clock)
 
     def service(mode: DataMode = DataMode.DEMO, **policy) -> MonitoringService:
         return MonitoringService(
             store,
-            source,
+            world.source,
             TelegramMonitoringTexts(),
             mode=mode,
             policy=MonitoringPolicy(**policy),
             clock=clock,
         )
 
-    yield SimpleNamespace(store=store, source=source, clock=clock, service=service)
+    world.service = service
+    yield world
     repository.close()
 
 
@@ -431,6 +446,22 @@ async def test_a_company_the_requests_ran_out_on_midway_goes_first_next_day(worl
     assert await world.store.limited(OWNER) == frozenset()
 
 
+async def test_a_company_whose_efrsb_pages_the_requests_ran_out_on_goes_first_next_day(world):
+    """Review G5: the day's requests pay for every EFRSB page now, so they can run out
+    between pages. The sample answered, but not in full: the company goes first next day."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A), Candidate(B), Candidate(C)])  # store: C, B, A
+    world.source.pages_cut = {B}
+    outcome = await run(world, service, 16)
+    assert (outcome.checked, outcome.waiting) == (3, 0)
+    assert await world.store.limited(OWNER) == frozenset({B})
+    world.source.pages_cut = set()
+    world.source.calls.clear()
+    await run(world, service, 17)
+    assert world.source.calls == [B, C, A]
+    assert await world.store.limited(OWNER) == frozenset()
+
+
 async def test_a_day_nothing_could_be_asked_still_says_so(world):
     service = world.service(quiet_summary=False)  # silence on a quiet day — not on this one
     await service.add(OWNER, [Candidate(A)])
@@ -442,6 +473,112 @@ async def test_a_day_nothing_could_be_asked_still_says_so(world):
         "📋 Мониторинг на 16.10.2026. Проверить не удалось: кончился лимит запросов к "
         "источнику. Ждут проверки: 1 организация, в следующий раз — в первую очередь."
     )
+
+
+class Metered(Source):
+    """The guard's budget as it is spent: five requests a company, the placeholder once
+    the run's requests are gone — the source itself is not asked then."""
+
+    def __init__(self, clock: Clock) -> None:
+        super().__init__()
+        self.clock = clock
+
+    async def fetch(self, request):
+        if self.budgets[-1].take(len(request.sections), self.clock()) < len(request.sections):
+            self.calls.append(request.inn)
+            demo = DemoCompanyDataProvider(DemoScenario.ORDINARY)
+            return tuple(out_of_requests(s) for s in await demo.fetch(request))
+        return await super().fetch(request)
+
+
+@pytest.fixture
+def metered(world):
+    world.source = Metered(world.clock)
+    return world
+
+
+def checked_today(entries, day: int) -> set[str]:
+    return {entry.inn for entry in entries if entry.last_checked_on == date(2026, 10, day)}
+
+
+async def test_one_owners_list_does_not_take_every_days_requests(metered):
+    """Review of S8-09: the queue was per owner and owners went by their Telegram ID — a
+    first list that used up the day left the next one waiting every day, each time told
+    «в следующий раз — в первую очередь». One queue across the owners, interleaved."""
+    world = metered
+    service = world.service(max_requests=2 * len(MONITORED))  # two companies a day
+    await service.add(OWNER, [Candidate(A), Candidate(B)])
+    await service.add(OTHER, [Candidate(C)])
+    outcome = await run(world, service, 16)
+    assert (outcome.checked, outcome.waiting) == (2, 1)
+    assert checked_today(await service.entries(OTHER), 16) == {C}
+    by_owner = {m.owner_id: m.text for m in await messages(world, 16)}
+    assert "Не дошла очередь: 1 организация" in by_owner[OWNER]
+    assert "Не дошла очередь" not in by_owner[OTHER]
+    # Then the one that waited goes first, and the oldest check after it.
+    await run(world, service, 17)
+    assert checked_today(await service.entries(OWNER), 17) == {A}
+    assert checked_today(await service.entries(OTHER), 17) == {C}
+    await run(world, service, 18)
+    assert checked_today(await service.entries(OWNER), 18) == {B}
+
+
+async def test_a_run_tried_again_the_same_day_keeps_the_days_requests(metered):
+    """Review of S8-09: every attempt of the day started a fresh budget, so a run that
+    failed at its end (the scheduler tries it again in 15 minutes) or a restart asked the
+    source about those left waiting with another full day's requests."""
+    world = metered
+    service = world.service(max_requests=2 * len(MONITORED))
+    await service.add(OWNER, [Candidate(A), Candidate(B), Candidate(C)])
+    finish_day = world.store.finish_day
+    world.store.finish_day = AsyncMock(side_effect=RuntimeError("database is locked"))
+    world.clock.now = at(16)
+    with pytest.raises(RuntimeError):
+        await service.run_day(await service.due())
+    assert world.source.budgets[-1].used == 2 * len(MONITORED)
+    asked = list(world.source.calls)
+    # A quarter of an hour later, the same business day: nothing left to spend.
+    world.store.finish_day = finish_day
+    world.clock.now = at(16, 9, 46)
+    outcome = await service.run_day(await service.due())
+    assert (outcome.checked, outcome.waiting) == (0, 1)
+    assert world.source.budgets[-1].used == 2 * len(MONITORED)
+    assert len(checked_today(await service.entries(OWNER), 16)) == 2
+    assert world.source.calls[len(asked) :] == [A]  # the guard's placeholder, not the source
+    # The next day has its own requests.
+    outcome = await run(world, service, 17)
+    assert outcome.checked == 2
+
+
+async def test_remaining_budget_is_persistently_reserved_before_requests(metered):
+    world = metered
+    service = world.service(max_requests=20)
+    await service.add(OWNER, [Candidate(A)])
+    reservations = []
+
+    async def observe(_inn):
+        reservations.append(await world.store.start_day(date(2026, 10, 16)))
+
+    world.source.before_fetch = observe
+    await run(world, service, 16)
+    assert reservations == [20]
+    assert await world.store.start_day(date(2026, 10, 16)) == len(MONITORED)
+
+
+async def test_a_name_sent_while_the_company_is_checked_is_kept(world):
+    """Review of S8-09: the check wrote back the name read before its requests — a
+    correction sent meanwhile was lost, or the source's name replaced the owner's."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A, "Ошибка"), Candidate(B)])
+
+    async def corrected(inn):
+        if inn == B:  # B goes first (newest), A is checked after the correction
+            await service.add(OWNER, [Candidate(A, "ПАО «Исправлено»"), Candidate(B, "Своё")])
+
+    world.source.before_fetch = corrected
+    await run(world, service, 16)
+    names = {entry.inn: entry.name for entry in await service.entries(OWNER)}
+    assert names == {A: "ПАО «Исправлено»", B: "Своё"}
 
 
 # --- pause and frequency (S8-12) ---
@@ -466,6 +603,77 @@ async def test_a_paused_list_asks_nothing_and_goes_on_from_where_it_stopped(worl
     await run(world, service, 18)
     notice, _summary = [m for m in await messages(world, 18) if m.owner_id == OWNER]
     assert notice.inn == A and "Новое арбитражное дело" in notice.text
+
+
+async def test_a_pause_during_the_run_stops_the_rest_of_the_list_at_once(world):
+    """Review of S8-09: the one queue read every owner's settings before the first check,
+    so «Пауза» pressed while another owner's companies were checked was ignored — the
+    paused list was still asked about and still got a summary."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A)])
+    await service.add(OTHER, [Candidate(C)])
+
+    async def paused(inn):
+        if inn == A:
+            await service.pause(OTHER)
+
+    world.source.before_fetch = paused
+    outcome = await run(world, service, 16)
+    assert world.source.calls == [A]
+    assert outcome.checked == 1
+    assert [m.owner_id for m in await messages(world, 16)] == [OWNER]
+
+
+async def test_a_resume_or_an_addition_during_the_run_is_checked_the_same_day(world):
+    """Review of S8-09: after «Возобновить» the screen says «сегодня, в ближайшие минуты»,
+    and a company sent while the run goes on is due today — the queue read before the
+    first check left both for tomorrow."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A)])
+    await service.add(OTHER, [Candidate(C)])
+    await service.pause(OTHER)
+
+    async def meanwhile(inn):
+        if inn == A:
+            await service.resume(OTHER)
+            await service.add(OWNER, [Candidate(B)])
+
+    world.source.before_fetch = meanwhile
+    world.clock.now = at(16)
+    assert await service.next_run(OTHER) is None
+    outcome = await run(world, service, 16)
+    assert sorted(world.source.calls) == sorted([A, B, C])
+    assert outcome.checked == 3
+    assert checked_today(await service.entries(OTHER), 16) == {C}
+    assert {m.owner_id for m in await messages(world, 16)} == {OWNER, OTHER}
+    assert await service.next_run(OTHER) == date(2026, 10, 17)
+
+
+async def test_a_pause_and_a_resume_during_the_run_leave_nothing_for_tomorrow(world):
+    """Review of g3: the companies passed over while their owner was paused counted as
+    reached by the run, so after «Возобновить» in the same run they were neither checked
+    nor named as waiting, though the screen promised «сегодня, в ближайшие минуты»."""
+    service = world.service()
+    d = inn10("770000003")
+    await service.add(OWNER, [Candidate(A), Candidate(B)])
+    await service.add(OTHER, [Candidate(C), Candidate(d)])
+    fetched: list[str] = []
+
+    async def pause_then_resume(inn):
+        fetched.append(inn)
+        if len(fetched) == 1:
+            await service.pause(OTHER)
+        elif len(fetched) == 2:
+            await service.resume(OTHER)
+
+    world.source.before_fetch = pause_then_resume
+    world.clock.now = at(16)
+    outcome = await run(world, service, 16)
+    assert sorted(world.source.calls) == sorted([A, B, C, d])
+    assert outcome.checked == 4 and outcome.waiting == 0
+    assert checked_today(await service.entries(OTHER), 16) == {C, d}
+    summary = next(m for m in await messages(world, 16) if m.owner_id == OTHER)
+    assert "Организаций проверено: 2" in summary.text
 
 
 async def test_weekdays_leave_the_weekend_out(world):
@@ -706,3 +914,46 @@ async def test_a_failed_run_waits_before_it_is_tried_again(world):
     clock.now += timedelta(minutes=15)
     await scheduler.tick()
     assert service.run_day.await_count == 2
+
+
+async def test_process_killed_during_fetch_keeps_reservation(tmp_path):
+    import subprocess
+    import sys
+
+    db = tmp_path / "monitoring.sqlite3"
+    repository = open_sqlite_repository(db)
+    store = SqliteWatchStore(repository.engine, lambda: at(16))
+    service = MonitoringService(
+        store, Source(), TelegramMonitoringTexts(), mode=DataMode.DEMO, clock=lambda: at(16)
+    )
+    await service.add(OWNER, [Candidate(A)])
+    code = """import asyncio, os, sys
+from datetime import UTC, date, datetime
+from pathlib import Path
+from claims_assistant.application.monitoring import MonitoringService, MonitoringPolicy
+from claims_assistant.domain.external import DataMode
+from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
+from claims_assistant.infrastructure.persistence.watch import SqliteWatchStore
+from claims_assistant.presentation.telegram.monitoring_notifier import TelegramMonitoringTexts
+now = datetime(2026, 10, 16, 12, tzinfo=UTC)
+class Source:
+    def scoped(self, budget):
+        self.budget = budget
+        return self
+    async def fetch(self, request):
+        self.budget.take(1, now)
+        os._exit(74)
+r = open_sqlite_repository(Path(sys.argv[1]))
+s = MonitoringService(SqliteWatchStore(r.engine, lambda: now), Source(),
+    TelegramMonitoringTexts(), mode=DataMode.DEMO,
+    policy=MonitoringPolicy(max_requests=20), clock=lambda: now)
+asyncio.run(s.run_day(date(2026, 10, 16)))
+"""
+    try:
+        child = await asyncio.to_thread(
+            subprocess.run, [sys.executable, "-c", code, str(db)], timeout=20
+        )
+        assert child.returncode == 74
+        assert await store.start_day(date(2026, 10, 16)) == 20
+    finally:
+        repository.close()

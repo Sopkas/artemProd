@@ -23,11 +23,17 @@ from .check_package import FileStorage, StorageError
 logger = logging.getLogger(__name__)
 
 EXPIRABLE_STATUSES = frozenset(
-    {RunStatus.DRAFT, RunStatus.COMPLETED, RunStatus.PARTIAL, RunStatus.FAILED}
+    {RunStatus.DRAFT, RunStatus.COMPLETED, RunStatus.PARTIAL, RunStatus.FAILED, RunStatus.PURGING}
 )
 
 
 class MaintenanceStore(Protocol):
+    async def purge_run(
+        self, run_id: str, before: datetime, remove_files: Callable[[str], None]
+    ) -> bool:
+        """Remove expired data while preventing a concurrent transition."""
+        ...
+
     async def list_expired(self, before: datetime) -> tuple[AnalysisRun, ...]:
         """Runs in an expirable state whose last change is before the moment, oldest first."""
         ...
@@ -55,6 +61,8 @@ class PurgeSummary:
     removed: int  # runs whose records were deleted
     failed: int  # runs left in place because their files could not be removed
     dry_run: bool = False
+    # Kept for compatibility with existing sweep summaries; coordinated purge keeps it zero.
+    revived: int = 0
 
 
 async def purge_expired(
@@ -70,25 +78,23 @@ async def purge_expired(
         raise ValueError("Retention must be a positive period")
     before = now - retention
     expired = await repository.list_expired(before)
-    removed = failed = 0
+    removed = failed = revived = 0
     for run in expired:
         if dry_run:
             continue
-        # A draft launched (or a failed run relaunched) between the listing and now is
-        # live again: leave it alone, files included.
-        if not await repository.is_expired(run.id, before):
-            continue
         try:
-            await asyncio.to_thread(files.remove_run, run.id)
+            removed_now = await repository.purge_run(run.id, before, files.remove_run)
         except StorageError:
             # Records stay so the next sweep retries; nothing is orphaned silently.
             logger.error("purge_files_failed run_id=%s", run.id)
             failed += 1
             continue
-        if await repository.delete_run(run.id, before):
+        if removed_now:
             removed += 1
             logger.info("run_purged run_id=%s status=%s", run.id, run.status)
-    return PurgeSummary(expired=len(expired), removed=removed, failed=failed, dry_run=dry_run)
+    return PurgeSummary(
+        expired=len(expired), removed=removed, failed=failed, dry_run=dry_run, revived=revived
+    )
 
 
 class RetentionSweeper:
@@ -115,10 +121,11 @@ class RetentionSweeper:
             self._repository, self._files, retention=self._retention, now=self._clock()
         )
         logger.info(
-            "retention_sweep expired=%s removed=%s failed=%s",
+            "retention_sweep expired=%s removed=%s failed=%s revived=%s",
             summary.expired,
             summary.removed,
             summary.failed,
+            summary.revived,
         )
         return summary
 

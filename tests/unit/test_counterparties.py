@@ -163,6 +163,19 @@ def test_debt_and_overdue_rules(field_index, value, ok):
     assert bool(errors(result)) is not ok
 
 
+def test_overlong_overdue_number_reports_the_cell_and_keeps_other_rows():
+    invalid = "9" * 5000
+    result = parse(
+        ["ИНН", "Дней просрочки", "Дата среза"],
+        [VALID_INN, invalid, date(2026, 9, 1)],
+        [OTHER_INN, 12, date(2026, 9, 1)],
+    )
+    assert [row.inn for row in result.rows] == [OTHER_INN]
+    (problem,) = errors(result)
+    assert (problem.code, problem.row, problem.column) == ("overdue_not_integer", 2, "B")
+    assert invalid not in problem.reason
+
+
 @pytest.mark.parametrize(
     "value,expected",
     [

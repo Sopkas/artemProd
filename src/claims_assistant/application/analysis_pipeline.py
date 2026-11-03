@@ -94,8 +94,9 @@ LINKS_STEP = "contracts_link"
 LINKS_VERSION = "links-v1"
 # v1: counts; v2: rows and issues; v3: every file; v4: contracts; v5: rows per file, and
 # a company printed twice in one overdue report is one company; v6: a 1C export's period
-# is its own company's, so the date conflicts in the step changed.
-IMPORT_VERSION = "package-v6"
+# is its own company's, so the date conflicts in the step changed; v7: two INNs printed
+# under one name in an overdue report are two companies, not one.
+IMPORT_VERSION = "package-v7"
 FETCH_STEP = "external_fetch"
 # v2 (S8-01): arbitration cases and Fedresurs; v3: enforcement proceedings; v4: their
 # debt from the source's own total, the count a floor when the list is cut. A step saved
@@ -138,7 +139,7 @@ class RunSummary:
     companies: int
     checked: int  # every requested section answered OK
     unchecked: int  # at least one section failed, was unavailable or hit the budget
-    row_errors: int
+    row_errors: int  # rows of «Контрагенты» left out, each counted once
     priorities: Mapping[Priority, int]
     budget_exhausted: bool
     # S5-03: companies left without an accepted AI explanation while a provider was
@@ -151,6 +152,9 @@ class RunSummary:
     # all. Kept apart from the count above: «не спрашивали» and «спросили, не вышло» are
     # different things for whoever reads the summary.
     ai_month_exhausted: bool = False
+    # Errors of the other files (and of the package as a whole): their rows are not used,
+    # but they are not rows of the list being checked, so they are not «строки» above.
+    other_errors: int = 0
 
     def to_payload(self) -> str:
         return json.dumps(
@@ -164,6 +168,7 @@ class RunSummary:
                 "explanations_missing": self.explanations_missing,
                 "source_limited": self.source_limited,
                 "ai_month_exhausted": self.ai_month_exhausted,
+                "other_errors": self.other_errors,
             }
         )
 
@@ -181,6 +186,7 @@ class RunSummary:
                 explanations_missing=int(data.get("explanations_missing", 0)),
                 source_limited=bool(data.get("source_limited", False)),
                 ai_month_exhausted=bool(data.get("ai_month_exhausted", False)),
+                other_errors=int(data.get("other_errors", 0)),
             )
         except (ValueError, KeyError, TypeError) as exc:
             raise PayloadError("summary payload is not readable") from exc
@@ -189,6 +195,11 @@ class RunSummary:
         reasons: list[str] = []
         if self.row_errors:
             reasons.append(f"Строк с ошибками: {self.row_errors}; они исключены из проверки.")
+        if self.other_errors:
+            reasons.append(
+                f"Ошибок в остальных файлах пакета: {self.other_errors}; эти данные не учтены, "
+                "подробности — на листе «Качество данных»."
+            )
         if self.budget_exhausted:
             reasons.append("Лимит времени или запросов проверки исчерпан.")
         if self.source_limited:
@@ -394,16 +405,12 @@ class AnalysisPipeline:
         }
         known = {row.inn for row in rows}
         interactions = tuple(item for item in package.interactions if item.inn in known)
-        # S7-01: the overdue report names companies, not INNs — the link is by name, and
-        # what did not match is a finding of the report, not a silent loss.
-        linked = link_contracts(package.contracts, _company_names(rows, snapshots))
+        # S7-01: the overdue report usually names companies, not INNs — the link is by the
+        # INN where it is printed, by name elsewhere, and what did not match is a finding of
+        # the report, not a silent loss.
+        names, own_names = _company_names(rows, snapshots)
+        linked = link_contracts(package.contracts, names, own_names=own_names)
         issues = issues + _contract_issues(linked)
-        if package.contracts:
-            # Saved so the card shows the same answer instead of working it out again
-            # from one company's name, where two namesakes look alike (review B on #58).
-            await self._save(
-                run, RUN_SCOPE, LINKS_STEP, LINKS_VERSION, payload=dump_links(linked.by_inn)
-            )
         explanations = await self._explain(
             run, rows, assessments, indicators, snapshots, chronology(interactions)
         )
@@ -462,10 +469,22 @@ class AnalysisPipeline:
         summary = _summarize(
             report_rows,
             issues,
+            main_file=_main_file(run),
             explainer=self._explainer is not None,
             month_exhausted=self._ai_month_exhausted,
         )
         await self._save(run, RUN_SCOPE, REPORT_STEP, REPORT_VERSION, payload=summary.to_payload())
+        if package.contracts:
+            # Saved so the card shows the same answer instead of working it out again
+            # from one company's name, where two namesakes look alike (review B on #58).
+            # Only by the pass whose report stands: a step is written once, and a pass cut
+            # short before its report — say a company left unnamed by a transient failure,
+            # named on the resume — would leave the card a link the report no longer has.
+            # Cut short between these two writes, the check has no link, and the card says
+            # nothing rather than something else (``internal_context``).
+            await self._save(
+                run, RUN_SCOPE, LINKS_STEP, LINKS_VERSION, payload=dump_links(linked.by_inn)
+            )
         return summary
 
     # --- AI explanations (S5-02) -----------------------------------------------------
@@ -605,9 +624,15 @@ class AnalysisPipeline:
 
 def _company_names(
     rows: tuple[CounterpartyRow, ...], snapshots: dict[str, tuple[ExternalSnapshot, ...]]
-) -> dict[str, str | None]:
-    """INN → the company name the source gave, or None when it gave none (S7-01)."""
+) -> tuple[dict[str, str | None], frozenset[str]]:
+    """INN → the company name the source gave (S7-01), and the INNs named by the owner.
+
+    The source names no ИП: its company section is not asked for them (S7-02). Their name
+    is then the one in the customer's «Контрагенты» — printed by the same 1C as the overdue
+    report — and a match to it is reported for a glance. None when neither has a name.
+    """
     names: dict[str, str | None] = {}
+    own: set[str] = set()
     for row in rows:
         name = None
         for snapshot in snapshots.get(row.inn, ()):
@@ -615,8 +640,11 @@ def _company_names(
                 if fact.kind is FactKind.COMPANY_NAME and isinstance(fact.value, str):
                     name = fact.value
                     break
+        if name is None and row.name:
+            name = row.name
+            own.add(row.inn)
         names[row.inn] = name
-    return names
+    return names, frozenset(own)
 
 
 def _contract_issues(linked: LinkedContracts) -> tuple[ImportIssue, ...]:
@@ -627,7 +655,8 @@ def _contract_issues(linked: LinkedContracts) -> tuple[ImportIssue, ...]:
             _issue(
                 "contracts_owner_unknown",
                 f"Договоры {_companies(len(linked.unknown))} из отчёта по договорам "
-                "не отнесены ни к одной организации проверки: названия не совпали.",
+                "не отнесены ни к одной организации проверки: в проверке нет организации "
+                "с таким ИНН или названием.",
             )
         )
     if linked.ambiguous:
@@ -635,7 +664,8 @@ def _contract_issues(linked: LinkedContracts) -> tuple[ImportIssue, ...]:
             _issue(
                 "contracts_owner_ambiguous",
                 f"Договоры {_companies(len(linked.ambiguous))} не отнесены: "
-                "в проверке есть несколько организаций с таким же названием.",
+                "такое название носят несколько организаций — в проверке или в самом отчёте "
+                "под разными ИНН.",
             )
         )
     if linked.without_form:
@@ -646,12 +676,20 @@ def _contract_issues(linked: LinkedContracts) -> tuple[ImportIssue, ...]:
                 "без учёта правовой формы — проверьте, те ли это организации.",
             )
         )
+    if linked.by_own_name:
+        issues.append(
+            _issue(
+                "contracts_matched_by_own_name",
+                f"Договоры {_companies(len(linked.by_own_name))} привязаны по названию из файла "
+                "«Контрагенты»: источник названия не дал — проверьте, те ли это организации.",
+            )
+        )
     if linked.unnamed:
         issues.append(
             _issue(
                 "contracts_name_missing",
-                f"У {_companies(len(linked.unnamed))} нет названия от источника, "
-                "поэтому договоры из отчёта к ним не привязывались.",
+                f"У {_companies(len(linked.unnamed))} нет названия ни от источника, ни в файле "
+                "«Контрагенты», поэтому договоры из отчёта к ним не привязывались.",
             )
         )
     return tuple(issues)
@@ -678,7 +716,8 @@ def _hit_source_limit(snapshot: ExternalSnapshot) -> bool:
 
 # A sample cut on a later page by one of these may well be finished by a repeat; one cut by
 # a broken answer (api_error, invalid_response) would break the same way, so it is final.
-_UNFINISHED = TRANSIENT_CODES | {DAILY_LIMIT}
+# The run's own budget cuts samples too (review G5): a repeat brings a fresh one.
+_UNFINISHED = TRANSIENT_CODES | {DAILY_LIMIT, BUDGET_EXHAUSTED}
 
 
 def _is_open(snapshot: ExternalSnapshot) -> bool:
@@ -706,19 +745,40 @@ _FILE_USE = {
 }
 
 
+def _main_file(run: AnalysisRun) -> str | None:
+    return next((file.id for file in run.files if file.kind is FileKind.COUNTERPARTIES), None)
+
+
+def _errors(issues: tuple[ImportIssue, ...], main_file: str | None) -> tuple[int, int]:
+    """(rows of «Контрагенты» with an error, the other errors of the package).
+
+    A row with two bad cells is one row left out; a bad row of «Платежи» is not a row of
+    the list being checked, and its number says nothing about «Контрагенты».
+    """
+    main_rows: set[int] = set()
+    other_rows: set[tuple[str | None, int]] = set()
+    other = 0
+    for issue in issues:
+        if issue.severity is not IssueSeverity.ERROR:
+            continue
+        if issue.row is None:
+            other += 1
+        elif main_file is not None and issue.file_id == main_file:
+            main_rows.add(issue.row)
+        else:
+            other_rows.add((issue.file_id, issue.row))
+    return len(main_rows), other + len(other_rows)
+
+
 def _package_lines(run: AnalysisRun, package: ImportedPackage) -> tuple[str, ...]:
     """The package as the report states it: every file with the same label as on
     «Качество данных», how many usable rows it gave and what it was used for (S4-04)."""
-    rows, issues = package.rows, package.issues
-    bad_rows = {
-        issue.row
-        for issue in issues
-        if issue.severity is IssueSeverity.ERROR and issue.row is not None
-    }
+    rows = package.rows
+    bad_rows, _ = _errors(package.issues, _main_file(run))
     lines = []
     for file, (_, label) in zip(run.files, file_labels(run.files), strict=True):
         if file.kind is FileKind.COUNTERPARTIES:
-            lines.append(f"{label}: {len(rows) + len(bad_rows)} строк, пригодных {len(rows)}")
+            lines.append(f"{label}: {len(rows) + bad_rows} строк, пригодных {len(rows)}")
         else:
             # Each file is credited with what it gave itself (block 5, 30.09.2026: every
             # payments file showed the total of all of them, the report showed zero).
@@ -733,6 +793,7 @@ def _summarize(
     rows: tuple[ReportRow, ...],
     issues: tuple[ImportIssue, ...],
     *,
+    main_file: str | None = None,
     explainer: bool = False,
     month_exhausted: bool = False,
 ) -> RunSummary:
@@ -740,6 +801,7 @@ def _summarize(
     checked = 0
     budget_exhausted = False
     source_limited = False
+    row_errors, other_errors = _errors(issues, main_file)
     for row in rows:
         priorities[row.assessment.priority] += 1
         # A sample cut short (#71) is data, but not a finished check of the company.
@@ -748,7 +810,11 @@ def _summarize(
             for snapshot in row.snapshots
         ):
             checked += 1
-        if any(_hit_budget(snapshot) for snapshot in row.snapshots):
+        if any(
+            _hit_budget(snapshot)
+            or (snapshot.interrupted is not None and snapshot.interrupted.code == BUDGET_EXHAUSTED)
+            for snapshot in row.snapshots
+        ):
             budget_exhausted = True
         if any(_hit_source_limit(snapshot) for snapshot in row.snapshots):
             source_limited = True
@@ -756,7 +822,8 @@ def _summarize(
         companies=len(rows),
         checked=checked,
         unchecked=len(rows) - checked,
-        row_errors=sum(1 for issue in issues if issue.severity is IssueSeverity.ERROR),
+        row_errors=row_errors,
+        other_errors=other_errors,
         priorities=priorities,
         budget_exhausted=budget_exhausted,
         source_limited=source_limited,

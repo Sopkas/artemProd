@@ -16,6 +16,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     PARTIAL = "partial"
     FAILED = "failed"
+    PURGING = "purging"
 
 
 # docs/architecture.md: draft → queued → running → completed | partial | failed.
@@ -28,6 +29,7 @@ _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.COMPLETED: frozenset(),
     RunStatus.PARTIAL: frozenset(),
     RunStatus.FAILED: frozenset(),
+    RunStatus.PURGING: frozenset(),
 }
 
 

@@ -6,6 +6,7 @@ label or an identifier there breaks these tests rather than the monitoring quiet
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -26,11 +27,13 @@ from claims_assistant.domain.monitoring import (
     COURT_CLAIM_THRESHOLD,
     GAP_NOTE,
     MONITORED,
+    RULES_VERSION,
     SectionState,
     claim_of,
     compare,
 )
 from claims_assistant.infrastructure.checko import courts, enforcements, fedresurs
+from claims_assistant.infrastructure.checko.company_data import normalize_company
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 
 INN = "1234567894"
@@ -294,6 +297,43 @@ def test_a_liquidation_is_sent():
     )
 
 
+def checko_company(code: str, name: str, at: datetime) -> ExternalSnapshot:
+    """The live adapter's own reading of a company extract with this status."""
+    payload = {
+        "meta": {"status": "ok"},
+        "data": {
+            "ИНН": INN,
+            "ОГРН": OGRN,
+            "НаимСокр": "ООО «ТЕСТ»",
+            "ДатаВып": at.date().isoformat(),
+            "Статус": {"Код": code, "Наим": name},
+        },
+    }
+    return normalize_company(payload, INN, at)
+
+
+def test_a_liquidation_the_live_adapter_does_not_match_is_still_sent():
+    """Review of S8-06: Checko's adapter knows only «Действует», any other status is None —
+    a liquidation compared as «no change» and the day closed with «Изменений нет»."""
+    active = checko_company("001", "Действует", YESTERDAY)
+    liquidating = checko_company("101", "Находится в стадии ликвидации", TODAY)
+    result = compare(INN, full_day(YESTERDAY, company=active), full_day(TODAY, company=liquidating))
+    (change,) = result.to_notify
+    assert change.kind is FactKind.COMPANY_STATUS and change.record_id == OGRN
+    assert change.text == (
+        "Статус организации изменился: был «действует», "
+        "теперь другой, бот его не распознал — проверьте выписку"
+    )
+    assert not result.nothing_new
+    # And back: a status matched again is a change too; an unmatched one twice is not.
+    back = compare(INN, full_day(YESTERDAY, company=liquidating), full_day(TODAY, company=active))
+    assert [c.text for c in back.to_notify] == [
+        "Статус организации изменился: был другой (бот его не распознал), теперь «действует»"
+    ]
+    again = checko_company("101", "Находится в стадии ликвидации", TODAY)
+    assert compare(INN, [liquidating], [again]).changes == ()
+
+
 def test_the_first_check_is_a_baseline():
     new = [case("А00-1/2026", "2026-09-01", claim=5_000_000)]
     result = compare(INN, [], full_day(TODAY, courts=court_snapshot(new, TODAY)))
@@ -455,3 +495,9 @@ def test_a_list_partial_for_another_reason_has_no_gap():
     assert today.coverage is Coverage.PARTIAL
     result = compare(INN, full_day(WEEK_AGO), full_day(TODAY, enforcements=today))
     assert dict(result.states)[Section.ENFORCEMENTS] is SectionState.COMPARED
+
+
+def test_the_document_names_the_rules_version_of_the_code():
+    """Review of S8-12: the rules went to 0.2 while docs/monitoring.md still said 0.1."""
+    doc = Path(__file__).resolve().parents[2] / "docs" / "monitoring.md"
+    assert f"Правила версии {RULES_VERSION}," in doc.read_text("utf-8")

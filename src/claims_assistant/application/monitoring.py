@@ -8,7 +8,11 @@ reads is too (``presentation/telegram/monitoring``). Here is the rest:
   starts from a new baseline.
 - **One run a business day**, at the agreed time or later: a bot that was off at that
   hour runs when it starts. A run is resumable — a company checked today is not asked
-  again after a restart, so a crash costs no second day's requests.
+  again after a restart, and the requests the day has used are kept, so a crash costs no
+  second day's requests.
+- **One queue a day for every owner's list**: the longest unchecked first, whoever's they
+  are, the owners taking turns among equals — the day's requests are not the first
+  owner's every day (review of S8-09).
 - **The last successful snapshot of each section is kept**, not yesterday's: a case that
   appeared on a day the source was down is still new the next day (S8-06).
 - **Every message goes to an outbox first**, in the same transaction as the check it
@@ -236,7 +240,13 @@ class WatchStore(Protocol):
 
     async def day_finished(self, day: date) -> bool: ...
 
-    async def start_day(self, day: date) -> None: ...
+    async def start_day(self, day: date) -> int:
+        """The day's row; returns the requests its earlier attempts used."""
+        ...
+
+    async def spend(self, day: date, used: int) -> None:
+        """The requests the day has used so far: a restart goes on from them."""
+        ...
 
     async def finish_day(self, day: date) -> None: ...
 
@@ -282,6 +292,15 @@ def company_name(snapshots: Sequence[ExternalSnapshot]) -> str | None:
     return None
 
 
+def _cut_by_limit(snapshot: ExternalSnapshot) -> bool:
+    """The limit refused the section, or ran out between its EFRSB pages (review G5: the
+    day's requests now pay for every page): either way the company was not seen in full
+    and goes first next run, like analysis_pipeline._summarize says «лимит» for it."""
+    if snapshot.interrupted is not None and snapshot.interrupted.code in _LIMIT_CODES:
+        return True
+    return snapshot.error is not None and snapshot.error.code in _LIMIT_CODES
+
+
 def waits_for_limit(snapshots: Sequence[ExternalSnapshot]) -> bool:
     """Every section is the limit's placeholder: nothing about the company was learned."""
     return bool(snapshots) and all(
@@ -292,17 +311,34 @@ def waits_for_limit(snapshots: Sequence[ExternalSnapshot]) -> bool:
     )
 
 
+def _queue_key(entry: WatchEntry, limited: frozenset[str]) -> tuple[bool, date]:
+    settled = entry.last_checked_on is not None and entry.inn not in limited
+    return settled, entry.last_checked_on or date.min
+
+
 def queue_order(
     entries: Sequence[WatchEntry], limited: frozenset[str] = frozenset()
 ) -> list[WatchEntry]:
     """Never checked and cut short by the limit last time first, then the longest
     unchecked; among equals, the store's order (newest first)."""
+    return sorted(entries, key=lambda entry: _queue_key(entry, limited))
 
-    def key(entry: WatchEntry) -> tuple[bool, date]:
-        settled = entry.last_checked_on is not None and entry.inn not in limited
-        return settled, entry.last_checked_on or date.min
 
-    return sorted(entries, key=key)
+def shared_queue(
+    lists: Sequence[tuple[int, Sequence[WatchEntry], frozenset[str]]],
+) -> list[tuple[int, WatchEntry]]:
+    """The day's one queue over every owner's due companies: ``queue_order`` across the
+    lists, and among equals the owners take turns — each one's first, then each one's
+    second. Owner by owner, the first list (the lowest Telegram ID) took the requests every
+    day and the next one waited for good, told every day it goes first next time (review of
+    S8-09)."""
+    ranked = [
+        (_queue_key(entry, limited), rank, position, owner_id, entry)
+        for position, (owner_id, entries, limited) in enumerate(lists)
+        for rank, entry in enumerate(queue_order(entries, limited))
+    ]
+    ranked.sort(key=lambda item: item[:3])
+    return [(owner_id, entry) for *_key, owner_id, entry in ranked]
 
 
 def failed_comparison(inn: str) -> Comparison:
@@ -411,36 +447,55 @@ class MonitoringService:
         return None if await self._store.day_finished(day) else day
 
     async def run_day(self, day: date) -> DayOutcome:
-        await self._store.start_day(day)
+        # The ceiling is the day's: an attempt after a restart or a failed run goes on from
+        # what the earlier ones used, not from a fresh budget (review of S8-09). The time
+        # limit is the attempt's own — it stops a hung run, it costs nothing.
+        spent = await self._store.start_day(day)
         budget = RunBudget.for_run(self.policy.max_requests, self.policy.max_seconds, self._clock())
+        budget.used = spent
         source = self._provider.scoped(budget)
-        owners = await self._store.owners()
-        checked = changed = unchecked = failed = waiting = 0
-        for owner_id in owners:
-            waits = 0
-            settings = await self._store.settings(owner_id)
-            if settings.paused:
-                continue  # not a request on a pause, and no summary to say so
-            entries = await self._store.entries(owner_id)
-            limited = await self._store.limited(owner_id)
-            for entry in queue_order(entries, limited):
-                if entry.last_checked_on == day:
-                    continue  # done before a restart
-                if not is_due(entry, day, settings, entry.inn in limited):
+        checked = changed = unchecked = failed = 0
+        waits: dict[int, int] = {}
+        tried: set[tuple[int, str]] = set()
+        # The queue spreads an owner's companies over the whole run (up to 3 hours), so his
+        # state is read again as it goes: a pause stops the rest of his list at once, and a
+        # pass over the lists read afresh takes what a resume or an addition made due while
+        # the run went on — owner by owner, each list was read when its turn came.
+        while queue := shared_queue(await self._due_lists(day, tried)):
+            for owner_id, entry in queue:
+                if (await self._store.settings(owner_id)).paused:
+                    # Paused during the run: not marked as reached, so a resume within
+                    # the same run brings these back in the next pass (a list that stays
+                    # paused is left out by _due_lists, so this does not spin).
                     continue
-                done = await self._check(owner_id, entry, day, source)
+                tried.add((owner_id, entry.inn))
+                # Persist a conservative reservation before any request can leave. If the
+                # process is killed mid-check, the remaining daily budget is forfeited;
+                # after a normal return or exception, reconcile to the actual amount.
+                await self._store.spend(day, budget.max_requests)
+                try:
+                    done = await self._check(owner_id, entry, day, source)
+                finally:
+                    spent = budget.used
+                    await self._store.spend(day, spent)
                 if done is None:
                     continue  # taken off the list while it was being checked
                 if done is _WAITS:
-                    waits += 1
+                    waits[owner_id] = waits.get(owner_id, 0) + 1
                     continue
                 comparison, broke = done
                 checked += 1
                 changed += bool(comparison.to_notify)
                 unchecked += bool(comparison.unchecked)
                 failed += broke
-            waiting += waits
-            await self._summary(owner_id, day, settings, waits)
+        # Each summary after the whole queue: an owner's companies are spread over it. The
+        # settings are read again — one who paused during the run gets none, as on a pause.
+        owners = await self._store.owners()
+        for owner_id in owners:
+            settings = await self._store.settings(owner_id)
+            if not settings.paused:
+                await self._summary(owner_id, day, settings, waits.get(owner_id, 0))
+        waiting = sum(waits.values())
         await self._store.finish_day(day)
         keep = timedelta(days=self.policy.keep_messages_days)
         await self._store.purge_messages(self._clock() - keep)
@@ -459,6 +514,27 @@ class MonitoringService:
         )
         return outcome
 
+    async def _due_lists(
+        self, day: date, tried: set[tuple[int, str]]
+    ) -> list[tuple[int, list[WatchEntry], frozenset[str]]]:
+        """Every owner's companies due today and not yet tried in this run, read afresh."""
+        lists: list[tuple[int, list[WatchEntry], frozenset[str]]] = []
+        for owner_id in await self._store.owners():
+            settings = await self._store.settings(owner_id)
+            if settings.paused:
+                continue  # not a request on a pause, and no summary to say so
+            limited = await self._store.limited(owner_id)
+            due = [
+                entry
+                for entry in await self._store.entries(owner_id)
+                # Not the ones done before a restart, nor those this run reached already.
+                if entry.last_checked_on != day
+                and (owner_id, entry.inn) not in tried
+                and is_due(entry, day, settings, entry.inn in limited)
+            ]
+            lists.append((owner_id, due, limited))
+        return lists
+
     async def _check(
         self, owner_id: int, entry: WatchEntry, day: date, source: CompanyDataProvider
     ) -> tuple[Comparison, bool] | object | None:
@@ -467,10 +543,7 @@ class MonitoringService:
             current = await source.fetch(CompanyDataRequest(inn=entry.inn, sections=MONITORED))
             if waits_for_limit(current):
                 return _WAITS
-            limited = any(
-                snapshot.error is not None and snapshot.error.code in _LIMIT_CODES
-                for snapshot in current
-            )
+            limited = any(_cut_by_limit(snapshot) for snapshot in current)
             previous = [
                 snapshot
                 for snapshot in await self._store.snapshots(owner_id, entry.inn)

@@ -5,7 +5,10 @@ package names the same INN, the card also shows what the owner's own files say: 
 internal indicators (S4-06) and the chronology of interactions (S4-02). The package is
 re-read from storage through the same review as the pipeline, so the card and the report
 cannot disagree. Only the owner's checks are searched — the repository is owner-scoped —
-and the newest finished check that contains the INN wins.
+and the newest finished check that contains the INN wins. Every finished check is searched,
+not only the latest few: one portfolio check followed by a handful of small ones must not
+take the portfolio's companies off the card. The retention period bounds how many there
+are, and only the «Контрагенты» file of each is read until the INN is found.
 """
 
 from dataclasses import dataclass
@@ -55,9 +58,6 @@ async def _linked_contracts(
         return load_links(step.payload).get(inn, ())
     except PayloadError:
         return ()
-
-
-_NEWEST_RUNS = 5  # how many of the owner's finished checks are searched for the INN
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +119,7 @@ async def internal_context(
     could refuse to attribute a name two of them share (review B on #58).
     """
     runs = [run for run in await repository.list_runs(owner_id) if run.status in FINISHED]
-    for run in runs[:_NEWEST_RUNS]:
+    for run in runs:
         # Cheap first: only the «Контрагенты» file says whether the INN is in the package;
         # the optional files are parsed once, for the check that has it.
         try:
