@@ -225,3 +225,34 @@ async def test_run_relaunched_after_the_listing_is_not_purged(storage):
     assert run.status == RunStatus.QUEUED and len(run.files) == 1
     assert files.read(run.files[0].stored_path)
     assert await repository.delete_run(old.id, before) is False
+
+
+async def test_a_draft_launched_while_its_files_go_is_counted_and_logged(storage, caplog):
+    """The launch lands between the re-check and the record delete: the records stay (the
+    delete carries the condition), the files are already gone. That used to pass silently
+    as «nothing removed»; the run then failed asking for a new upload."""
+    import asyncio
+    import logging
+
+    repository, files, clock = storage
+    old = await make_run(repository, files, status=RunStatus.DRAFT)
+    clock.now += timedelta(days=31)
+    remove_run = files.remove_run
+
+    class Racing:
+        def remove_run(self, run_id):
+            remove_run(run_id)
+            # The bot's launch handler runs while the sweep waits on the thread.
+            asyncio.run_coroutine_threadsafe(
+                repository.transition(OWNER, old.id, RunStatus.QUEUED), loop
+            ).result()
+
+        def __getattr__(self, name):
+            return getattr(files, name)
+
+    loop = asyncio.get_running_loop()
+    with caplog.at_level(logging.ERROR):
+        summary = await purge_expired(repository, Racing(), retention=RETENTION, now=clock.now)
+    assert summary == PurgeSummary(expired=1, removed=0, failed=0, revived=1)
+    assert f"purge_run_revived_without_files run_id={old.id}" in caplog.text
+    assert (await repository.get_run(OWNER, old.id)).status == RunStatus.QUEUED

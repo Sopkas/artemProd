@@ -30,7 +30,7 @@ from claims_assistant.domain.watchlist import (
     unique,
 )
 
-from .contract_link import merge_repeats, normalize_name
+from .contract_link import merge_repeats, names_to_inns, normalize_name
 from .imports import ImportLimits, OutlineReader, RawSheetReader
 
 HEADER_ROWS = 20
@@ -101,11 +101,11 @@ def _name(cell: Cell) -> str | None:
 def _merged(counterparties: tuple[CounterpartyDebt, ...]) -> list[CounterpartyDebt]:
     """The companies of a report, each once, in the order they first come.
 
-    ``merge_repeats`` joins entries by the printed name and keeps the first INN: two
-    different companies of one name (two «ИП Иванов …» under different sales points) would
-    become one, carrying the first INN but judged by the other's days — a debtor of 10
-    days taken as one of 90, and the real one of 90 lost uncounted. Since the cut decides
-    by the merged days (S8-14), a company here is its INN:
+    ``merge_repeats`` is keyed by the printed name: it keeps two INNs of one name apart,
+    but one INN printed under two names (a duplicate catalog entry in 1C) stays two
+    companies there, each judged by its own days — one debtor counted twice, both taken
+    and cut out. Since the cut decides by the merged days (S8-14), a company here is its
+    INN:
 
     - all entries of one INN are one company, whatever names they are printed under (a
       duplicate catalog entry in 1C), named by its first entry;
@@ -114,10 +114,7 @@ def _merged(counterparties: tuple[CounterpartyDebt, ...]) -> list[CounterpartyDe
       under two or more INNs its owner is unknown and it stays apart;
     - the rest without an INN are joined by name, as ``merge_repeats`` does.
     """
-    inns_of: dict[str, set[str]] = {}
-    for counterparty in counterparties:
-        if counterparty.inn:
-            inns_of.setdefault(normalize_name(counterparty.name), set()).add(counterparty.inn)
+    inns_of = names_to_inns(counterparties)
     groups: dict[tuple[str, str], list[CounterpartyDebt]] = {}
     for counterparty in counterparties:
         name = normalize_name(counterparty.name)
