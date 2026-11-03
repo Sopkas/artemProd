@@ -98,6 +98,17 @@ def out_of_requests(snapshot: ExternalSnapshot) -> ExternalSnapshot:
     )
 
 
+def pages_out_of_requests(snapshot: ExternalSnapshot) -> ExternalSnapshot:
+    """The adapter's sample cut between pages by the day's requests (review G5): an answer,
+    but a partial one with the budget as the reason it stopped."""
+    return replace(
+        snapshot,
+        coverage=Coverage.PARTIAL,
+        missing=("Выборка сообщений ЕФРСБ неполная; проверьте реестр вручную.",),
+        interrupted=ProviderError(BUDGET_EXHAUSTED, BUDGET_MESSAGE),
+    )
+
+
 class Source:
     """The guarded provider as the service sees it: ``scoped(budget)`` and ``fetch``."""
 
@@ -107,6 +118,7 @@ class Source:
         self.broken: set[str] = set()
         self.spent: set[str] = set()  # companies the day's requests do not reach
         self.cut: set[tuple[str, Section]] = set()  # sections the requests ran out on
+        self.pages_cut: set[str] = set()  # EFRSB samples the requests ran out on mid-pages
         self.mode = DataMode.DEMO
         self.calls: list[str] = []
         self.budgets: list = []
@@ -129,6 +141,8 @@ class Source:
                 snapshot = down(snapshot)
             if snapshot.inn in self.spent or (snapshot.inn, snapshot.section) in self.cut:
                 snapshot = out_of_requests(snapshot)
+            if snapshot.inn in self.pages_cut and snapshot.section is Section.BANKRUPTCY:
+                snapshot = pages_out_of_requests(snapshot)
             answers.append(replace(snapshot, mode=self.mode))
         return tuple(answers)
 
@@ -429,6 +443,22 @@ async def test_a_company_the_requests_ran_out_on_midway_goes_first_next_day(worl
     await run(world, service, 17)
     assert world.source.calls == [B, C, A]
     # Checked in full now: an ordinary place again.
+    assert await world.store.limited(OWNER) == frozenset()
+
+
+async def test_a_company_whose_efrsb_pages_the_requests_ran_out_on_goes_first_next_day(world):
+    """Review G5: the day's requests pay for every EFRSB page now, so they can run out
+    between pages. The sample answered, but not in full: the company goes first next day."""
+    service = world.service()
+    await service.add(OWNER, [Candidate(A), Candidate(B), Candidate(C)])  # store: C, B, A
+    world.source.pages_cut = {B}
+    outcome = await run(world, service, 16)
+    assert (outcome.checked, outcome.waiting) == (3, 0)
+    assert await world.store.limited(OWNER) == frozenset({B})
+    world.source.pages_cut = set()
+    world.source.calls.clear()
+    await run(world, service, 17)
+    assert world.source.calls == [B, C, A]
     assert await world.store.limited(OWNER) == frozenset()
 
 

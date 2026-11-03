@@ -292,6 +292,15 @@ def company_name(snapshots: Sequence[ExternalSnapshot]) -> str | None:
     return None
 
 
+def _cut_by_limit(snapshot: ExternalSnapshot) -> bool:
+    """The limit refused the section, or ran out between its EFRSB pages (review G5: the
+    day's requests now pay for every page): either way the company was not seen in full
+    and goes first next run, like analysis_pipeline._summarize says «лимит» for it."""
+    if snapshot.interrupted is not None and snapshot.interrupted.code in _LIMIT_CODES:
+        return True
+    return snapshot.error is not None and snapshot.error.code in _LIMIT_CODES
+
+
 def waits_for_limit(snapshots: Sequence[ExternalSnapshot]) -> bool:
     """Every section is the limit's placeholder: nothing about the company was learned."""
     return bool(snapshots) and all(
@@ -529,10 +538,7 @@ class MonitoringService:
             current = await source.fetch(CompanyDataRequest(inn=entry.inn, sections=MONITORED))
             if waits_for_limit(current):
                 return _WAITS
-            limited = any(
-                snapshot.error is not None and snapshot.error.code in _LIMIT_CODES
-                for snapshot in current
-            )
+            limited = any(_cut_by_limit(snapshot) for snapshot in current)
             previous = [
                 snapshot
                 for snapshot in await self._store.snapshots(owner_id, entry.inn)

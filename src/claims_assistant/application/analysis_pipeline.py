@@ -716,7 +716,8 @@ def _hit_source_limit(snapshot: ExternalSnapshot) -> bool:
 
 # A sample cut on a later page by one of these may well be finished by a repeat; one cut by
 # a broken answer (api_error, invalid_response) would break the same way, so it is final.
-_UNFINISHED = TRANSIENT_CODES | {DAILY_LIMIT}
+# The run's own budget cuts samples too (review G5): a repeat brings a fresh one.
+_UNFINISHED = TRANSIENT_CODES | {DAILY_LIMIT, BUDGET_EXHAUSTED}
 
 
 def _is_open(snapshot: ExternalSnapshot) -> bool:
@@ -809,7 +810,11 @@ def _summarize(
             for snapshot in row.snapshots
         ):
             checked += 1
-        if any(_hit_budget(snapshot) for snapshot in row.snapshots):
+        if any(
+            _hit_budget(snapshot)
+            or (snapshot.interrupted is not None and snapshot.interrupted.code == BUDGET_EXHAUSTED)
+            for snapshot in row.snapshots
+        ):
             budget_exhausted = True
         if any(_hit_source_limit(snapshot) for snapshot in row.snapshots):
             source_limited = True

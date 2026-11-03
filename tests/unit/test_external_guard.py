@@ -1,5 +1,6 @@
 """Limits, retries and cache around CompanyDataProvider (S3-02)."""
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -23,6 +24,7 @@ from claims_assistant.domain.external import (
     Section,
 )
 from claims_assistant.infrastructure.cache.memory import TtlSnapshotCache
+from claims_assistant.infrastructure.checko.company_data import CheckoCompanyDataProvider
 from claims_assistant.infrastructure.demo.company_data import DemoCompanyDataProvider, DemoScenario
 
 INN = "1234567894"
@@ -310,6 +312,159 @@ async def test_no_request_outlives_the_budget_deadline(clock, sleeps):
     budget = RunBudget(max_requests=10, deadline=START + timedelta(seconds=5))
     await provider.scoped(budget).fetch(CompanyDataRequest(INN, THREE))
     assert inner.calls[0].limits.timeout_seconds == 5
+
+
+class EfrsbPages:
+    """A Checko EFRSB section with ``total`` pages; each page takes ``seconds`` of the clock
+    and records the timeout it was given."""
+
+    def __init__(self, clock: Clock, total: int, seconds: float = 0) -> None:
+        self.clock, self.total, self.seconds = clock, total, seconds
+        self.timeouts: list[float] = []
+
+    async def request(self, key, inn, page, timeout):
+        self.timeouts.append(timeout)
+        self.clock.advance(self.seconds)
+        record = {"Дата": "2026-01-01", "GUID": f"g-{page}", "Тип": "X", "ТипНаим": "Решение"}
+        data = {"ЗапВсего": self.total, "СтрВсего": self.total, "СтрТекущ": page}
+        return 200, {"meta": {"status": "ok"}, "data": {**data, "Записи": [record]}}
+
+
+def checko(clock: Clock, pages: EfrsbPages) -> CheckoCompanyDataProvider:
+    return CheckoCompanyDataProvider("synthetic-key", clock=clock, bankruptcy_transport=pages)
+
+
+async def test_later_pages_are_charged_to_the_run_budget(clock, sleeps):
+    """Review G5: twenty EFRSB pages were charged as one request, so the card's 20 and the
+    run's 1 500 were not ceilings. Each page is a unit now; the budget's end cuts the
+    sample, keeps what came, and says it is not final."""
+    pages = EfrsbPages(clock, total=50)
+    provider = guard(checko(clock, pages), clock, sleeps)
+    budget = RunBudget(max_requests=5, deadline=START + timedelta(minutes=15))
+    (snapshot,) = await provider.scoped(budget).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert len(pages.timeouts) == 5 and budget.used == 5 and budget.exhausted
+    assert snapshot.coverage is Coverage.PARTIAL and len(snapshot.facts) == 5
+    assert snapshot.interrupted.code == BUDGET_EXHAUSTED
+    await provider.scoped(RunBudget.unlimited()).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert len(pages.timeouts) == 5 + 20  # not cached: asked again, up to max_pages
+
+
+async def test_a_later_page_gets_only_the_time_the_budget_has_left(clock, sleeps):
+    """Review G5: each page had its own 20 s, so a slow register ran a card past its minute
+    page by page. A page now waits no longer than the budget's deadline, and none starts
+    after it."""
+    pages = EfrsbPages(clock, total=10, seconds=4)
+    provider = guard(checko(clock, pages), clock, sleeps, timeout_seconds=20)
+    budget = RunBudget(max_requests=100, deadline=START + timedelta(seconds=10))
+    (snapshot,) = await provider.scoped(budget).fetch(
+        CompanyDataRequest(INN, (Section.BANKRUPTCY,))
+    )
+    assert pages.timeouts == [10, 6, 2]
+    assert snapshot.interrupted.code == BUDGET_EXHAUSTED and budget.used == 3
+
+
+class FlakyCompany:
+    """Checko's company section: times out on the first ask, answers on the next."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def request(self, key, inn, timeout):
+        self.calls += 1
+        if self.calls == 1:
+            raise TimeoutError
+        data = {
+            "ИНН": inn,
+            "ОГРН": "0000000000000",
+            "НаимСокр": "ДЕМО ТЕСТ",
+            "ДатаВып": "2026-09-01",
+            "Статус": {"Код": "001", "Наим": "Действует"},
+        }
+        return 200, {"meta": {"status": "ok"}, "data": data}
+
+
+async def test_later_pages_leave_the_other_sections_their_retries(clock, sleeps):
+    """Review G5: on a card the EFRSB pages came while the company section was in flight
+    and took all 20 units, so its timeout was never retried. Pages now stop where the
+    retries still owed to the other sections begin; the sample says it was cut."""
+    pages, company = EfrsbPages(clock, total=50), FlakyCompany()
+    provider = guard(
+        CheckoCompanyDataProvider(
+            "synthetic-key", company, clock=clock, bankruptcy_transport=pages
+        ),
+        clock,
+        sleeps,
+    )
+    card, bankruptcy = await provider.fetch(
+        CompanyDataRequest(INN, (Section.COMPANY, Section.BANKRUPTCY))
+    )
+    assert company.calls == 2 and card.status is FetchStatus.OK
+    # 20 units: two first asks, sixteen later pages, the company's two retries held back
+    # (one of them spent).
+    assert len(pages.timeouts) == 1 + 16
+    assert bankruptcy.interrupted.code == BUDGET_EXHAUSTED
+
+
+class SlowCompany(FlakyCompany):
+    """Checko's company section still in flight while the EFRSB pages come: it answers
+    only after the paging section lets the loop run (``fails`` — with a timeout)."""
+
+    def __init__(self, *, fails: bool = False) -> None:
+        super().__init__()
+        self.calls = 0 if fails else 1  # FlakyCompany times out on its first call
+
+    async def request(self, key, inn, timeout):
+        await asyncio.sleep(0)
+        return await super().request(key, inn, timeout)
+
+
+@pytest.mark.parametrize("max_retries", [2, 3])
+async def test_pages_take_what_no_retry_is_owed_for(clock, sleeps, max_retries):
+    """Review G5, round 3: the units held for the other sections' retries stayed held when
+    those sections answered, so a card read five EFRSB pages and left half its 20 unspent
+    (with three retries — one page). Only a section still in flight or failed holds units:
+    a page that would take them waits for it, and an answer releases them."""
+    pages = EfrsbPages(clock, total=19)
+    company = SlowCompany()
+    provider = guard(
+        CheckoCompanyDataProvider(
+            "synthetic-key", company, clock=clock, bankruptcy_transport=pages
+        ),
+        clock,
+        sleeps,
+        max_retries=max_retries,
+    )
+    card, bankruptcy = await provider.fetch(
+        CompanyDataRequest(INN, (Section.COMPANY, Section.BANKRUPTCY))
+    )
+    assert card.status is FetchStatus.OK and company.calls == 2
+    # 20 units: two first asks and eighteen later pages, the whole register.
+    assert len(pages.timeouts) == 19
+    assert bankruptcy.interrupted is None
+    assert not any("неполная" in reason for reason in bankruptcy.missing)
+
+
+async def test_a_section_failing_after_the_wait_keeps_its_retries(clock, sleeps):
+    """The other side of the wait: the section in flight times out, so its retries are owed
+    and the pages stop short of them."""
+    pages, company = EfrsbPages(clock, total=50), SlowCompany(fails=True)
+    provider = guard(
+        CheckoCompanyDataProvider(
+            "synthetic-key", company, clock=clock, bankruptcy_transport=pages
+        ),
+        clock,
+        sleeps,
+    )
+    card, bankruptcy = await provider.fetch(
+        CompanyDataRequest(INN, (Section.COMPANY, Section.BANKRUPTCY))
+    )
+    assert company.calls == 2 and card.status is FetchStatus.OK
+    assert len(pages.timeouts) == 1 + 16
+    assert bankruptcy.interrupted.code == BUDGET_EXHAUSTED
 
 
 def test_a_card_waits_a_minute_at_most():
