@@ -152,6 +152,12 @@ async def test_the_button_stands_next_to_the_card_in_the_main_menu(bot, update_f
     assert buttons(await send(dispatcher, bot, update_factory, "/start")) == MAIN_MENU
 
 
+async def test_xls_formula_warning_is_shown_before_upload(bot, update_factory, dispatcher):
+    reply = await send(dispatcher, bot, update_factory, "Мониторинг", "Добавить на мониторинг")
+    assert ".xls" in reply.text
+    assert "формулы не проверяются" in reply.text
+
+
 @pytest.mark.parametrize("entry", ["Мониторинг", "/monitor"])
 async def test_an_empty_list_says_what_monitoring_does(bot, update_factory, dispatcher, entry):
     reply = await send(dispatcher, bot, update_factory, entry)

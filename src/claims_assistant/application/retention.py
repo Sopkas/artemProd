@@ -23,7 +23,7 @@ from .check_package import FileStorage, StorageError
 logger = logging.getLogger(__name__)
 
 EXPIRABLE_STATUSES = frozenset(
-    {RunStatus.DRAFT, RunStatus.COMPLETED, RunStatus.PARTIAL, RunStatus.FAILED}
+    {RunStatus.DRAFT, RunStatus.COMPLETED, RunStatus.PARTIAL, RunStatus.FAILED, RunStatus.PURGING}
 )
 
 

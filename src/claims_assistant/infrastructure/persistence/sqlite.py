@@ -405,13 +405,21 @@ class SqliteAnalysisRepository:
         self, run_id: str, before: datetime, remove_files: Callable[[str], None]
     ) -> bool:
         with self._locked() as connection:
-            # The same condition as the listing, under the write lock: a run that came
-            # back to life between the sweep's listing and now is not deleted, and one
-            # cannot come back to life between this check and the deletes below.
             condition = self._expired_condition(run_id, before)
             if connection.execute(select(analysis_runs.c.id).where(condition)).first() is None:
                 return False
-            remove_files(run_id)
+            # Commit a durable tombstone before touching files. A crash or partial file
+            # removal cannot turn this run live again; the next sweep retries cleanup.
+            connection.execute(
+                analysis_runs.update()
+                .where(condition)
+                .values(status=RunStatus.PURGING.value, failure=None)
+            )
+        remove_files(run_id)
+        with self._locked() as connection:
+            condition = (analysis_runs.c.id == run_id) & (
+                analysis_runs.c.status == RunStatus.PURGING.value
+            )
             for table in (report_artifacts, run_steps, uploaded_files):
                 connection.execute(table.delete().where(table.c.run_id == run_id))
             gone = connection.execute(analysis_runs.delete().where(condition)).rowcount

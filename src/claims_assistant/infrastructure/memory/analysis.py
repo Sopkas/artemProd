@@ -193,5 +193,6 @@ class InMemoryAnalysisRepository:
     ) -> bool:
         if not await self.is_expired(run_id, before):
             return False
+        self._runs[run_id] = replace(self._runs[run_id], status=RunStatus.PURGING, failure=None)
         remove_files(run_id)
         return await self.delete_run(run_id, before)

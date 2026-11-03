@@ -469,8 +469,13 @@ class MonitoringService:
                     # paused is left out by _due_lists, so this does not spin).
                     continue
                 tried.add((owner_id, entry.inn))
-                done = await self._check(owner_id, entry, day, source)
-                if budget.used != spent:
+                # Persist a conservative reservation before any request can leave. If the
+                # process is killed mid-check, the remaining daily budget is forfeited;
+                # after a normal return or exception, reconcile to the actual amount.
+                await self._store.spend(day, budget.max_requests)
+                try:
+                    done = await self._check(owner_id, entry, day, source)
+                finally:
                     spent = budget.used
                     await self._store.spend(day, spent)
                 if done is None:

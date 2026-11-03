@@ -117,3 +117,24 @@ def test_the_start_check_names_a_newer_database(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("BACKUP_PATH", str(tmp_path / "backups"))
     assert app.main(["--check"]) == 1
     assert "Схема базы данных новее" in capsys.readouterr().err
+
+
+async def test_downgrade_refuses_pending_purge(tmp_path, monkeypatch):
+    from datetime import date
+
+    from claims_assistant.domain.external import DataMode
+
+    db = tmp_path / "claims.sqlite3"
+    repository = open_sqlite_repository(db)
+    run = await repository.create_run(42, date(2026, 10, 1), DataMode.DEMO)
+    with repository.engine.begin() as connection:
+        connection.execute(
+            text("UPDATE analysis_runs SET status='purging' WHERE id=:id"), {"id": run.id}
+        )
+    repository.close()
+    monkeypatch.setenv("DATABASE_PATH", str(db))
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", sqlite._MIGRATIONS.as_posix())
+    with pytest.raises(RuntimeError, match="Завершите очистку"):
+        command.downgrade(config, "0008")
+    assert _revision(db) == "0009"

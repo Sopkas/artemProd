@@ -550,6 +550,21 @@ async def test_a_run_tried_again_the_same_day_keeps_the_days_requests(metered):
     assert outcome.checked == 2
 
 
+async def test_remaining_budget_is_persistently_reserved_before_requests(metered):
+    world = metered
+    service = world.service(max_requests=20)
+    await service.add(OWNER, [Candidate(A)])
+    reservations = []
+
+    async def observe(_inn):
+        reservations.append(await world.store.start_day(date(2026, 10, 16)))
+
+    world.source.before_fetch = observe
+    await run(world, service, 16)
+    assert reservations == [20]
+    assert await world.store.start_day(date(2026, 10, 16)) == len(MONITORED)
+
+
 async def test_a_name_sent_while_the_company_is_checked_is_kept(world):
     """Review of S8-09: the check wrote back the name read before its requests — a
     correction sent meanwhile was lost, or the source's name replaced the owner's."""
@@ -899,3 +914,46 @@ async def test_a_failed_run_waits_before_it_is_tried_again(world):
     clock.now += timedelta(minutes=15)
     await scheduler.tick()
     assert service.run_day.await_count == 2
+
+
+async def test_process_killed_during_fetch_keeps_reservation(tmp_path):
+    import subprocess
+    import sys
+
+    db = tmp_path / "monitoring.sqlite3"
+    repository = open_sqlite_repository(db)
+    store = SqliteWatchStore(repository.engine, lambda: at(16))
+    service = MonitoringService(
+        store, Source(), TelegramMonitoringTexts(), mode=DataMode.DEMO, clock=lambda: at(16)
+    )
+    await service.add(OWNER, [Candidate(A)])
+    code = """import asyncio, os, sys
+from datetime import UTC, date, datetime
+from pathlib import Path
+from claims_assistant.application.monitoring import MonitoringService, MonitoringPolicy
+from claims_assistant.domain.external import DataMode
+from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
+from claims_assistant.infrastructure.persistence.watch import SqliteWatchStore
+from claims_assistant.presentation.telegram.monitoring_notifier import TelegramMonitoringTexts
+now = datetime(2026, 10, 16, 12, tzinfo=UTC)
+class Source:
+    def scoped(self, budget):
+        self.budget = budget
+        return self
+    async def fetch(self, request):
+        self.budget.take(1, now)
+        os._exit(74)
+r = open_sqlite_repository(Path(sys.argv[1]))
+s = MonitoringService(SqliteWatchStore(r.engine, lambda: now), Source(),
+    TelegramMonitoringTexts(), mode=DataMode.DEMO,
+    policy=MonitoringPolicy(max_requests=20), clock=lambda: now)
+asyncio.run(s.run_day(date(2026, 10, 16)))
+"""
+    try:
+        child = await asyncio.to_thread(
+            subprocess.run, [sys.executable, "-c", code, str(db)], timeout=20
+        )
+        assert child.returncode == 74
+        assert await store.start_day(date(2026, 10, 16)) == 20
+    finally:
+        repository.close()

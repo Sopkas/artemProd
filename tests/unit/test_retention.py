@@ -118,6 +118,8 @@ async def test_dry_run_counts_but_keeps_everything(storage, tmp_path):
 
 
 async def test_files_that_cannot_be_removed_keep_the_record_for_a_retry(storage, monkeypatch):
+    from claims_assistant.application.analysis_repository import InvalidTransition
+
     repository, files, clock = storage
     old = await make_run(repository, files, status=RunStatus.COMPLETED)
     clock.now += timedelta(days=31)
@@ -125,10 +127,15 @@ async def test_files_that_cannot_be_removed_keep_the_record_for_a_retry(storage,
     def refuse(run_id):
         raise StorageError("locked")
 
+    remove_run = files.remove_run
     monkeypatch.setattr(files, "remove_run", refuse)
     summary = await purge_expired(repository, files, retention=RETENTION, now=clock.now)
     assert summary == PurgeSummary(expired=1, removed=0, failed=1)
-    assert (await repository.get_run(OWNER, old.id)).id == old.id
+    assert (await repository.get_run(OWNER, old.id)).status is RunStatus.PURGING
+    with pytest.raises(InvalidTransition):
+        await repository.transition(OWNER, old.id, RunStatus.QUEUED)
+    monkeypatch.setattr(files, "remove_run", remove_run)
+    assert (await purge_expired(repository, files, retention=RETENTION, now=clock.now)).removed == 1
 
 
 async def test_retention_must_be_positive(storage):
@@ -227,11 +234,11 @@ async def test_run_relaunched_after_the_listing_is_not_purged(storage):
     assert await repository.delete_run(old.id, before) is False
 
 
-async def test_launch_waits_for_purge_and_cannot_lose_live_files(tmp_path):
+async def test_launch_is_refused_once_purge_is_committed(tmp_path):
     import asyncio
     import threading
 
-    from claims_assistant.application.analysis_repository import RunNotFound
+    from claims_assistant.application.analysis_repository import InvalidTransition
 
     clock = Clock(datetime(2026, 8, 1, 12, 0, tzinfo=UTC))
     repository = open_sqlite_repository(tmp_path / "claims.sqlite3", clock=clock)
@@ -252,13 +259,71 @@ async def test_launch_waits_for_purge_and_cannot_lose_live_files(tmp_path):
             purge_expired(repository, files, retention=RETENTION, now=clock.now)
         )
         assert await asyncio.to_thread(entered.wait, 10)
-        launch = asyncio.create_task(repository.transition(OWNER, old.id, RunStatus.QUEUED))
-        await asyncio.sleep(0.1)
-        assert not launch.done()
+        with pytest.raises(InvalidTransition):
+            await repository.transition(OWNER, old.id, RunStatus.QUEUED)
         release.set()
         assert (await purge).removed == 1
-        with pytest.raises(RunNotFound):
-            await launch
     finally:
         release.set()
+        repository.close()
+
+
+@pytest.mark.parametrize("remove_before_exit", [False, True])
+async def test_interrupted_purge_cannot_be_relaunched_and_next_sweep_finishes(
+    tmp_path, remove_before_exit
+):
+    import asyncio
+    import subprocess
+    import sys
+
+    from claims_assistant.application.analysis_repository import InvalidTransition, RunNotFound
+
+    clock = Clock(datetime(2026, 8, 1, 12, 0, tzinfo=UTC))
+    db = tmp_path / "claims.sqlite3"
+    files = LocalFileStorage(tmp_path / "uploads")
+    repository = open_sqlite_repository(db, clock=clock)
+    old = await make_run(repository, files, status=RunStatus.DRAFT)
+    repository.close()
+    clock.now += timedelta(days=31)
+    cutoff = (clock.now - RETENTION).isoformat()
+    code = """import asyncio, os, sys
+from datetime import datetime
+from pathlib import Path
+from claims_assistant.infrastructure.persistence.sqlite import open_sqlite_repository
+from claims_assistant.infrastructure.storage.local import LocalFileStorage
+r = open_sqlite_repository(Path(sys.argv[1]))
+f = LocalFileStorage(Path(sys.argv[2]))
+def interrupt(run_id):
+    if sys.argv[5] == "after":
+        f.remove_run(run_id)
+    os._exit(73)
+asyncio.run(r.purge_run(sys.argv[3], datetime.fromisoformat(sys.argv[4]), interrupt))
+"""
+    child = await asyncio.to_thread(
+        subprocess.run,
+        [
+            sys.executable,
+            "-c",
+            code,
+            str(db),
+            str(tmp_path / "uploads"),
+            old.id,
+            cutoff,
+            "after" if remove_before_exit else "before",
+        ],
+        timeout=20,
+    )
+    assert child.returncode == 73
+    assert (tmp_path / "uploads" / old.id).exists() is not remove_before_exit
+    repository = open_sqlite_repository(db, clock=clock)
+    try:
+        assert (await repository.get_run(OWNER, old.id)).status == RunStatus.PURGING
+        with pytest.raises(InvalidTransition):
+            await repository.transition(OWNER, old.id, RunStatus.QUEUED)
+        assert (
+            await purge_expired(repository, files, retention=RETENTION, now=clock.now)
+        ).removed == 1
+        with pytest.raises(RunNotFound):
+            await repository.get_run(OWNER, old.id)
+    finally:
         repository.close()
