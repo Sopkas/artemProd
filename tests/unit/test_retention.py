@@ -227,32 +227,38 @@ async def test_run_relaunched_after_the_listing_is_not_purged(storage):
     assert await repository.delete_run(old.id, before) is False
 
 
-async def test_a_draft_launched_while_its_files_go_is_counted_and_logged(storage, caplog):
-    """The launch lands between the re-check and the record delete: the records stay (the
-    delete carries the condition), the files are already gone. That used to pass silently
-    as «nothing removed»; the run then failed asking for a new upload."""
+async def test_launch_waits_for_purge_and_cannot_lose_live_files(tmp_path):
     import asyncio
-    import logging
+    import threading
 
-    repository, files, clock = storage
+    from claims_assistant.application.analysis_repository import RunNotFound
+
+    clock = Clock(datetime(2026, 8, 1, 12, 0, tzinfo=UTC))
+    repository = open_sqlite_repository(tmp_path / "claims.sqlite3", clock=clock)
+    files = LocalFileStorage(tmp_path / "uploads")
     old = await make_run(repository, files, status=RunStatus.DRAFT)
     clock.now += timedelta(days=31)
-    remove_run = files.remove_run
+    entered, release = threading.Event(), threading.Event()
+    original = files.remove_run
 
-    class Racing:
-        def remove_run(self, run_id):
-            remove_run(run_id)
-            # The bot's launch handler runs while the sweep waits on the thread.
-            asyncio.run_coroutine_threadsafe(
-                repository.transition(OWNER, old.id, RunStatus.QUEUED), loop
-            ).result()
+    def delayed(run_id):
+        entered.set()
+        assert release.wait(10)
+        original(run_id)
 
-        def __getattr__(self, name):
-            return getattr(files, name)
-
-    loop = asyncio.get_running_loop()
-    with caplog.at_level(logging.ERROR):
-        summary = await purge_expired(repository, Racing(), retention=RETENTION, now=clock.now)
-    assert summary == PurgeSummary(expired=1, removed=0, failed=0, revived=1)
-    assert f"purge_run_revived_without_files run_id={old.id}" in caplog.text
-    assert (await repository.get_run(OWNER, old.id)).status == RunStatus.QUEUED
+    files.remove_run = delayed
+    try:
+        purge = asyncio.create_task(
+            purge_expired(repository, files, retention=RETENTION, now=clock.now)
+        )
+        assert await asyncio.to_thread(entered.wait, 10)
+        launch = asyncio.create_task(repository.transition(OWNER, old.id, RunStatus.QUEUED))
+        await asyncio.sleep(0.1)
+        assert not launch.done()
+        release.set()
+        assert (await purge).removed == 1
+        with pytest.raises(RunNotFound):
+            await launch
+    finally:
+        release.set()
+        repository.close()

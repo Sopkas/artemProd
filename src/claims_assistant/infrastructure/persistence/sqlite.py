@@ -159,6 +159,11 @@ class SqliteAnalysisRepository:
     async def delete_run(self, run_id: str, before: datetime) -> bool:
         return await self._run(self._delete_run, run_id, before)
 
+    async def purge_run(
+        self, run_id: str, before: datetime, remove_files: Callable[[str], None]
+    ) -> bool:
+        return await self._run(self._purge_run, run_id, before, remove_files)
+
     async def mark_delivery(
         self, run_id: str, status: DeliveryStatus, error: str | None = None
     ) -> ReportArtifact:
@@ -394,6 +399,11 @@ class SqliteAnalysisRepository:
         return row is not None
 
     def _delete_run(self, run_id: str, before: datetime) -> bool:
+        return self._purge_run(run_id, before, lambda _run_id: None)
+
+    def _purge_run(
+        self, run_id: str, before: datetime, remove_files: Callable[[str], None]
+    ) -> bool:
         with self._locked() as connection:
             # The same condition as the listing, under the write lock: a run that came
             # back to life between the sweep's listing and now is not deleted, and one
@@ -401,6 +411,7 @@ class SqliteAnalysisRepository:
             condition = self._expired_condition(run_id, before)
             if connection.execute(select(analysis_runs.c.id).where(condition)).first() is None:
                 return False
+            remove_files(run_id)
             for table in (report_artifacts, run_steps, uploaded_files):
                 connection.execute(table.delete().where(table.c.run_id == run_id))
             gone = connection.execute(analysis_runs.delete().where(condition)).rowcount

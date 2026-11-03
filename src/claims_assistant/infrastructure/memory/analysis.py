@@ -187,3 +187,11 @@ class InMemoryAnalysisRepository:
         for key in [key for key in self._steps if key[0] == run_id]:
             del self._steps[key]
         return True
+
+    async def purge_run(
+        self, run_id: str, before: datetime, remove_files: Callable[[str], None]
+    ) -> bool:
+        if not await self.is_expired(run_id, before):
+            return False
+        remove_files(run_id)
+        return await self.delete_run(run_id, before)

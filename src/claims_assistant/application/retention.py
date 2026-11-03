@@ -28,6 +28,12 @@ EXPIRABLE_STATUSES = frozenset(
 
 
 class MaintenanceStore(Protocol):
+    async def purge_run(
+        self, run_id: str, before: datetime, remove_files: Callable[[str], None]
+    ) -> bool:
+        """Remove expired data while preventing a concurrent transition."""
+        ...
+
     async def list_expired(self, before: datetime) -> tuple[AnalysisRun, ...]:
         """Runs in an expirable state whose last change is before the moment, oldest first."""
         ...
@@ -55,8 +61,7 @@ class PurgeSummary:
     removed: int  # runs whose records were deleted
     failed: int  # runs left in place because their files could not be removed
     dry_run: bool = False
-    # Runs that came back to life (a draft launched) while their files were being removed:
-    # the records stay, the files are gone, and the check will fail asking for a new upload.
+    # Kept for compatibility with existing sweep summaries; coordinated purge keeps it zero.
     revived: int = 0
 
 
@@ -77,27 +82,16 @@ async def purge_expired(
     for run in expired:
         if dry_run:
             continue
-        # A draft launched (or a failed run relaunched) between the listing and now is
-        # live again: leave it alone, files included.
-        if not await repository.is_expired(run.id, before):
-            continue
         try:
-            await asyncio.to_thread(files.remove_run, run.id)
+            removed_now = await repository.purge_run(run.id, before, files.remove_run)
         except StorageError:
             # Records stay so the next sweep retries; nothing is orphaned silently.
             logger.error("purge_files_failed run_id=%s", run.id)
             failed += 1
             continue
-        if await repository.delete_run(run.id, before):
+        if removed_now:
             removed += 1
             logger.info("run_purged run_id=%s status=%s", run.id, run.status)
-        else:
-            # Launched between the re-check and here: the records are kept (the condition
-            # travels with the delete), but the files are already gone, so the check will
-            # fail with «загрузите заново». Closing this window needs the store to hold the
-            # run while its files go; until then it is at least never silent.
-            revived += 1
-            logger.error("purge_run_revived_without_files run_id=%s", run.id)
     return PurgeSummary(
         expired=len(expired), removed=removed, failed=failed, dry_run=dry_run, revived=revived
     )
