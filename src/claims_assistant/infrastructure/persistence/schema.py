@@ -143,6 +143,7 @@ monitoring_days = Table(
     Column("day", String(10), primary_key=True),
     Column("started_at", String(32), nullable=False),
     Column("finished_at", String(32), nullable=True),
+    Column("requests_used", Integer, nullable=False, server_default="0"),
 )
 
 monitoring_outbox = Table(

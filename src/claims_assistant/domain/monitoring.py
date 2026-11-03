@@ -57,7 +57,9 @@ __all__ = [
     "compare",
 ]
 
-RULES_VERSION = "0.2"
+# 0.2 — a cut list that may not reach back to the last check (S8-12, «partly»); 0.3 — a
+# status the adapter did not match counts as a change of status (review of S8-06).
+RULES_VERSION = "0.3"
 # Agreed with the customer on 16.10.2026: a case as the defendant from this claim on.
 COURT_CLAIM_THRESHOLD = Decimal("100000")
 # Finances come once a year and are not a daily change.
@@ -82,6 +84,9 @@ _STATUS_LABELS = {
     CompanyStatus.LIQUIDATING: "в стадии ликвидации",
     CompanyStatus.LIQUIDATED: "ликвидирована",
 }
+# A status the adapter did not match (anything but «Действует» on the live source): which
+# one it is, the extract says.
+_UNMATCHED = "другой, бот его не распознал — проверьте выписку"
 # The adapters write the claim into the case's label: «… · иск 2 400 000 ₽ · …»
 # (infrastructure/checko/courts.py), «требование» in a bankruptcy case.
 _CLAIM = re.compile(r"(?:^|· )(?:иск|требование) (\d{1,3}(?: \d{3})*) ₽")
@@ -164,11 +169,24 @@ def _record(snapshot: ExternalSnapshot, fact: Fact) -> tuple[str, str | None]:
     return item.record_id, item.url
 
 
-def _status(snapshot: ExternalSnapshot) -> CompanyStatus | None:
-    for fact in snapshot.facts:
-        if fact.kind is FactKind.COMPANY_STATUS and isinstance(fact.value, CompanyStatus):
-            return fact.value
-    return None
+def _status(snapshot: ExternalSnapshot) -> Fact | None:
+    return next((f for f in snapshot.facts if f.kind is FactKind.COMPANY_STATUS), None)
+
+
+def _label(status: Fact) -> str | None:
+    """«действует» in quotes; None for a status the adapter did not match."""
+    if not isinstance(status.value, CompanyStatus):
+        return None
+    return f"«{_STATUS_LABELS[status.value]}»"
+
+
+def _status_text(old: Fact, new: Fact) -> str:
+    was, now = _label(old), _label(new)
+    if now is None:
+        return f"Статус организации изменился: был {was}, теперь {_UNMATCHED}"
+    if was is None:
+        return f"Статус организации изменился: был другой (бот его не распознал), теперь {now}"
+    return f"Статус организации изменился: был {was}, теперь {now}"
 
 
 def _new_records(before: ExternalSnapshot, now: ExternalSnapshot) -> list[Change]:
@@ -239,19 +257,20 @@ def _gap(before: ExternalSnapshot, now: ExternalSnapshot) -> str | None:
 
 
 def _status_change(before: ExternalSnapshot, now: ExternalSnapshot) -> list[Change]:
+    """A status that moved, including to or from one the adapter could not match: the live
+    Checko adapter knows only «Действует», so a liquidation reads as an unmatched status
+    (value None). «Действует» → unmatched is the very move the customer is told about."""
     old, new = _status(before), _status(now)
-    if old is None or new is None or old is new:
+    if old is None or new is None or old.value is new.value:
         return []
-    fact = next(f for f in now.facts if f.kind is FactKind.COMPANY_STATUS)
-    record_id, url = _record(now, fact)
+    record_id, url = _record(now, new)
     return [
         Change(
             now.inn,
             now.section,
             FactKind.COMPANY_STATUS,
-            f"Статус организации изменился: был «{_STATUS_LABELS[old]}», "
-            f"теперь «{_STATUS_LABELS[new]}»",
-            fact.observed_on,
+            _status_text(old, new),
+            new.observed_on,
             record_id,
             url,
         )
