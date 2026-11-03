@@ -255,6 +255,27 @@ def test_invalid_external_limits_are_rejected_without_disclosing_value(
     assert raw not in str(error.value) or raw in ("0",)
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "EXTERNAL_TIMEOUT_SECONDS",
+        "EXTERNAL_CACHE_TTL_SECONDS",
+        "RUN_TIME_LIMIT_SECONDS",
+        "AI_TIMEOUT_SECONDS",
+        "AI_RUN_TIME_LIMIT_SECONDS",
+        "RETENTION_SWEEP_SECONDS",
+    ],
+)
+@pytest.mark.parametrize("raw", ["Infinity", "inf", "-Infinity", "NaN", "1e309"])
+def test_time_limits_and_cache_ttl_must_be_finite(tmp_path, monkeypatch, key, raw):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")
+    monkeypatch.setenv(key, raw)
+    with pytest.raises(ConfigurationError, match=key) as error:
+        Settings.load(tmp_path / "missing.env")
+    assert raw not in str(error.value)
+
+
 def test_business_timezone_defaults_to_moscow_and_accepts_override(tmp_path, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "42")

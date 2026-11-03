@@ -105,6 +105,59 @@ async def test_a_cut_off_answer_is_paid_for_once_and_counted():
     assert run_budget.tokens == 99 + 38
 
 
+def _paid_without_text(content, finish_reason, **message):
+    body = answer()
+    body["choices"][0]["message"] = {"role": "assistant", "content": content, **message}
+    body["choices"][0]["finish_reason"] = finish_reason
+    return body
+
+
+async def _no_wait(_seconds: float) -> None:
+    return None
+
+
+async def _ask(body, max_retries: int = 1):
+    transport = Transport(200, body)
+    guard = GuardedRecommendationProvider(
+        PolzaRecommendationProvider(KEY, transport=transport),
+        AiPolicy(max_retries=max_retries),
+        clock=lambda: NOW,
+        sleep=_no_wait,
+    )
+    run_budget = budget("1.00")
+    with pytest.raises(AiUnavailable) as failure:
+        await guard.explain_within(build_request(context()), run_budget)
+    return failure.value, len(transport.calls), run_budget
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _paid_without_text(None, "stop", refusal="I can't help with that."),
+        _paid_without_text(None, "content_filter"),
+        _paid_without_text("", "content_filter"),
+    ],
+)
+async def test_a_paid_refusal_is_counted_and_not_asked_again(body):
+    """A structured-output refusal or the content filter answers 200 with no text — and
+    with a price (review g6). The same request would be refused again and paid again."""
+    failure, calls, run_budget = await _ask(body, max_retries=2)
+    assert failure.code is AiErrorCode.REFUSED
+    assert calls == 1
+    assert run_budget.spent_rub == Decimal("0.0044424")
+    assert run_budget.tokens == 99 + 38
+
+
+async def test_a_paid_empty_answer_is_counted_every_time_it_is_asked():
+    """An empty «stop» may be a fluke, so it is still retried — but each call is paid for,
+    and the run's money must see both."""
+    failure, calls, run_budget = await _ask(_paid_without_text("", "stop"), max_retries=1)
+    assert failure.code is AiErrorCode.UNAVAILABLE
+    assert calls == 2
+    assert run_budget.spent_rub == Decimal("0.0044424") * 2
+    assert run_budget.tokens == (99 + 38) * 2
+
+
 async def test_the_guard_refuses_when_the_runs_money_is_gone():
     class Free:
         name, model = "stub", "stub-1"

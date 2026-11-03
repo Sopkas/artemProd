@@ -523,6 +523,81 @@ async def test_package_line_counts_rows_with_errors_and_usable_rows(tmp_path):
     assert "Контрагенты: 3 строк, пригодных 2" in text
 
 
+async def test_a_row_with_two_bad_cells_is_one_row_left_out(tmp_path):
+    """«Строк с ошибками» counted the errors: one row with a bad date and bad days was «4»."""
+    from openpyxl import Workbook
+
+    from claims_assistant.domain.counterparties import COLUMN_TITLES
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Контрагенты"
+    sheet.append(list(COLUMN_TITLES))
+    sheet.append(["1234567894", "ООО Ромашка", DAY, 100.0, 10, None])
+    sheet.append(["7707083893", None, "не дата", 5.0, "много", None])
+    sheet.append(["7710140679", None, DAY, 1.0, None, None])
+    buffer = BytesIO()
+    book.save(buffer)
+    run, files, repository = await accepted(tmp_path, buffer.getvalue())
+    outcome = await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
+    assert outcome.status == RunStatus.PARTIAL
+    assert "Строк с ошибками: 1;" in outcome.failure
+    about = sheet_rows(
+        files.read((await repository.get_report(OWNER, run.id)).stored_path), "О проверке"
+    )
+    text = " ".join(str(cell) for row in about for cell in row if cell is not None)
+    assert "Контрагенты: 3 строк, пригодных 2" in text
+
+
+async def test_bad_rows_of_another_file_are_not_rows_of_the_list(tmp_path):
+    """Two bad rows of «Платежи» made «Контрагенты: 4 строк» of a 2-row file, and the
+    summary said two rows of the list were left out."""
+    from claims_assistant.application.check_package import LedgerAccepted, accept_ledger
+    from claims_assistant.domain.analysis import FileKind
+    from claims_assistant.domain.external import Period
+    from claims_assistant.infrastructure.excel.ledgers import build_payments_workbook
+
+    repository = InMemoryAnalysisRepository()
+    files = LocalFileStorage(tmp_path / "uploads")
+    reader = OpenpyxlSheetReader()
+    draft = await accept_counterparties(
+        OWNER,
+        DAY,
+        DataMode.DEMO,
+        build_counterparties_template(ROWS),
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    ledger = await accept_ledger(
+        OWNER,
+        draft.run.id,
+        FileKind.PAYMENTS,
+        build_payments_workbook(
+            [
+                ["1234567894", "P-1", date(2026, 7, 15), 100.0],
+                ["7736050003", "P-2", date(2026, 7, 16), 1.0],  # not in the package
+                ["7736050003", "P-3", date(2026, 7, 17), 1.0],
+            ]
+        ),
+        coverage=Period(date(2026, 6, 1), date(2026, 8, 31)),
+        repository=repository,
+        files=files,
+        reader=reader,
+    )
+    assert isinstance(ledger, LedgerAccepted)
+    await repository.transition(OWNER, draft.run.id, RunStatus.QUEUED)
+    run = await repository.claim_next()
+    outcome = await pipeline(files, repository, guard(DemoCompanyDataProvider())).process(run)
+    assert "Строк с ошибками" not in outcome.failure
+    assert "Ошибок в остальных файлах пакета: 2" in outcome.failure
+    about = sheet_rows(
+        files.read((await repository.get_report(OWNER, run.id)).stored_path), "О проверке"
+    )
+    text = " ".join(str(cell) for row in about for cell in row if cell is not None)
+    assert "Контрагенты: 2 строк, пригодных 2" in text
+
+
 async def test_report_names_the_optional_files_of_the_package(tmp_path):
     from claims_assistant.application.check_package import accept_ledger
     from claims_assistant.domain.analysis import FileKind
@@ -903,7 +978,13 @@ class InterruptedBankruptcy:
 
 @pytest.mark.parametrize(
     "code, final",
-    [("timeout", False), ("network_error", False), ("daily_limit", False), ("api_error", True)],
+    [
+        ("timeout", False),
+        ("network_error", False),
+        ("daily_limit", False),
+        ("budget_exhausted", False),
+        ("api_error", True),
+    ],
 )
 async def test_an_interrupted_sample_is_saved_only_when_a_repeat_would_not_finish_it(
     tmp_path, code, final
@@ -923,6 +1004,17 @@ async def test_a_company_with_an_unfinished_sample_is_not_counted_as_checked(tmp
     )
     assert outcome.status == RunStatus.PARTIAL
     assert "Организаций с неполными внешними данными: 2." in outcome.failure
+
+
+async def test_a_sample_cut_by_the_run_budget_says_the_limit_was_spent(tmp_path):
+    """Review G5: EFRSB pages are paid from the run's budget; a sample it cut is the limit's
+    doing and the summary says so, as for a section it never asked."""
+    run, files, repository = await accepted(tmp_path, build_counterparties_template(ROWS))
+    outcome = await pipeline(
+        files, repository, guard(InterruptedBankruptcy("budget_exhausted"))
+    ).process(run)
+    assert (await load_summary(run.id, repository)).budget_exhausted is True
+    assert "Лимит времени или запросов проверки исчерпан." in outcome.failure
 
 
 async def test_a_sample_cut_by_the_daily_limit_tells_the_user_to_come_back_tomorrow(tmp_path):

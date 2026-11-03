@@ -109,6 +109,12 @@ def run(argv: list[str], settings: Settings, out=sys.stdout) -> int:
                 f"не удалось {summary.failed}.",
                 file=out,
             )
+            if summary.revived:
+                print(
+                    f"Запущены во время удаления файлов: {summary.revived} — записи оставлены, "
+                    "файлов нет; см. purge_run_revived_without_files в логе.",
+                    file=out,
+                )
     except BackupError as error:
         print(f"Ошибка: {error}", file=out)
         return 1

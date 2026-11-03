@@ -260,7 +260,12 @@ def check(settings: Settings) -> int:
             probe = directory / ".write-check"
             probe.write_bytes(b"")
             probe.unlink()
-    except (RepositoryError, OSError) as exc:
+    except RepositoryError as exc:
+        # Its text is ours and carries no value from the settings; it is what tells the
+        # operator a rolled-back release met a newer database (docs/operations.md).
+        print(f"Ошибка проверки: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
         print(f"Ошибка проверки: {type(exc).__name__}", file=sys.stderr)
         return 1
     print(

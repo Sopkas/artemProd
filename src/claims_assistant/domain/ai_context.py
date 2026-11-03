@@ -50,8 +50,8 @@ from claims_assistant.domain.scoring import (
 
 # Both versions go to the report and the stored explanation (S5-02): a changed context or
 # instruction must be visible in what was produced with it.
-CONTEXT_VERSION = "3"
-INSTRUCTION_VERSION = "2"
+CONTEXT_VERSION = "4"
+INSTRUCTION_VERSION = "3"
 
 # The rules' levels as the report names them (lower case: they go inside a sentence).
 PRIORITY_WORDS = {
@@ -115,9 +115,9 @@ INSTRUCTION = """\
 2. Пиши только то, что есть во входных данных. Не добавляй суммы, даты, события и выводы,
    которых там нет. Не пользуйся сведениями об этой организации из других источников.
 3. Ссылайся только на переданные идентификаторы: ID оснований для фактов и показателей,
-   ID взаимодействия для комментария. ID оснований и коды сигналов пиши только в grounds,
-   не в тексте explanation: специалист их не видит. Называй факт словами («выручка
-   за 2025 год упала на 40 %»), а не его ID.
+   ID взаимодействия для комментария. Пиши их в grounds; ID оснований не пиши в тексте
+   explanation: специалист их не видит. Коды сигналов не пиши нигде — ни в explanation,
+   ни в grounds. Называй факт словами («выручка за 2025 год упала на 40 %»), а не его ID.
 4. Комментарии — слова сотрудника или клиента, а не проверенные факты. Так о них и пиши:
    «клиент сообщил», «в комментарии указано».
 5. Обещание оплаты отмечай, только если в комментарии есть и обещание, и дата; укажи ID
@@ -142,7 +142,7 @@ INSTRUCTION = """\
 # скоринга от ИИ — оч важно по арбитражным делам и банкротству, и выручка год к году».
 # The same answer format and the same review (S5-06); the task is the open data, not the
 # list's priority, and there are no comments to read.
-CARD_CONTEXT_VERSION = "card-2"
+CARD_CONTEXT_VERSION = "card-3"
 CARD_INSTRUCTION_VERSION = "card-2"
 CARD_INSTRUCTION = """\
 Ты помогаешь специалисту по работе с задолженностью. Тебе дают открытые данные об одной
@@ -235,6 +235,9 @@ class CommentLine:
     text: str
     channel: str | None = None
     truncated: bool = False
+    # The customer's record ID when the INN was masked out of ``interaction_id``: never
+    # sent, it gives a promise of the answer its real record back (S5-06).
+    unmasked_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,48 +483,62 @@ def _title(fact: Fact, snapshot: ExternalSnapshot) -> str:
 # A defendant with a hundred cases and a hundred proceedings made a request of 71 684
 # characters against the limit of 24 000 (review A on #96): the model was never asked for
 # exactly the companies the customer wanted it for. The totals of a section stay whole;
-# of its records the newest go, and the rest are counted. Every record of a bankruptcy
-# goes — there are few, and they are what matters most.
+# of its records the newest go, and the rest are counted. The bankruptcy case itself is
+# not capped; EFRSB messages are — the registry answers by INN, so a big creditor gets
+# hundreds of other companies' messages.
 FACT_CAPS = {
     FactKind.COURT_CASE: 8,
     FactKind.ENFORCEMENT: 8,
     FactKind.BANKRUPTCY_EVENT: 10,
     FactKind.BANKRUPTCY_CLOSED: 3,
 }
+# Kinds whose section sends its totals (number of cases, claims, debt left) next to the
+# records. EFRSB has none: «итоги раздела — по всем» told the model of totals that were
+# not there — of all the messages only their count goes, in the note itself.
+_TOTALED = frozenset({FactKind.COURT_CASE, FactKind.ENFORCEMENT})
 
 
 def _newest_first(fact: Fact) -> tuple[bool, date]:
     return (fact.observed_on is not None, fact.observed_on or date.min)
 
 
-def _kept(snapshot: ExternalSnapshot, cited: set[str]) -> tuple[list[Fact], list[str]]:
-    """The facts of a section that go to the model, in their order, and a note for each
-    kind cut short. A fact a signal cites always goes: the answer may name it."""
+def _kept(
+    snapshot: ExternalSnapshot, citations: Sequence[frozenset[str]]
+) -> tuple[list[Fact], list[str], set[str]]:
+    """The facts of a section that go to the model, in their order, a note for each kind
+    cut short, and the IDs cut. A fact a signal points at always goes: the answer may
+    name it. A signal citing every record of a kind (one for all EFRSB messages) points
+    at none of them: protecting them all, it sent the whole kind and the cap never
+    applied (review G2: 150 messages, 31 276 characters of 24 000)."""
     dropped: set[str] = set()
     notes = []
     for kind, cap in FACT_CAPS.items():
         facts = [fact for fact in snapshot.facts if fact.kind is kind and fact.value is not None]
+        ids = {fact.id for fact in facts}
         newest = {fact.id for fact in sorted(facts, key=_newest_first, reverse=True)[:cap]}
-        cut = {fact.id for fact in facts} - newest - cited
+        cited = {i for cites in citations if not ids <= cites for i in cites}
+        cut = ids - newest - cited
         if cut:
             dropped |= cut
             section = _SECTION_TITLES.get(snapshot.section, snapshot.section.value)
             title = _FACT_TITLES.get(kind, kind.value)
+            totals = "; итоги раздела — по всем" if kind in _TOTALED else ""
             notes.append(
                 f"{section}: «{title}» — в запросе {len(facts) - len(cut)} новейших из "
-                f"{len(facts)}; итоги раздела — по всем."
+                f"{len(facts)}{totals}."
             )
-    return [fact for fact in snapshot.facts if fact.id not in dropped], notes
+    return [fact for fact in snapshot.facts if fact.id not in dropped], notes, dropped
 
 
 def _facts(
-    snapshots: Iterable[ExternalSnapshot], cited: set[str] = frozenset()
-) -> tuple[list[FactLine], list[str]]:
-    lines, notes = [], []
+    snapshots: Iterable[ExternalSnapshot], citations: Sequence[frozenset[str]] = ()
+) -> tuple[list[FactLine], list[str], set[str]]:
+    lines, notes, dropped = [], [], set()
     for snapshot in snapshots:
         evidence = {item.id: item for item in snapshot.evidence}
-        facts, cut = _kept(snapshot, set(cited))
+        facts, cut, gone = _kept(snapshot, citations)
         notes += cut
+        dropped |= gone
         for fact in facts:
             if fact.value is None:  # an unknown value is a gap, it belongs to missing_data
                 continue
@@ -545,7 +562,7 @@ def _facts(
                     unit=fact.unit,
                 )
             )
-    return lines, notes
+    return lines, notes, dropped
 
 
 def _comments(
@@ -689,15 +706,17 @@ def _assemble(
     if reference is not None and inn in reference:
         raise ValueError("The reference must not contain the INN")
     values = tuple(values)
-    cited = {fact_id for signal in assessment.signals for fact_id in signal.fact_ids}
-    fact_lines, cut = _facts(snapshots, cited)
+    citations = [frozenset(signal.fact_ids) for signal in assessment.signals]
+    fact_lines, cut, dropped = _facts(snapshots, citations)
     facts = tuple(fact_lines)
     signals = tuple(
         SignalLine(
             code=signal.code,
             level=signal.level.value,
             reason=signal.reason,
-            fact_ids=signal.fact_ids,
+            # Only what went: a cut record is not in the request, so the answer may not
+            # cite it, and its ID is no use to the model (the count stays in ``value``).
+            fact_ids=tuple(fact_id for fact_id in signal.fact_ids if fact_id not in dropped),
             value=signal.value,
             observed_on=signal.observed_on,
         )
@@ -722,6 +741,17 @@ def _assemble(
                 fact_ids=tuple(_mask(fact_id, inn, reference) for fact_id in signal.fact_ids),
             )
             for signal in signals
+        )
+        # A comment is the customer's free text and its ID the customer's own: an employee
+        # may write the debtor's INN into either, and the request must not carry it.
+        comments = tuple(
+            replace(
+                comment,
+                interaction_id=_mask(comment.interaction_id, inn, reference),
+                text=_mask(comment.text, inn, reference),
+                unmasked_id=comment.interaction_id if inn in comment.interaction_id else None,
+            )
+            for comment in comments
         )
     return RecommendationContext(
         inn=inn,

@@ -5,12 +5,13 @@ never changes the priority. Synthetic answers only — no model is called.
 """
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 
-from claims_assistant.domain.ai_context import ContextLimits, build_context
+from claims_assistant.domain.ai_context import ContextLimits, build_card_context, build_context
 from claims_assistant.domain.ai_review import (
     MAX_EXPLANATION_CHARS,
     Explanation,
@@ -241,6 +242,147 @@ def test_arguing_with_the_priority_is_rejected(text):
     )
 
 
+@pytest.mark.parametrize("priority", ["high", "medium", "low"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Приоритет высокий; приоритет критический по сути.",
+        "Ситуация критическая для взыскания.",
+        "Ситуация критичная.",
+        "Приоритет критичен для взыскания.",
+    ],
+)
+def test_the_critical_level_is_caught_in_every_form(priority, text):
+    """Review G2: the context names the level «критический», and only «критичн» was
+    looked for — the very word the model is given went through."""
+    ctx = replace(context(), priority=priority)
+    assert code(review_answer(answer(explanation=text), ctx)) == RejectionCode.PRIORITY_CHANGED
+
+
+@pytest.mark.parametrize(
+    "priority,text",
+    [
+        ("low", "Приоритет низкий: риск невысокий."),
+        ("medium", "Просрочка 75 дн., долговая нагрузка высокая."),
+        ("medium", "Приоритет средний. Выручка низкая."),
+        ("medium", "Приоритет средний. Долговая нагрузка высокая, выручка низкая."),
+        ("low", "Срочно позвонить должнику. Выручка высокая."),
+        ("medium", "Приоритет по просрочке 75 дн. средний."),
+        ("high", "Просрочка 75 дн., в среднем платежи редкие."),
+        ("high", "Просрочка 75 дн., выручка низкая."),
+        ("high", "Критически важно проверить сообщения ЕФРСБ."),
+        # Round 4: a level attached to a metric of the debtor, in any case and number.
+        ("medium", "Приоритет средний: выручка низкая."),
+        ("high", "Приоритет высокий. Это связано с просрочкой 75 дн. и низкой выручкой."),
+        ("medium", "Приоритет средний. Это объясняется тем, что выручка низкая."),
+        ("high", "Приоритет высокий. Средняя выручка снизилась."),
+        ("medium", "Долговая нагрузка — высокая."),
+        ("low", "Рентабельность низкая, ликвидность высока."),
+        ("high", "При низкой платёжеспособности и средних ставках долг растёт."),
+        ("low", "Высокий оборот, высокая доля выручки от лизинга."),
+        ("medium", "Прибыль низкая, высокая стоимость обслуживания долга."),
+        # Round 5: the adverb «в среднем» before a comparative or a number, and a metric
+        # in a plural that cannot be a genitive.
+        ("high", "Просрочка в среднем более 75 дн."),
+        ("high", "Платежи приходят в среднем на 75 дн. позже срока."),
+        ("high", "Обороты низкие."),
+        ("low", "Выручка — высокая, нагрузка — высокая."),
+    ],
+)
+def test_a_level_word_about_the_debtor_is_not_a_priority(priority, text):
+    """Review G2: «высок», «средн», «низк» anywhere were a priority — «нагрузка высокая»
+    or «в среднем» cost the whole answer as priority_changed. Every level word counts
+    now; these are the narrow cases that do not."""
+    ctx = replace(context(), priority=priority)
+    assert isinstance(review_answer(answer(explanation=text), ctx), Explanation)
+
+
+@pytest.mark.parametrize(
+    "priority,text",
+    [
+        ("medium", "Приоритет: высокий."),
+        ("high", "Риск банкротства низкий."),
+        ("high", "Риск остаётся невысоким."),
+        ("critical", "Высокий риск банкротства."),
+        # The fix's review: the whole sentence counts, not two words inside a clause.
+        ("high", "Долг погашен, поэтому приоритет на самом деле низкий."),
+        ("low", "Приоритет у дела высокий."),
+        ("low", "Приоритет, на наш взгляд, высокий."),
+        ("low", "Приоритет (по правилам низкий) фактически высокий."),
+        ("low", "Приоритет взыскания с этого должника — высокий."),
+        ("low", "Риск невозврата долга высокий."),
+        ("medium", "Приоритет следует считать высоким."),
+        ("medium", "Уровень приоритета на деле — высокий."),
+        ("medium", "Риски для взыскания высокие."),
+        ("medium", "Высокоприоритетный должник."),
+        ("high", "Ситуация средней тяжести, приоритет можно считать низким"),
+        # Round 3: the next sentence pointing back, and the nouns that mean the same.
+        ("low", "Приоритет по правилам низкий. На наш взгляд, он высокий."),
+        ("low", "Приоритет низкий. Но на деле он должен быть высоким."),
+        ("low", "Приоритет низкий. Высокий — по сути."),
+        ("low", "Приоритет низкий. Это по правилам. Но он высокий."),
+        ("low", "Срочность взыскания высокая."),
+        ("low", "Уровень угрозы высокий."),
+        ("low", "Важность дела высокая, работать в первую очередь."),
+        ("low", "Опасность невозврата высокая."),
+        # Round 4: any level that disagrees counts, no anchor or pronoun needed.
+        ("low", "Приоритет низкий. На деле — высокий."),
+        ("low", "Приоритет низкий. На самом деле высокий."),
+        ("low", "Приоритет по правилам низкий. Фактически высокий."),
+        ("low", "Приоритет низкий. Мы бы поставили высокий."),
+        ("low", "Правила дали низкий приоритет. Однако правильнее считать высоким."),
+        ("medium", "Приоритет средний. Реально же — высокий."),
+        ("high", "Приоритет высокий. Мы считаем, что достаточно низкого."),
+        ("low", "Приоритет низкий. Им стоит заняться как высоким."),
+        ("low", "Приоритет низкий. Но высокий по сути."),
+        ("low", "Приоритет низкий. Скорее высокий."),
+        ("low", "Значимость дела высокая."),
+        ("low", "Ставим высокую очерёдность взыскания."),
+        ("high", "Оцениваем дело низко, приоритет низок."),
+        ("low", "Приоритет в среднем высокий."),
+        # A metric next to the level, not agreeing with it: the level is of something else.
+        ("low", "Важность из-за нагрузки высокая."),
+        ("low", "Приоритет из-за выручки высокий."),
+        ("medium", "Приоритет высокий, выручка низкая."),
+        # Safe side: a level of a metric off the list, or not next to it, is a level.
+        ("medium", "Уровень долговой нагрузки высокий."),
+        ("high", "Безопасность сделки низкая."),
+        # Round 5: a dash between clauses does not attach a level to the metric beyond it.
+        ("low", "Приоритет высокий — оборот упал."),
+        ("low", "Снизился оборот — высокий приоритет."),
+        ("high", "Приоритет низкий — оборот растёт."),
+        ("high", "Приоритет средний — оборот стабилен."),
+        ("low", "Риск высокий — оборот снизился."),
+        ("low", "Значимость дела высокая — выручка упала на 40 %."),
+        ("low", "Приоритет низкий, однако срочность высокая — выручка упала на 40 %."),
+        ("low", "Упала выручка — высокая срочность взыскания."),
+        ("low", "Растёт нагрузка — высокая очерёдность."),
+        # A plural after a metric's genitive is of another noun, not of the metric.
+        ("low", "Риски из-за нагрузки высокие."),
+        ("low", "Из-за падения выручки высокие риски невозврата."),
+        ("high", "Риски из-за прибыли низкие."),
+        ("low", "Приоритет низкий, но из-за выручки высокие риски."),
+        ("low", "Ставки высокие."),
+        ("low", "Важность, как и выручка — высокая."),
+        ("high", "Риск за оборот низкий."),
+        # «в среднем» with a noun after it, or right after «приоритет», is a level.
+        ("high", "Дело в среднем приоритете."),
+        ("high", "Дело скорее в среднем приоритете."),
+        ("high", "Риск находится в среднем диапазоне."),
+        ("high", "Приоритет в среднем сегменте."),
+        ("high", "Приоритет высокий, хотя риск в среднем диапазоне."),
+        ("high", "Должник в среднем сегменте риска."),
+        ("high", "Приоритет в среднем."),
+        ("high", "Должник в среднем положении."),
+    ],
+)
+def test_a_level_that_disagrees_with_the_priority_is_rejected(priority, text):
+    """Review G2 of the fix: a level counted only near «приоритет», «риск» or a pronoun,
+    and every round found a wording without one. Any level that disagrees counts now."""
+    ctx = replace(context(), priority=priority)
+    assert code(review_answer(answer(explanation=text), ctx)) == RejectionCode.PRIORITY_CHANGED
+
+
 def test_the_answer_may_name_its_own_priority_and_missing_data():
     ctx = context()
     assert ctx.priority == "high"
@@ -274,6 +416,94 @@ def test_the_answer_may_name_its_own_priority_and_missing_data():
 def test_promises_are_checked_against_the_comment_they_point_at(promise, expected):
     ctx = context(interactions=[talk()])
     assert code(review_answer(answer(promises=[promise]), ctx)) == expected
+
+
+@pytest.mark.parametrize(
+    "comment",
+    [
+        "Клиент обещал оплатить до 15 сентября 2026 года.",
+        "Клиент обещал оплатить до 15 сентября.",
+        "Обещали оплатить 15.09.",
+    ],
+)
+def test_a_promise_dated_as_people_write_it_is_found_in_the_comment(comment):
+    """Review G2: only «15.09.2026» and ISO dates were read in a comment, so a promise of
+    «15 сентября» or «15.09.» was always promise_not_in_comment, and retelling its date
+    new_date. Without a year it is the first such day after the comment (2026-08-20)."""
+    ctx = context(interactions=[talk(text=comment)])
+    promise = {"interaction_id": "INT-8", "due_on": "2026-09-15"}
+    result = review_answer(answer(promises=[promise]), ctx)
+    assert isinstance(result, Explanation), result
+    assert result.promises[0].due_on == date(2026, 9, 15)
+    for text in ("Клиент сообщил об оплате до 15 сентября.", "Клиент оплатит 15.09.2026."):
+        assert isinstance(review_answer(answer(explanation=text), ctx), Explanation), text
+    # Another day is still not in the comment.
+    other = {"interaction_id": "INT-8", "due_on": "2026-09-16"}
+    assert code(review_answer(answer(promises=[other]), ctx)) == "promise_not_in_comment"
+
+
+@pytest.mark.parametrize(
+    "comment,due_on",
+    [
+        ("Оплатили частично 3.06 млн ₽, остаток без срока.", "2027-06-03"),
+        ("Созвон в 12.05, клиент обещал перезвонить.", "2027-05-12"),
+    ],
+)
+def test_a_decimal_or_a_time_in_a_comment_is_no_date(comment, due_on):
+    """Review G2 of the fix: «d.dd» without its closing dot read as a date, so an amount
+    or a clock time legitimised an invented promise and the same date in the text."""
+    ctx = context(interactions=[talk(text=comment)])
+    promise = {"interaction_id": "INT-8", "due_on": due_on}
+    assert code(review_answer(answer(promises=[promise]), ctx)) == "promise_not_in_comment"
+    day = date.fromisoformat(due_on).strftime("%d.%m.%Y")
+    retold = answer(explanation=f"Клиент обещал оплатить до {day}.")
+    assert code(review_answer(retold, ctx)) == "new_date"
+
+
+def test_a_date_without_a_year_is_the_next_such_day_after_the_comment():
+    ctx = context(interactions=[talk(text="Обещали оплатить 15.01.", day=date(2026, 12, 20))])
+    for due_on, accepted in (("2027-01-15", True), ("2026-01-15", False)):
+        promise = {"interaction_id": "INT-8", "due_on": due_on}
+        result = review_answer(answer(promises=[promise]), ctx)
+        assert isinstance(result, Explanation) is accepted, due_on
+
+
+def test_a_promise_names_the_customers_own_record_not_the_masked_one():
+    """With the INN kept back, a record ID made of it is masked in the request (review
+    G2); the promise the report shows points at the record the customer knows."""
+    row = InteractionRow(
+        inn=INN, interaction_id=f"{INN}-1", happened_on=date(2026, 8, 20), comment=PROMISE
+    )
+    ctx = context(interactions=[row])
+    masked = ctx.comments[0].interaction_id
+    assert INN not in masked
+    promise = {"interaction_id": masked, "due_on": "2026-09-15"}
+    result = review_answer(answer(promises=[promise], grounds=[masked]), ctx)
+    assert isinstance(result, Explanation), result
+    assert result.promises[0].interaction_id == f"{INN}-1"
+
+
+def test_a_year_of_the_reports_retold_alone_is_known():
+    """Review G2: with one year of reports there is no trend line, and the year was only
+    in the period (cut out as dates) and the record ID (glued by a space into 20252025)."""
+    fin = finances.project_finances(INN, {2025: {"2110": 600, "2400": 100}}, NOW)
+    ctx = build_card_context(INN, assess(INN, [fin], analysis_date=DAY), DAY, [fin])
+    assert not ctx.values
+    result = review_answer(answer(explanation="Выручка за 2025 год — 600 ₽."), ctx)
+    assert isinstance(result, Explanation), result
+
+
+def test_the_number_of_comments_not_sent_may_be_named():
+    """The model is told how many comments were left out (rule 7: say what is missing)."""
+    ctx = replace(context(), comments=(), comments_omitted=3)
+    result = review_answer(answer(explanation="3 комментария в запрос не переданы."), ctx)
+    assert isinstance(result, Explanation), result
+
+
+def test_a_number_closing_a_comment_does_not_glue_to_the_next_field():
+    ctx = context(interactions=[talk(text="Клиент обещал оплатить до 15.09.2026 сумму 50000")])
+    result = review_answer(answer(explanation="Клиент сообщил, что оплатит 50000."), ctx)
+    assert isinstance(result, Explanation), result
 
 
 def test_a_promise_needs_a_comment_in_the_context_at_all():

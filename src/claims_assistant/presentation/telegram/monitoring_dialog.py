@@ -28,6 +28,7 @@ from claims_assistant.domain.watchlist import Candidate, parse_inns
 from claims_assistant.infrastructure.excel.watchlist import build_watchlist
 
 from . import texts
+from .card import split_message
 from .menu import (
     BACK,
     CANCEL,
@@ -166,7 +167,13 @@ def monitoring_router(service: MonitoringService | None, reader) -> Router:
 
     async def back(message: Message, state: FSMContext, text: str) -> None:
         await state.set_state(MonitorDialog.menu)
-        await message.answer(text, reply_markup=await keyboard(message.from_user.id))
+        # In parts Telegram takes: after adding, eleven names of up to 300 characters
+        # (renamed, over the limit) outgrow one message, and a refusal would come after the
+        # list is saved, as «попробуйте ещё раз» (review of S8-09). The menu goes last.
+        *first, last = split_message(text)
+        for part in first:
+            await message.answer(part)
+        await message.answer(last, reply_markup=await keyboard(message.from_user.id))
 
     async def added(message: Message, state: FSMContext, candidates, **summary) -> None:
         user_id = message.from_user.id

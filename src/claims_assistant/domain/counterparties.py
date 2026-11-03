@@ -146,7 +146,14 @@ def _overdue_days(cell: Cell) -> int | None:
         digits = text.removeprefix("-")
         if not (digits.isascii() and digits.isdigit()):
             raise _CellError("overdue_not_integer", "Дней просрочки должно быть целым числом.")
-        value = int(text)
+        try:
+            value = int(text)
+        except ValueError:
+            # Python also refuses an excessively long decimal integer; report this cell
+            # like other invalid input instead of aborting the entire uploaded workbook.
+            raise _CellError(
+                "overdue_not_integer", "Дней просрочки должно быть целым числом."
+            ) from None
     else:
         raise _CellError("overdue_not_integer", "Дней просрочки должно быть целым числом.")
     if value < 0:

@@ -23,6 +23,8 @@ from claims_assistant.domain.external import Section
 from claims_assistant.domain.monitoring import GAP_NOTE, Comparison, SectionState
 from claims_assistant.domain.plural import companies, of_companies
 
+from .card import telegram_length
+
 # Telegram refuses longer messages; long lists are cut well before it.
 MESSAGE_LIMIT = 4096
 MAX_CHANGES = 10
@@ -56,9 +58,17 @@ def _day(value: date) -> str:
 
 
 def _cut(text: str, limit: int = MESSAGE_LIMIT) -> str:
-    if len(text) <= limit:
+    """At a line end, in Telegram's own units: 📋 and 🔔 take two, and a message one unit
+    over is refused — a refused summary is not sent again (review of S8-09). Room is kept
+    for the closing «…» line even when no line end is found."""
+    if telegram_length(text) <= limit:
         return text
-    return text[: limit - 1].rsplit("\n", 1)[0] + "\n…"
+    room, size = limit - telegram_length("\n…"), 0
+    for end, char in enumerate(text):
+        size += telegram_length(char)
+        if size > room:
+            break
+    return text[:end].rsplit("\n", 1)[0] + "\n…"
 
 
 # Names that open a reason and keep their capital: «Checko не ответил…» (review A on #101,
@@ -199,4 +209,4 @@ def format_daily_summary(day: date, checked: Sequence[Checked], notes: Sequence[
         if len(partly) > MAX_NAMES:
             lines.append(f"  …и ещё {len(partly) - MAX_NAMES}")
     tail = "".join(f"\n\n{note}" for note in notes)
-    return _cut("\n".join(lines), MESSAGE_LIMIT - len(tail)) + tail
+    return _cut("\n".join(lines), MESSAGE_LIMIT - telegram_length(tail)) + tail

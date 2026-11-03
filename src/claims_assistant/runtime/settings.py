@@ -1,3 +1,4 @@
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -299,6 +300,8 @@ def _number(values: dict, key: str, default, *, integer: bool = False, minimum):
     except ValueError:
         kind = "целое число" if integer else "число"
         raise ConfigurationError(f"{key}: нужно {kind}.") from None
-    if number < minimum or (not integer and number != number):
+    if not integer and not math.isfinite(number):
+        raise ConfigurationError(f"{key}: нужно конечное число.")
+    if number < minimum:
         raise ConfigurationError(f"{key}: значение не меньше {minimum:g}.")
     return number
