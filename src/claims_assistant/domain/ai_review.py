@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
-from claims_assistant.domain.ai_context import RecommendationContext
+from claims_assistant.domain.ai_context import CommentLine, RecommendationContext
 
 ANSWER_SCHEMA_VERSION = "1"
 MAX_EXPLANATION_CHARS = 1200
@@ -40,6 +40,10 @@ _PROMISE_FIELDS = {"interaction_id", "due_on", "quote"}
 _NUMBER = re.compile(r"-?\d[\d  ]*(?:[.,]\d+)?")
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _RU_DATE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b")
+# «оплатить 15.09.» in a comment: a date without its year, never a part of «15.09.2026».
+# The closing dot is required: without it «3.06 млн ₽» and «созвон в 12.05» were dates,
+# and a promise of 3 June or 12 May found itself in the comment (review G2 of the fix).
+_SHORT_DATE = re.compile(r"(?<![\d.,])(\d{1,2})\.(\d{2})\.(?!\d)")
 _MONTHS = (
     "января", "февраля", "марта", "апреля", "мая", "июня",
     "июля", "августа", "сентября", "октября", "ноября", "декабря",
@@ -63,8 +67,99 @@ _SCALE = re.compile(
 _SCALES = (Decimal(1000), Decimal(1_000_000), Decimal(1_000_000_000))
 
 # The priority is the rules' answer; naming another one or asking to change it is a reason
-# to reject, whatever the wording around it.
-_PRIORITY_WORDS = {"critical": "критичн", "high": "высок", "medium": "средн", "low": "низк"}
+# to reject, whatever the wording around it. Any form of «высокий», «средний», «низкий» or
+# «критический» that disagrees with the given priority is a level, wherever it stands and
+# inside a word too («высокоприоритетный», «высоко», «низок»). Three rounds of review G2
+# taught a word only near «приоритет», «риск» or a pronoun to count, and each round found a
+# wording without one: «Приоритет низкий. На деле — высокий.», «Значимость дела высокая».
+# So every level counts, and only the narrow cases below do not; a legit phrase missed by
+# them costs an answer, a missed level misleads the specialist.
+_LEVEL_WORDS = (
+    (re.compile(r"критич"), frozenset({"critical"})),
+    # «невысокий» is a level too, the one it agrees with: «риск невысокий» at medium or low.
+    (re.compile(r"^невысок"), frozenset({"medium", "low"})),
+    (re.compile(r"высок"), frozenset({"high"})),
+    (re.compile(r"средн"), frozenset({"medium"})),
+    (re.compile(r"низк|^низок$"), frozenset({"low"})),
+)
+# Not a level: the adverb in «критически важно» and the adverb «в среднем» («в среднем
+# платежи редкие»). «В среднем» followed by a noun in the prepositional — «в среднем
+# диапазоне», «в среднем положении» — is the adjective, and a level; a comparative after
+# it («в среднем более 90 дней») ends in «-е» too and is still the adverb. Right after
+# «приоритет» or «риск» it is the level once more: «Приоритет в среднем.»
+_NOT_A_LEVEL = frozenset({"критически"})
+_ON_AVERAGE = ("в", "среднем")
+_PREPOSITIONAL = re.compile(r"(?:е|ии)$")
+_COMPARATIVE = re.compile(r"(?:ее|ше|же|че|ще)$|^вдвое$|^втрое$")
+_AVERAGED = re.compile(r"приоритет|риск")
+# Nor a level adjective of a metric of the debtor: «средняя выручка», «при низкой
+# выручке», «нагрузка высокая», «нагрузка — высокая». A word right after the adjective,
+# a space between, is the one it describes, and only it: «из-за выручки высокие риски» is
+# of the risks. Before the noun the adjective stands next to it, a space or a dash
+# between, closes the clause («нагрузка высокая.», not «оборот — высокий приоритет»), and
+# the noun is a nominative that cannot be a genitive or follow a preposition: «Важность
+# из-за нагрузки высокая», «Риски из-за нагрузки высокие» name the importance and the
+# risks; «Ставки высокие.» is cut as well, the safe side. Nor after «как» or «и», where
+# the adjective is shared: «Важность, как и выручка — высокая». Both agree in gender,
+# number and case. A closed list of metrics — extend it with evidence.
+# Cases as «case.number»; an ending stands for every case it may be.
+_ADJECTIVE_ENDINGS = {
+    "f": {
+        "ая": {"nom.sg"}, "яя": {"nom.sg"}, "а": {"nom.sg"}, "ую": {"acc.sg"}, "юю": {"acc.sg"},
+        "ой": {"gen.sg", "dat.sg", "ins.sg", "prep.sg"}, "ою": {"ins.sg"},
+        "ей": {"gen.sg", "dat.sg", "ins.sg", "prep.sg"}, "ею": {"ins.sg"},
+    },
+    "m": {
+        "ий": {"nom.sg", "acc.sg"}, "": {"nom.sg"}, "ого": {"gen.sg"}, "его": {"gen.sg"},
+        "ому": {"dat.sg"}, "ему": {"dat.sg"}, "им": {"ins.sg"}, "ом": {"prep.sg"},
+        "ем": {"prep.sg"},
+    },
+}  # fmt: skip
+_PLURAL_ENDINGS = {
+    "ие": {"nom.pl", "acc.pl"}, "и": {"nom.pl"}, "их": {"gen.pl", "prep.pl", "acc.pl"},
+    "им": {"dat.pl"}, "ими": {"ins.pl"},
+}  # fmt: skip
+_ADJECTIVE = re.compile(r"(?:не)?(?:высок|низк|средн)(\w*)")
+_FIRST = {
+    "а": {"nom.sg"}, "и": {"gen.sg", "nom.pl", "acc.pl"}, "е": {"dat.sg", "prep.sg"},
+    "у": {"acc.sg"}, "ой": {"ins.sg"}, "ою": {"ins.sg"},
+    "ам": {"dat.pl"}, "ами": {"ins.pl"}, "ах": {"prep.pl"},
+}  # fmt: skip
+_SOFT_FIRST = {
+    "я": {"nom.sg"}, "и": {"gen.sg", "nom.pl", "acc.pl"}, "е": {"dat.sg", "prep.sg"},
+    "ю": {"acc.sg"}, "ей": {"ins.sg", "gen.pl"}, "ею": {"ins.sg"},
+    "ям": {"dat.pl"}, "ями": {"ins.pl"}, "ях": {"prep.pl"},
+}  # fmt: skip
+_THIRD = {
+    "ь": {"nom.sg", "acc.sg"}, "и": {"gen.sg", "dat.sg", "prep.sg", "nom.pl", "acc.pl"},
+    "ью": {"ins.sg"}, "ей": {"gen.pl"}, "ям": {"dat.pl"}, "ями": {"ins.pl"}, "ях": {"prep.pl"},
+}  # fmt: skip
+_SECOND = {
+    "": {"nom.sg", "acc.sg"}, "а": {"gen.sg"}, "у": {"dat.sg"}, "ом": {"ins.sg"},
+    "е": {"prep.sg"}, "ы": {"nom.pl", "acc.pl"}, "ов": {"gen.pl"},
+    "ам": {"dat.pl"}, "ами": {"ins.pl"}, "ах": {"prep.pl"},
+}  # fmt: skip
+_METRICS = {  # stem: gender, endings, the genitive plural with its fleeting vowel
+    "нагрузк": ("f", _FIRST, "нагрузок"),
+    "выручк": ("f", _FIRST, "выручек"),
+    "ставк": ("f", _FIRST, "ставок"),
+    "дол": ("f", _SOFT_FIRST, None),
+    "прибыл": ("f", _THIRD, None),
+    "стоимост": ("f", _THIRD, None),
+    "активност": ("f", _THIRD, None),
+    "рентабельност": ("f", _THIRD, None),
+    "ликвидност": ("f", _THIRD, None),
+    "платежеспособност": ("f", _THIRD, None),
+    "оборот": ("m", _SECOND, None),
+}
+_ATTRIBUTIVE = re.compile(r"[ \t\u00a0]+")
+_PREDICATIVE = re.compile(r"[ \t\u00a0]*[—–-]?[ \t\u00a0]*")
+_CLAUSE_END = re.compile(r"[ \t\u00a0]*(?:[.,;:!?)…]|$)")
+_NOMINATIVE = frozenset({"nom.sg", "nom.pl"})
+# A noun after one of these is not nominative; «как», «и» share the adjective.
+_NOT_A_SUBJECT = frozenset(
+    {"в", "во", "на", "за", "про", "через", "под", "над", "о", "об", "сквозь", "как", "и"}
+)
 _PRIORITY_CLAIMS = (
     "приоритет должен",
     "снизить приоритет",
@@ -152,6 +247,32 @@ def _dates(text: str) -> set[date]:
             found.add(date(year, month, day))
         except ValueError:
             continue
+    return found
+
+
+def _ahead(day: int, month: int, year: int | None, written_on: date) -> date | None:
+    """A date as a comment means it: without a year, the first one on or after the day
+    the comment was written — «оплатят 15.01.» in December is January of the next year."""
+    try:
+        if year is not None:
+            return date(year, month, day)
+        found = date(written_on.year, month, day)
+        return found if found >= written_on else date(written_on.year + 1, month, day)
+    except ValueError:
+        return None
+
+
+def _comment_dates(comment: CommentLine) -> set[date]:
+    """Every date of a comment, as people write them: «15.09.2026», «15 сентября 2026
+    года», «15 сентября» and «15.09.» — a promise is checked against these."""
+    found = _dates(comment.text)
+    written = [
+        *_word_dates(comment.text),
+        *((int(day), int(month), None) for day, month in _SHORT_DATE.findall(comment.text)),
+    ]
+    for day, month, year in written:
+        if (known := _ahead(day, month, year, comment.happened_on)) is not None:
+            found.add(known)
     return found
 
 
@@ -257,28 +378,45 @@ def _rounds_to(known: Decimal, value: Decimal) -> bool:
 
 
 def _context_text(context: RecommendationContext) -> str:
-    """Everything the model was given, as one text: what may be quoted back."""
+    """Everything the model was given, as one text: what may be quoted back.
+
+    Each field is a line of its own: a number may have spaces inside («1 234»), so a
+    comment ending in «50000» joined by a space to the ОГРН after it read as one number,
+    and «2025 2025» of two record IDs as 20252025. The years of a period go apart, as
+    the period itself is cut out as dates: «выручка за 2025 год» retells it.
+    """
     parts = [
         context.next_step,
         context.analysis_date.isoformat(),
-        *(f"{value.title} {value.value} {value.observed_on or ''}" for value in context.values),
+        *(f for value in context.values for f in (value.title, value.value, value.observed_on)),
         *(
-            f"{fact.title} {fact.value} {fact.observed_on or ''} "
-            f"{fact.period or ''} {fact.unit or ''}"
+            f
             for fact in context.facts
+            for f in (
+                fact.title,
+                fact.value,
+                fact.observed_on,
+                fact.period,
+                *(year for year, _, _ in _ISO_DATE.findall(fact.period or "")),
+                fact.unit,
+                fact.record_id,
+            )
         ),
         *(
-            f"{signal.reason} {signal.value or ''} {signal.observed_on or ''}"
+            f
             for signal in context.signals
+            for f in (signal.reason, signal.value, signal.observed_on)
         ),
         *(
-            f"{comment.interaction_id} {comment.happened_on.isoformat()} {comment.text}"
+            f
             for comment in context.comments
+            for f in (comment.interaction_id, comment.happened_on, comment.text)
         ),
-        *(fact.record_id or "" for fact in context.facts),
         *context.missing_data,
+        # Told to the model so that it can say what is missing (instruction, rule 7).
+        context.comments_omitted or None,
     ]
-    return " ".join(str(part) for part in parts)
+    return "\n".join(str(part) for part in parts if part is not None)
 
 
 def _field(data: dict[str, Any], key: str, kind: type, required: bool = True) -> Any:
@@ -336,11 +474,13 @@ def _promises(raw: list[Any], context: RecommendationContext) -> tuple[Promise, 
         except ValueError:
             return _reject(RejectionCode.PROMISE_WITHOUT_DATE, interaction_id)
         # The date must be in the comment the promise points at, not invented next to it.
-        if day not in _dates(comment.text):
+        if day not in _comment_dates(comment):
             return _reject(RejectionCode.PROMISE_NOT_IN_COMMENT, interaction_id)
         if quote is not None and quote not in comment.text:
             return _reject(RejectionCode.PROMISE_NOT_IN_COMMENT, interaction_id)
-        promises.append(Promise(interaction_id=interaction_id, due_on=day, quote=quote))
+        # The report names the customer's own record, not the masked one the model saw.
+        record = comment.unmasked_id or interaction_id
+        promises.append(Promise(interaction_id=record, due_on=day, quote=quote))
     return tuple(promises)
 
 
@@ -353,7 +493,80 @@ def _priority_conflict(text: str, priority: str) -> bool:
     lowered = text.lower()
     if any(claim in lowered for claim in _PRIORITY_CLAIMS):
         return True
-    return any(word in lowered for name, word in _PRIORITY_WORDS.items() if name != priority)
+    lowered = lowered.replace("ё", "е")
+    words = list(re.finditer(r"\w+", lowered))
+    for i, word in enumerate(words):
+        agrees = _level(word[0])
+        if agrees is None or priority in agrees:
+            continue
+        if _on_average(lowered, words, i) or _of_a_metric(lowered, words, i):
+            continue
+        return True
+    return False
+
+
+def _level(word: str) -> frozenset[str] | None:
+    """The priorities a word agrees with when it names a level, None when it names none."""
+    if word in _NOT_A_LEVEL:
+        return None
+    return next((agrees for root, agrees in _LEVEL_WORDS if root.search(word)), None)
+
+
+def _on_average(text: str, words: list[re.Match[str]], i: int) -> bool:
+    """«среднем» is the adverb «в среднем», not the adjective «в среднем диапазоне»."""
+    if i == 0 or (words[i - 1][0], words[i][0]) != _ON_AVERAGE:
+        return False
+    if i >= 2 and _AVERAGED.match(words[i - 2][0]):
+        return False
+    after = _next(text, words, i)
+    if after is None:
+        return True
+    return not _PREPOSITIONAL.search(after) or bool(_COMPARATIVE.search(after))
+
+
+def _of_a_metric(text: str, words: list[re.Match[str]], i: int) -> bool:
+    """The level adjective describes a metric noun: the word right after it, or the
+    nominative right before it when the adjective closes the clause («нагрузка высокая»)."""
+    level = words[i]
+    found = _ADJECTIVE.fullmatch("низк" if level[0] == "низок" else level[0])
+    if found is None:
+        return False
+    after = _next(text, words, i)
+    if after is not None:
+        gender, cases = _cases(after)
+        return bool(cases & _agreeing(gender, found[1]))
+    if i == 0 or not _PREDICATIVE.fullmatch(text, words[i - 1].end(), level.start()):
+        return False
+    if not _CLAUSE_END.match(text, level.end()):
+        return False
+    if i >= 2 and words[i - 2][0] in _NOT_A_SUBJECT:
+        return False
+    gender, cases = _cases(words[i - 1][0])
+    return "gen.sg" not in cases and bool(cases & _agreeing(gender, found[1]) & _NOMINATIVE)
+
+
+def _next(text: str, words: list[re.Match[str]], i: int) -> str | None:
+    """The word right after word ``i`` when only a space stands between, else None."""
+    if i + 1 < len(words) and _ATTRIBUTIVE.fullmatch(text, words[i].end(), words[i + 1].start()):
+        return words[i + 1][0]
+    return None
+
+
+def _cases(noun: str) -> tuple[str, set[str]]:
+    """The gender of a metric noun and the cases its form may be in; empty if no metric."""
+    for stem, (gender, endings, plural_genitive) in _METRICS.items():
+        if noun == plural_genitive:
+            return gender, {"gen.pl"}
+        if noun.startswith(stem):
+            return gender, endings.get(noun[len(stem) :], set())
+    return "", set()
+
+
+def _agreeing(gender: str, ending: str) -> set[str]:
+    """The cases an adjective ending may be in for a noun of that gender."""
+    return _ADJECTIVE_ENDINGS.get(gender, {}).get(ending, set()) | _PLURAL_ENDINGS.get(
+        ending, set()
+    )
 
 
 def review_answer(payload: object, context: RecommendationContext) -> Explanation | Rejected:
@@ -403,7 +616,7 @@ def review_answer(payload: object, context: RecommendationContext) -> Explanatio
     ids = _id_pattern(internal | {comment.interaction_id for comment in context.comments})
     source = _strip_ids(_context_text(context), ids)
     text_only = _strip_ids(text, ids)
-    known_dates = _dates(source)
+    known_dates = _dates(source).union(*(_comment_dates(c) for c in context.comments))
     for day in _dates(text_only) - known_dates:
         return _reject(RejectionCode.NEW_DATE, day.isoformat())
     for day, month, year in _word_dates(text_only):
