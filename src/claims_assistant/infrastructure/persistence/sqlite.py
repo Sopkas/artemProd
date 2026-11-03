@@ -6,7 +6,8 @@ returning an empty result. Migrations run on open, so a fresh file is ready to u
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -163,6 +164,21 @@ class SqliteAnalysisRepository:
 
     # --- blocking work, executed in a worker thread ---
 
+    @contextmanager
+    def _locked(self) -> Iterator[Connection]:
+        """A transaction that holds the write lock from its first statement.
+
+        pysqlite sends its own BEGIN only before the first INSERT/UPDATE/DELETE, so the
+        read that decides a write (is the run still a draft, still expired, is the file
+        new) would run without a lock and another writer could change the row in
+        between: a file stored in a package already queued, a revived run stripped of
+        its files (review g6). ``BEGIN IMMEDIATE`` makes such a writer wait on
+        busy_timeout instead, as in the AI spend and watch-list stores.
+        """
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            yield connection
+
     def _create_run(self, owner_id: int, analysis_date: date, mode: DataMode) -> AnalysisRun:
         now = self._clock()
         run = AnalysisRun(
@@ -206,7 +222,7 @@ class SqliteAnalysisRepository:
             return tuple(self._to_run(connection, row) for row in rows)
 
     def _add_file(self, owner_id: int, run_id: str, file: NewFile) -> UploadedFile:
-        with self._engine.begin() as connection:
+        with self._locked() as connection:
             run = self._load_run(connection, owner_id, run_id)
             if run.status != RunStatus.DRAFT:
                 raise RunLocked(run.status)
@@ -255,16 +271,19 @@ class SqliteAnalysisRepository:
             return stored
 
     def _transition(self, owner_id: int, run_id: str, target: RunStatus) -> AnalysisRun:
-        with self._engine.begin() as connection:
+        with self._locked() as connection:
             run = self._load_run(connection, owner_id, run_id)
             if not can_transition(run.status, target):
                 raise InvalidTransition(run.status, target)
             now = self._clock()
-            connection.execute(
+            changed = connection.execute(
                 analysis_runs.update()
                 .where(analysis_runs.c.id == run.id, analysis_runs.c.status == run.status.value)
                 .values(status=target.value, updated_at=_stamp(now))
-            )
+            ).rowcount
+            if changed != 1:
+                # Cannot happen under the lock; if it ever does, the state is not ours.
+                raise InvalidTransition(run.status, target)
             return self._load_run(connection, owner_id, run_id)
 
     def _claim_next(self) -> AnalysisRun | None:
@@ -365,9 +384,10 @@ class SqliteAnalysisRepository:
         return row is not None
 
     def _delete_run(self, run_id: str, before: datetime) -> bool:
-        with self._engine.begin() as connection:
-            # The same condition as the listing, inside the transaction: a run that came
-            # back to life between the sweep's listing and now is not deleted.
+        with self._locked() as connection:
+            # The same condition as the listing, under the write lock: a run that came
+            # back to life between the sweep's listing and now is not deleted, and one
+            # cannot come back to life between this check and the deletes below.
             condition = self._expired_condition(run_id, before)
             if connection.execute(select(analysis_runs.c.id).where(condition)).first() is None:
                 return False

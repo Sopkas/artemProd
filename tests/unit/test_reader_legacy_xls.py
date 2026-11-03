@@ -54,8 +54,9 @@ def test_a_real_formula_cannot_be_seen_in_this_format(data):
     """The limitation, written down: .xls carries the value, not the formula.
 
     xlrd hands over what the file stores, so a formula cell arrives as an ordinary value
-    and the «замените формулу на значение» rule cannot be enforced here. Callers warn the
-    user instead (docs/data-contracts.md).
+    and the «замените формулу на значение» rule cannot be enforced here. No caller warns
+    the user about this today, so such a formula passes silently (docs/data-contracts.md);
+    whether to warn is a product decision.
     """
     formula_cell = rows(data)[4][0]
     assert not isinstance(formula_cell, FormulaCell)
